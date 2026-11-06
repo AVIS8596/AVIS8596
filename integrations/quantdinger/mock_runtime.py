@@ -48,7 +48,9 @@ def run(
     initial_cash: float = 100_000.0,
     commission: float = 0.0,
     slippage: float = 0.0,
+    start: str | None = None,
 ) -> dict:
+    """start: 回测开始日期; 之前的 K 线只作为预热历史, 不调用 handle_data (与 QuantDinger 的 warmup 一致)。"""
     symbol_holder: dict = {}
     g = SimpleNamespace()
     state = {"i": 0, "cash": initial_cash, "pos": None, "orders": [], "exit_reason": {}, "prot": None}
@@ -162,7 +164,8 @@ def run(
         ctx.portfolio.total_value = state["cash"] + amount * c[i]
         equity_curve.append(ctx.portfolio.total_value)
         weights.append(amount * c[i] / ctx.portfolio.total_value if ctx.portfolio.total_value > 0 else 0.0)
-        ns["handle_data"](ctx, None)
+        if start is None or t >= pd.Timestamp(start):
+            ns["handle_data"](ctx, None)
 
     return {
         "fills": fills,
