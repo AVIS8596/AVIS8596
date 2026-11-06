@@ -113,6 +113,7 @@ def run(
         return price
 
     equity_curve = []
+    weights = []
     o, h, l, c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     for i in range(len(df)):
         state["i"] = i
@@ -160,11 +161,13 @@ def run(
         amount = state["pos"].amount if state["pos"] else 0.0
         ctx.portfolio.total_value = state["cash"] + amount * c[i]
         equity_curve.append(ctx.portfolio.total_value)
+        weights.append(amount * c[i] / ctx.portfolio.total_value if ctx.portfolio.total_value > 0 else 0.0)
         ns["handle_data"](ctx, None)
 
     return {
         "fills": fills,
         "equity": pd.Series(equity_curve, index=df.index),
+        "weight": pd.Series(weights, index=df.index),
         "metadata": ctx.meta,
         "symbol": symbol_holder.get("symbol"),
         "log": log.lines,
