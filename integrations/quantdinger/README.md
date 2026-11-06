@@ -43,11 +43,23 @@
 为什么不用平台自带的 `trailing_stop_pct`: QuantDinger 的移动止损是"入场后最高价 × (1 − 固定百分比)",
 比 quantbot 的 ATR 吊灯止损紧得多。在合成数据上直接套用会让收益从 +5.9% 变成 −10.3%, 所以改为在策略里自己计算 ATR 移动止损。
 
-## 离线检查
+## 用 QuantDinger 自身引擎验证 (v5.6.1)
 
-运行 QuantDinger 自身的编译器需要部署它的后端, 本仓库没有这样做。
+用 QuantDinger 后端的 `compile_strategy_v2` 和 `StrategyV2BacktestRunner` 直接运行了本策略
+(合成数据, 成交量放大 1000 倍以免触发其成交量上限):
+
+- 编译通过; manifest: `cta`、`Crypto:BTC/USDT@spot`、驱动周期 `1d`、预热 250、`direction_mode=long_only`、不允许杠杆。
+- 关闭风控时, 每笔成交日期与 quantbot `donchian` 完全一致 (三组数据共 98 笔)。
+- 默认参数下, 每笔成交的日期与原因与 `mock_runtime.py` 完全一致, 收益也一致。
+- 计入 0.1% 手续费 + 0.05% 滑点: +11.5% / −9.3% / +13.4% (种子 42 / 7 / 123)。
+
+注意: QuantDinger 回测会按 K 线成交量限制单笔成交, 超出部分顺延到下一根 K 线 (账本状态 `partial`)。
+资金量相对标的成交量较大时, 出场可能分两天完成。
+
+## 离线检查 (不依赖 QuantDinger)
+
 `mock_runtime.py` 按其文档实现了本策略用到的最小 API 子集 (次日开盘成交、按比例止损、离场原因),
-`tests/test_quantdinger_port.py` 用它检查:
+上面的验证表明它与 QuantDinger 引擎对本策略的结果一致。`tests/test_quantdinger_port.py` 用它检查:
 
 - 源码满足编译器的静态规则 (顶层只有字面量/函数、允许的 import、`initialize` 不读参数、只调用已注册的全局 API、
   `@param` 默认值与代码回退值一致);
@@ -62,4 +74,4 @@
 | 7 | −7.9%, 最大回撤 13.2% | −10.5%, 最大回撤 12.9% |
 | 123 | +15.3%, 最大回撤 9.0% | +11.3%, 最大回撤 9.0% |
 
-模拟器不是 QuantDinger 官方运行时: 最终请以 QuantDinger 的验证和回测结果为准。
+模拟器不是 QuantDinger 官方运行时; QuantDinger 升级后请重新在其中验证。
