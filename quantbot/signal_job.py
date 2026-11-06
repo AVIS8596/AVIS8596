@@ -173,9 +173,13 @@ def format_message(st: PaperState, events: list[Event], comps: pd.DataFrame, str
     return "\n".join(lines)
 
 
+def default_state_path(symbol: str) -> str:
+    return f"~/quantbot-data/state_{symbol.replace('/', '').upper()}.json"
+
+
 def run_signal_job(
     symbol: str = "BTCUSDT",
-    state_path: str = "~/quantbot-data/state_BTCUSDT.json",
+    state_path: str | None = None,
     env_path: str | None = "~/quantbot-data/telegram.env",
     capital: float = 10_000.0,
     notify: bool = True,
@@ -183,8 +187,12 @@ def run_signal_job(
     sender: Callable[[str, str, str], None] | None = None,
     now: datetime | None = None,
 ) -> str | None:
-    """处理新收盘的日线并推送。返回推送的文本; 没有新日线时返回 None。"""
-    state_path = os.path.expanduser(state_path)
+    """处理新收盘的日线并推送。返回推送的文本; 没有新日线时返回 None。
+
+    state_path 默认为 ~/quantbot-data/state_<SYMBOL>.json, 每个币种独立记账。
+    """
+    symbol = symbol.replace("/", "").upper()
+    state_path = os.path.expanduser(state_path or default_state_path(symbol))
     env = load_env_file(os.path.expanduser(env_path)) if env_path else {}
     fetcher = fetcher or fetch_binance
     sender = sender or send_telegram
@@ -200,6 +208,8 @@ def run_signal_job(
     targets = comps["target"]
 
     st = load_state(state_path) or PaperState.new(symbol, capital)
+    if st.symbol != symbol:
+        raise RuntimeError(f"状态文件 {state_path} 属于 {st.symbol}, 不是 {symbol}; 请为每个币种使用单独的 --state 文件")
     if st.last_bar is None:
         todo = [df.index[-1]]  # 第一次运行: 只处理最近一根已收盘日线
     else:

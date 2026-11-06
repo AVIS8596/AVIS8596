@@ -150,7 +150,9 @@ def cmd_signal(a) -> None:
     import time
 
     from .notify import load_env_file, send_telegram
-    from .signal_job import run_signal_job
+    from .signal_job import default_state_path, run_signal_job
+
+    a.state = a.state or default_state_path(a.symbol)
 
     if a.no_push:
         import tempfile
@@ -252,7 +254,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("signal", help="每日信号: 处理新收盘日线, 模拟记账并推送 Telegram (不下单)")
     p.add_argument("--symbol", default="BTCUSDT")
-    p.add_argument("--state", default="~/quantbot-data/state_BTCUSDT.json")
+    p.add_argument("--state", default=None, help="状态文件, 默认 ~/quantbot-data/state_<SYMBOL>.json")
     p.add_argument("--env", default="~/quantbot-data/telegram.env", help="Telegram 配置文件")
     p.add_argument("--capital", type=float, default=10_000.0, help="模拟账户初始资金 (首次运行时生效)")
     p.add_argument("--no-push", action="store_true", help="只打印不推送, 也不保存状态")

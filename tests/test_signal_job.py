@@ -94,3 +94,14 @@ def test_load_env_file(tmp_path):
     p.write_text("# comment\nTELEGRAM_BOT_TOKEN=123:abc\nTELEGRAM_CHAT_ID='42'\n")
     env = load_env_file(str(p))
     assert env["TELEGRAM_BOT_TOKEN"] == "123:abc" and env["TELEGRAM_CHAT_ID"] == "42"
+
+
+def test_state_files_are_per_symbol_and_guarded(tmp_path, monkeypatch):
+    from quantbot.signal_job import default_state_path
+
+    assert default_state_path("eth/usdt").endswith("state_ETHUSDT.json")
+    df = generate_synthetic(n=300, seed=8)
+    state = str(tmp_path / "shared.json")
+    run_signal_job("BTCUSDT", state_path=state, env_path=None, fetcher=_fake_fetcher(df), sender=lambda *a: None)
+    with pytest.raises(RuntimeError, match="属于 BTCUSDT"):
+        run_signal_job("ETHUSDT", state_path=state, env_path=None, fetcher=_fake_fetcher(df), sender=lambda *a: None)
