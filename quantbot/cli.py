@@ -187,6 +187,45 @@ def cmd_signal(a) -> None:
         raise
 
 
+def cmd_live(a) -> None:
+    import os
+
+    from .live import CcxtSpot, LiveConfig, flatten, run_live
+    from .notify import load_env_file
+
+    if a.mainnet and not a.i_understand_real_money:
+        raise SystemExit("真实资金需要同时加上 --i-understand-real-money")
+    net = "mainnet" if a.mainnet else "testnet"
+    pair = a.symbol.replace("/", "").upper()
+    keys_path = os.path.expanduser(a.keys or f"~/quantbot-data/binance-{net}.env")
+    keys = load_env_file(keys_path)
+    key, secret = keys.get("BINANCE_API_KEY", ""), keys.get("BINANCE_API_SECRET", "")
+    if not key or not secret:
+        raise SystemExit(f"请在 {keys_path} 中写入 BINANCE_API_KEY=... 和 BINANCE_API_SECRET=...")
+    cfg = LiveConfig(
+        symbol=a.symbol.upper(), venue=f"binance-{net}", capital_cap=a.cap, max_order_usdt=a.max_order,
+        stop_loss=a.stop_loss or None, dry_run=a.dry_run,
+        state_path=a.state or f"~/quantbot-data/live_{pair}_{net}.json",
+    )
+    ex = CcxtSpot(cfg.symbol, key, secret, testnet=not a.mainnet)
+    if a.flatten:
+        print(flatten(cfg, ex))
+        return
+    if a.dry_run:  # 演练使用临时状态文件, 不影响正式状态
+        import shutil
+        import tempfile
+
+        real = os.path.expanduser(cfg.state_path)
+        with tempfile.TemporaryDirectory() as d:
+            cfg.state_path = os.path.join(d, "live.json")
+            if os.path.exists(real):
+                shutil.copy(real, cfg.state_path)
+            text = run_live(cfg, ex, a.env)
+    else:
+        text = run_live(cfg, ex, a.env)
+    print(text or "没有新的已收盘日线, 对账正常。")
+
+
 def cmd_telegram_setup(a) -> None:
     import os
 
@@ -263,6 +302,20 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("telegram-setup", help="查找聊天 ID 并发送测试消息")
     p.add_argument("--env", default="~/quantbot-data/telegram.env")
     p.set_defaults(func=cmd_telegram_setup)
+
+    p = sub.add_parser("live", help="自动交易 (默认币安测试网, 假钱)")
+    p.add_argument("--symbol", default="BTC/USDT")
+    p.add_argument("--cap", type=float, default=500.0, help="机器人最多管理的 USDT (首次运行时生效)")
+    p.add_argument("--max-order", type=float, default=500.0, help="单笔下单金额上限 USDT")
+    p.add_argument("--stop-loss", type=float, default=0.20, help="交易所止损幅度, 0 表示不挂止损")
+    p.add_argument("--keys", default=None, help="API Key 文件, 默认 ~/quantbot-data/binance-testnet.env")
+    p.add_argument("--env", default="~/quantbot-data/telegram.env", help="Telegram 配置文件")
+    p.add_argument("--state", default=None)
+    p.add_argument("--dry-run", action="store_true", help="演练: 只计算和推送, 不下单")
+    p.add_argument("--flatten", action="store_true", help="撤销止损单并卖出机器人持有的全部币")
+    p.add_argument("--mainnet", action="store_true", help="连接真实币安账户 (真钱)")
+    p.add_argument("--i-understand-real-money", action="store_true", help="与 --mainnet 一起使用, 确认使用真钱")
+    p.set_defaults(func=cmd_live)
 
     a = parser.parse_args(argv)
     logging.basicConfig(

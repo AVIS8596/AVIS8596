@@ -147,3 +147,22 @@ python -m quantbot signal --no-push        # 预览今天的信号, 不推送、
 python -m quantbot signal                  # 正式运行 (配合 cron 每小时运行一次即可)
 # crontab: 7 * * * * cd ~/quantbot && ~/quantbot-venv/bin/python -m quantbot signal >> ~/quantbot-data/signal.log 2>&1
 ```
+
+## 自动交易 (默认币安测试网)
+
+`python -m quantbot live` 用 `trend_vol` 策略自动交易现货, 默认连接**币安测试网 (假钱)**。
+每次运行先对账, 有新收盘日线时按目标仓位用市价单调仓, 并在交易所挂 20% 的保护性止损单 (每天按最新收盘价重挂)。
+
+安全规则: 机器人只管理不超过 `--cap` (默认 500) USDT; 单笔不超过 `--max-order`; 只卖自己买入的币;
+交易所余额与记录不一致时停机报警; `~/quantbot-data/STOP` 文件存在时不下新单; `--flatten` 一键平仓;
+真实资金必须同时加 `--mainnet --i-understand-real-money`。止损幅度的依据见 `research/RESULTS_STOPS.md`。
+
+```bash
+# ~/quantbot-data/binance-testnet.env (权限 600)
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+
+python -m quantbot live --dry-run      # 演练: 只计算和推送, 不下单, 不改状态
+python -m quantbot live                # 测试网自动交易 (cron 每小时一次)
+python -m quantbot live --flatten      # 应急: 撤止损单并卖出机器人持有的全部币
+```
