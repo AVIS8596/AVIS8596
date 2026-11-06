@@ -41,7 +41,14 @@ def parse_params(source: str) -> dict:
     return out
 
 
-def run(source: str, df: pd.DataFrame, params: dict | None = None, initial_cash: float = 100_000.0) -> dict:
+def run(
+    source: str,
+    df: pd.DataFrame,
+    params: dict | None = None,
+    initial_cash: float = 100_000.0,
+    commission: float = 0.0,
+    slippage: float = 0.0,
+) -> dict:
     symbol_holder: dict = {}
     g = SimpleNamespace()
     state = {"i": 0, "cash": initial_cash, "pos": None, "orders": [], "exit_reason": {}, "prot": None}
@@ -97,9 +104,13 @@ def run(source: str, df: pd.DataFrame, params: dict | None = None, initial_cash:
     exec(compile(source, "<strategy>", "exec"), ns)
     ns["initialize"](ctx)
 
-    def fill(t, qty, price, reason):
-        state["cash"] -= qty * price
-        fills.append({"time": t, "qty": qty, "price": price, "reason": reason})
+    def fill(t, qty, raw_price, reason):
+        # QuantDinger: 成交价 = 参考价 × (1 ± 滑点), 手续费 = 成交额 × 费率
+        price = raw_price * (1 + slippage if qty > 0 else 1 - slippage)
+        fee = abs(qty * price) * commission
+        state["cash"] -= qty * price + fee
+        fills.append({"time": t, "qty": qty, "price": price, "fee": fee, "reason": reason})
+        return price
 
     equity_curve = []
     o, h, l, c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
@@ -110,16 +121,19 @@ def run(source: str, df: pd.DataFrame, params: dict | None = None, initial_cash:
         for sym, pct, reason, prot in state["orders"]:
             cur = state["pos"].amount if state["pos"] else 0.0
             equity = state["cash"] + cur * o[i]
-            target = equity * pct / o[i]
+            target_value = equity * pct
+            if target_value > 0:
+                target_value /= (1 + slippage) * (1 + commission)
+            target = target_value / o[i]
             delta = target - cur
             if abs(delta) > 1e-12:
-                fill(t, delta, o[i], reason)
+                px = fill(t, delta, o[i], reason)
                 if cur == 0 and target > 0:
-                    state["pos"] = _Position(sym, target, o[i])
+                    state["pos"] = _Position(sym, target, px)
                     state["prot"] = {
-                        "stop": o[i] * (1 - prot.get("stop_loss_pct", 0.0)) if prot.get("stop_loss_pct") else None,
+                        "stop": px * (1 - prot.get("stop_loss_pct", 0.0)) if prot.get("stop_loss_pct") else None,
                         "trail_pct": prot.get("trailing_stop_pct", 0.0),
-                        "highest": o[i],
+                        "highest": px,
                     }
                 elif target <= 1e-12:
                     state["pos"], state["prot"] = None, None

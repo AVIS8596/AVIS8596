@@ -8,3 +8,4 @@ dist/
 *.png
 *.state.json
 .env
+data/

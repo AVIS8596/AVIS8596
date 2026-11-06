@@ -103,6 +103,68 @@ def fetch_ccxt(
     return df
 
 
+BINANCE_DATA_URL = "https://data-api.binance.vision/api/v3/klines"
+
+
+def fetch_binance(
+    symbol: str = "BTCUSDT",
+    interval: str = "1d",
+    start: str = "2017-01-01",
+    end: str | None = None,
+    base_url: str = BINANCE_DATA_URL,
+    cache_dir: str | None = None,
+) -> pd.DataFrame:
+    """从 Binance 公开行情接口分页下载现货 K 线 (无需 API Key, 无需 ccxt)。
+
+    只返回已收盘的 K 线。设置 cache_dir 时会把结果缓存为 CSV, 再次调用直接读取。
+    """
+    import json
+    import os
+    import time
+    import urllib.parse
+    import urllib.request
+
+    symbol = symbol.replace("/", "").upper()
+    if cache_dir:
+        path = os.path.join(cache_dir, f"binance_{symbol}_{interval}_{start}_{end or 'latest'}.csv")
+        if os.path.exists(path):
+            return load_csv(path)
+
+    start_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000) if end else None
+    now_ms = int(time.time() * 1000)
+    rows: list = []
+    while True:
+        query = {"symbol": symbol, "interval": interval, "startTime": start_ms, "limit": 1000}
+        if end_ms:
+            query["endTime"] = end_ms
+        url = f"{base_url}?{urllib.parse.urlencode(query)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "quantbot"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            batch = json.loads(resp.read())
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < 1000:
+            break
+        start_ms = batch[-1][0] + 1
+    df = parse_binance_klines(rows, now_ms)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        df.reset_index().to_csv(path, index=False)
+    return df
+
+
+def parse_binance_klines(rows: list, now_ms: int | None = None) -> pd.DataFrame:
+    """解析 Binance K 线数组; 丢弃收盘时间晚于 now_ms 的未完成 K 线。"""
+    if now_ms is not None:
+        rows = [r for r in rows if int(r[6]) < now_ms]
+    df = pd.DataFrame(
+        [r[:6] for r in rows], columns=["timestamp", "open", "high", "low", "close", "volume"]
+    )
+    return normalize(df)
+
+
 def fetch_yfinance(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
     """通过 yfinance 获取股票数据 (需 `pip install yfinance`)。"""
     try:
@@ -121,7 +183,10 @@ def load(source: str, **kwargs) -> pd.DataFrame:
     - "path/to/file.csv"          本地 CSV
     - "ccxt:BTC/USDT"             交易所数据, 可选 exchange= timeframe= limit=
     - "yf:AAPL"                   yfinance 股票数据
+    - "binance:BTCUSDT"           Binance 公开行情 (无需 ccxt), 可选 timeframe=
     """
+    if source.startswith("binance:"):
+        return fetch_binance(source[8:], interval=kwargs.get("timeframe", "1d"))
     if source == "synthetic":
         return generate_synthetic(**{k: v for k, v in kwargs.items() if k in ("n", "seed")})
     if source.startswith("ccxt:"):

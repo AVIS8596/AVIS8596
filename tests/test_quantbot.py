@@ -207,3 +207,17 @@ def test_bot_ignores_repeated_bar(df):
     bot = TradingBot(get_strategy("buy_hold"), broker, Static(df), "X")
     assert len(bot.step()) == 1
     assert bot.step() == []
+
+
+def test_parse_binance_klines_drops_incomplete_bar():
+    from quantbot.data import parse_binance_klines
+
+    day = 86_400_000
+    rows = [
+        [0, "1", "2", "0.5", "1.5", "10", day - 1, "0", 0, "0", "0", "0"],
+        [day, "1.5", "3", "1", "2.5", "20", 2 * day - 1, "0", 0, "0", "0", "0"],
+    ]
+    df = parse_binance_klines(rows, now_ms=day + 5)
+    assert len(df) == 1
+    assert df["close"].iloc[0] == 1.5
+    assert str(df.index[0].date()) == "1970-01-01"
