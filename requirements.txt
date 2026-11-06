@@ -1,0 +1,6 @@
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7   # 可选: 绘图
+# ccxt>=4.0       # 可选: 加密货币交易所数据与实盘
+# yfinance>=0.2   # 可选: 股票数据
+pytest>=7
