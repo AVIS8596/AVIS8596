@@ -97,3 +97,29 @@ def test_drawdown_halt_stops_trading(df):
     assert res["state"].halted
     last = res["fills"][-1]
     assert last["reason"] in ("drawdown_halt_exit", "donchian_long_exit")
+
+
+def test_mock_short_accounting_and_funding_sign():
+    """空头: 价格下跌赚钱; 资金费率为正时空头收钱、多头付钱。"""
+    import pandas as pd
+
+    idx = pd.date_range("2024-01-01", periods=4, freq="D")
+    df = pd.DataFrame({"open": [100, 100, 80, 80], "high": [100, 100, 80, 80],
+                       "low": [100, 100, 80, 80], "close": [100, 100, 80, 80], "volume": 1.0}, index=idx)
+
+    def strat(pct):
+        return (
+            "def initialize(context):\n"
+            "    context.set_universe(['Crypto:X/USDT@swap'])\n"
+            "def handle_data(context, data):\n"
+            f"    order_target_percent('Crypto:X/USDT@swap', {pct}, reason='t')\n"
+        )
+
+    short = mock_runtime.run(strat(-0.5), df, initial_cash=1000)
+    # 第 1 根开盘 100 做空 5 个单位, 收盘 80 时盈利 100
+    assert short["equity"].iloc[-1] == pytest.approx(1100)
+    rate = pd.Series(0.01, index=idx)
+    short_f = mock_runtime.run(strat(-0.5), df, initial_cash=1000, funding=rate)
+    long_f = mock_runtime.run(strat(0.5), df, initial_cash=1000, funding=rate)
+    assert short_f["funding_paid"] < 0 < long_f["funding_paid"]
+    assert short_f["equity"].iloc[-1] > short["equity"].iloc[-1]

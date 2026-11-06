@@ -49,8 +49,14 @@ def run(
     commission: float = 0.0,
     slippage: float = 0.0,
     start: str | None = None,
+    funding: pd.Series | None = None,
 ) -> dict:
-    """start: 回测开始日期; 之前的 K 线只作为预热历史, 不调用 handle_data (与 QuantDinger 的 warmup 一致)。"""
+    """start: 回测开始日期; 之前的 K 线只作为预热历史, 不调用 handle_data (与 QuantDinger 的 warmup 一致)。
+
+    funding: 可选, 按日汇总的永续合约资金费率 (索引为日期, 值为当天各次费率之和)。
+    每天收盘时按 持仓数量 × 收盘价 × 费率 结算: 费率为正时多头支付、空头收取。
+    QuantDinger 回测不计资金费, 与其对比一致性时不要传入。
+    """
     symbol_holder: dict = {}
     g = SimpleNamespace()
     state = {"i": 0, "cash": initial_cash, "pos": None, "orders": [], "exit_reason": {}, "prot": None}
@@ -116,6 +122,8 @@ def run(
 
     equity_curve = []
     weights = []
+    funding_paid = 0.0
+    daily_funding = funding.reindex(df.index.normalize()).fillna(0.0).to_numpy(float) if funding is not None else None
     o, h, l, c = (df[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     for i in range(len(df)):
         state["i"] = i
@@ -131,14 +139,15 @@ def run(
             delta = target - cur
             if abs(delta) > 1e-12:
                 px = fill(t, delta, o[i], reason)
-                if cur == 0 and target > 0:
+                if cur == 0 and abs(target) > 1e-12:
                     state["pos"] = _Position(sym, target, px)
+                    # 本策略集只对多头使用开仓保护
                     state["prot"] = {
                         "stop": px * (1 - prot.get("stop_loss_pct", 0.0)) if prot.get("stop_loss_pct") else None,
                         "trail_pct": prot.get("trailing_stop_pct", 0.0),
                         "highest": px,
-                    }
-                elif target <= 1e-12:
+                    } if target > 0 else None
+                elif abs(target) <= 1e-12:
                     state["pos"], state["prot"] = None, None
                 else:
                     state["pos"].amount = target
@@ -161,6 +170,10 @@ def run(
                 prot["highest"] = max(prot["highest"], h[i])
         # 3. 收盘: 更新权益并调用 handle_data
         amount = state["pos"].amount if state["pos"] else 0.0
+        if daily_funding is not None and amount != 0.0:
+            payment = amount * c[i] * daily_funding[i]
+            state["cash"] -= payment
+            funding_paid += payment
         ctx.portfolio.total_value = state["cash"] + amount * c[i]
         equity_curve.append(ctx.portfolio.total_value)
         weights.append(amount * c[i] / ctx.portfolio.total_value if ctx.portfolio.total_value > 0 else 0.0)
@@ -171,6 +184,7 @@ def run(
         "fills": fills,
         "equity": pd.Series(equity_curve, index=df.index),
         "weight": pd.Series(weights, index=df.index),
+        "funding_paid": funding_paid,
         "metadata": ctx.meta,
         "symbol": symbol_holder.get("symbol"),
         "log": log.lines,
