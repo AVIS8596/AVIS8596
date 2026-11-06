@@ -145,6 +145,75 @@ def cmd_trade(a) -> None:
         print(f"模拟结束: 成交 {len(bot.state.fills)} 笔, 期末权益 {broker.equity({symbol: price}):,.2f}")
 
 
+def cmd_signal(a) -> None:
+    import os
+    import time
+
+    from .notify import load_env_file, send_telegram
+    from .signal_job import run_signal_job
+
+    if a.no_push:
+        import tempfile
+
+        # 预览模式: 用临时状态文件, 不影响真实状态
+        state = os.path.expanduser(a.state)
+        with tempfile.TemporaryDirectory() as d:
+            tmp_state = os.path.join(d, "state.json")
+            if os.path.exists(state):
+                with open(state, encoding="utf-8") as src, open(tmp_state, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+            text = run_signal_job(a.symbol, tmp_state, None, a.capital, notify=False)
+        print(text or "没有新的已收盘日线。")
+        return
+    try:
+        text = run_signal_job(a.symbol, a.state, a.env, a.capital)
+        print(text or "没有新的已收盘日线。")
+    except Exception as exc:
+        # 报警推送: 同一状态文件 6 小时内最多报一次, 避免每小时刷屏
+        marker = os.path.expanduser(a.state) + ".alert"
+        recent = os.path.exists(marker) and time.time() - os.path.getmtime(marker) < 6 * 3600
+        if not recent:
+            env = load_env_file(os.path.expanduser(a.env))
+            try:
+                send_telegram(env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", ""),
+                              f"⚠️ quantbot 信号任务失败 ({a.symbol}): {exc}\n下次定时运行会自动重试。")
+                os.makedirs(os.path.dirname(marker) or ".", exist_ok=True)
+                with open(marker, "w") as f:
+                    f.write(str(exc))
+            except Exception:
+                pass
+        raise
+
+
+def cmd_telegram_setup(a) -> None:
+    import os
+
+    from .notify import TelegramError, find_chat_ids, load_env_file, send_telegram
+
+    path = os.path.expanduser(a.env)
+    env = load_env_file(path)
+    token = env.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        raise SystemExit(f"请先在 {path} 中写入 TELEGRAM_BOT_TOKEN=...")
+    chat_id = env.get("TELEGRAM_CHAT_ID", "")
+    if not chat_id:
+        try:
+            chats = find_chat_ids(token)
+        except TelegramError as e:
+            raise SystemExit(str(e)) from None
+        if not chats:
+            raise SystemExit("没有找到聊天。请先在 Telegram 里打开你的机器人, 发送一条消息 (如 /start), 再运行本命令。")
+        chat_id, name = chats[-1]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\nTELEGRAM_CHAT_ID={chat_id}\n")
+        print(f"找到聊天: {name} (ID {chat_id}), 已写入 {path}")
+    try:
+        send_telegram(token, chat_id, "✅ quantbot 已连接。以后每天日线收盘后会在这里推送信号。")
+    except TelegramError as e:
+        raise SystemExit(str(e)) from None
+    print("测试消息已发送, 请查看 Telegram。")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="quantbot", description="量化交易机器人")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -180,6 +249,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--state", help="模拟盘状态持久化 JSON 文件")
     p.set_defaults(func=cmd_trade)
+
+    p = sub.add_parser("signal", help="每日信号: 处理新收盘日线, 模拟记账并推送 Telegram (不下单)")
+    p.add_argument("--symbol", default="BTCUSDT")
+    p.add_argument("--state", default="~/quantbot-data/state_BTCUSDT.json")
+    p.add_argument("--env", default="~/quantbot-data/telegram.env", help="Telegram 配置文件")
+    p.add_argument("--capital", type=float, default=10_000.0, help="模拟账户初始资金 (首次运行时生效)")
+    p.add_argument("--no-push", action="store_true", help="只打印不推送, 也不保存状态")
+    p.set_defaults(func=cmd_signal)
+
+    p = sub.add_parser("telegram-setup", help="查找聊天 ID 并发送测试消息")
+    p.add_argument("--env", default="~/quantbot-data/telegram.env")
+    p.set_defaults(func=cmd_telegram_setup)
 
     a = parser.parse_args(argv)
     logging.basicConfig(

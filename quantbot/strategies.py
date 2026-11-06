@@ -196,6 +196,49 @@ class DonchianBreakout(Strategy):
         )
 
 
+class TrendVolTarget(Strategy):
+    """多周期趋势 + 波动率目标仓位 (只做多), 与 QuantDinger 版
+    integrations/quantdinger/trend_vol_target_v2.py 的目标仓位计算完全一致。
+
+    趋势得分 = 三个回看周期中 "收盘价高于 N 根之前收盘价" 的比例 (0, 1/3, 2/3, 1);
+    目标仓位 = 得分 × min(max_weight, target_vol / 近 vol_window 日年化波动率)。
+    调仓阈值属于执行规则, 在 quantbot.signal_job 中处理。
+    """
+
+    name = "trend_vol"
+    description = "多周期趋势 + 波动率目标仓位 (只做多, 输出连续目标仓位)"
+    default_params = {
+        "short_lookback": 20,
+        "mid_lookback": 60,
+        "long_lookback": 120,
+        "vol_window": 30,
+        "target_vol": 0.5,
+        "max_weight": 0.95,
+    }
+
+    def components(self, df: pd.DataFrame) -> pd.DataFrame:
+        """逐根 K 线的中间结果: 各周期投票、得分、年化波动率、仓位上限和目标仓位。"""
+        p = self.params
+        close = df["close"].astype(float)
+        lookbacks = [p["short_lookback"], p["mid_lookback"], p["long_lookback"]]
+        out = pd.DataFrame(index=df.index)
+        for lb in lookbacks:
+            past = close.shift(lb)
+            out[f"up_{lb}"] = ((past > 0) & (close > past)).astype(float)
+        out["score"] = out[[f"up_{lb}" for lb in lookbacks]].sum(axis=1) / len(lookbacks)
+        vol = np.log(close / close.shift(1)).rolling(p["vol_window"], min_periods=p["vol_window"]).std() * np.sqrt(365)
+        out["vol"] = vol
+        size = np.minimum(p["max_weight"], p["target_vol"] / vol.where(vol > 0))
+        out["size"] = size.fillna(0.0)
+        need = max(max(lookbacks), p["vol_window"]) + 1
+        ready = pd.Series(np.arange(len(df)) >= need - 1, index=df.index)
+        out["target"] = (out["score"] * out["size"]).where(ready, 0.0)
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        return self.components(df)["target"]
+
+
 class Ensemble(Strategy):
     """多个策略信号的平均 (投票), 输出 [-1, 1] 之间的连续仓位。"""
 
@@ -222,6 +265,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
         BollingerReversion,
         MacdMomentum,
         DonchianBreakout,
+        TrendVolTarget,
         Ensemble,
     )
 }

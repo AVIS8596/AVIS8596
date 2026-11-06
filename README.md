@@ -125,3 +125,25 @@ quantbot/
 tests/test_quantbot.py
 examples/custom_strategy.py
 ```
+
+## 每日信号机器人 (Telegram 推送)
+
+`python -m quantbot signal` 每次运行时只处理**新收盘的日线** (UTC 0 点切分), 用 `trend_vol` 策略
+(多周期趋势 + 波动率目标仓位, 与 `integrations/quantdinger/trend_vol_target_v2.py` 逐笔一致) 计算目标仓位,
+在模拟账户里按 "收盘决策、下一根开盘成交" 记账, 并推送 Telegram。**只发信号, 不会下单。**
+
+- 状态保存在 `~/quantbot-data/state_BTCUSDT.json`; 漏跑的日子下次会按顺序补算; 重复运行不会重复推送。
+- 推送失败不会保存状态, 下次运行自动补发; 出错时推送报警 (6 小时内最多一次)。
+- Telegram 配置文件 `~/quantbot-data/telegram.env` (权限 600, 不在仓库里):
+
+```
+TELEGRAM_BOT_TOKEN=从 @BotFather 获得的 token
+TELEGRAM_CHAT_ID=由 telegram-setup 自动写入
+```
+
+```bash
+python -m quantbot telegram-setup          # 查找聊天 ID 并发送测试消息
+python -m quantbot signal --no-push        # 预览今天的信号, 不推送、不改状态
+python -m quantbot signal                  # 正式运行 (配合 cron 每小时运行一次即可)
+# crontab: 7 * * * * cd ~/quantbot && ~/quantbot-venv/bin/python -m quantbot signal >> ~/quantbot-data/signal.log 2>&1
+```
