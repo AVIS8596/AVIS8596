@@ -165,6 +165,85 @@ def parse_binance_klines(rows: list, now_ms: int | None = None) -> pd.DataFrame:
     return normalize(df)
 
 
+BINANCE_ARCHIVE_URL = "https://data.binance.vision/data/futures/um"
+
+
+def _archive_csv_rows(url: str) -> list[list[str]] | None:
+    """下载 data.binance.vision 的单个 zip, 返回 CSV 行 (去掉表头); 404 返回 None。"""
+    import csv
+    import io
+    import urllib.error
+    import urllib.request
+    import zipfile
+
+    req = urllib.request.Request(url, headers={"User-Agent": "quantbot"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    with zipfile.ZipFile(io.BytesIO(payload)) as z:
+        text = z.read(z.namelist()[0]).decode()
+    rows = list(csv.reader(io.StringIO(text)))
+    if rows and not rows[0][0].strip().lstrip("-").isdigit():
+        rows = rows[1:]  # 新格式带表头
+    return rows
+
+
+def fetch_binance_futures_archive(
+    symbol: str = "BTCUSDT",
+    start: str = "2019-09",
+    cache_dir: str | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """从 Binance 官方历史数据站下载 USDT 本位永续合约日线与资金费率。
+
+    返回 (日线 OHLCV, 按 UTC 日期汇总的资金费率之和)。K 线使用月度归档加当月日度归档;
+    资金费率只有月度归档, 当月尚未归档的天数不包含在内。
+    """
+    import os
+
+    symbol = symbol.replace("/", "").upper()
+    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    if cache_dir:
+        kpath = os.path.join(cache_dir, f"binance_um_{symbol}_1d_{today.date()}.csv")
+        fpath = os.path.join(cache_dir, f"binance_um_{symbol}_funding_{today.date()}.csv")
+        if os.path.exists(kpath) and os.path.exists(fpath):
+            fund = pd.read_csv(fpath, index_col=0, parse_dates=True).iloc[:, 0]
+            return load_csv(kpath), fund
+
+    months = pd.period_range(pd.Period(start, "M"), (today - pd.offsets.MonthBegin(1)).to_period("M"), freq="M")
+    krows: list = []
+    frows: list = []
+    for m in months:
+        tag = f"{m.year}-{m.month:02d}"
+        rows = _archive_csv_rows(f"{BINANCE_ARCHIVE_URL}/monthly/klines/{symbol}/1d/{symbol}-1d-{tag}.zip")
+        krows += rows or []
+        rows = _archive_csv_rows(f"{BINANCE_ARCHIVE_URL}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{tag}.zip")
+        frows += rows or []
+    for day in pd.date_range(today.replace(day=1), today - pd.Timedelta(days=1), freq="D"):
+        rows = _archive_csv_rows(
+            f"{BINANCE_ARCHIVE_URL}/daily/klines/{symbol}/1d/{symbol}-1d-{day.date()}.zip"
+        )
+        krows += rows or []
+    if not krows:
+        raise ValueError(f"{symbol}: 历史数据站没有永续合约日线")
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    df = parse_binance_klines([[int(r[0]), *r[1:6], int(r[6])] for r in krows], now_ms)
+    fund = pd.Series(dtype=float)
+    if frows:
+        f = pd.DataFrame({"t": [int(r[0]) for r in frows], "rate": [float(r[2]) for r in frows]})
+        f["day"] = pd.to_datetime(f["t"], unit="ms").dt.normalize()
+        fund = f.groupby("day")["rate"].sum()
+    fund.name = "funding_rate"
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        df.reset_index().to_csv(kpath, index=False)
+        fund.to_csv(fpath)
+    return df, fund
+
+
 def fetch_yfinance(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
     """通过 yfinance 获取股票数据 (需 `pip install yfinance`)。"""
     try:
