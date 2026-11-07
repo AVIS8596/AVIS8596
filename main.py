@@ -129,6 +129,15 @@ async def check(cfg) -> bool:
             ok_all = False
             print(f"  ❌ {name}: {e}")
 
+    import subprocess
+    try:
+        running = subprocess.run(["systemctl", "is-active", "memebot"], capture_output=True,
+                                 text=True, timeout=5).stdout.strip() == "active"
+    except Exception:  # noqa: BLE001
+        running = False
+    if running and app.gmgn:
+        print("⚠️ 机器人正在后台运行，和检查程序共用 GMGN 额度，容易被限流。")
+        print("   建议先执行 sudo systemctl stop memebot，等 2 分钟再检查，检查完再启动。\n")
     print("检查 API 连通性：")
     s = cfg.secrets
     await item("Telegram", _tg_check(app))

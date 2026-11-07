@@ -111,11 +111,14 @@ class Gmgn:
     def __init__(self, api_key: str, private_key_pem: str = "", plan: str = "plus", usage: float = 0.8):
         self.key = api_key
         self.pk = load_private_key(private_key_pem) if private_key_pem else None
-        rate = PLAN_RATE.get(plan.lower(), 5) * usage     # 只用 80% 额度，给突发留余量
+        rate = PLAN_RATE.get(plan.lower(), 5) * usage
+        if plan.lower() == "free":
+            rate = min(rate, 1.5)   # 实测免费版实际额度比文档写的紧，保守一点，避免被封
         self.bucket = _Bucket(rate)
         self.paused_until = 0.0
         self.disabled: set[str] = set()                    # 当前套餐用不了的接口
         self.weight_used = 0
+        self.bans = 0
         self._session: aiohttp.ClientSession | None = None
 
     async def _sess(self) -> aiohttp.ClientSession:
@@ -176,7 +179,10 @@ class Gmgn:
             reset_at = float(js.get("reset_at") or (reset_hdr if reset_hdr.isdigit() else 0) or 0)
             if err.startswith("RATE_LIMIT") or status == 429:
                 # 全局暂停到解封时间，期间任何请求都会延长封禁
-                self.paused_until = max(self.paused_until, (reset_at or time.time() + 5) + 1)
+                fallback = 60 if "BAN" in err else 5
+                self.paused_until = max(self.paused_until, (reset_at or time.time() + fallback) + 1)
+                self.bucket.tokens = 0          # 解封后从零开始慢慢恢复，不要一下子把积压的请求全发出去
+                self.bans += 1
                 log.warning("GMGN 限流（%s），所有 GMGN 请求暂停到 %s", err or status,
                             time.strftime("%H:%M:%S", time.localtime(self.paused_until)))
                 if attempt < retries and path != "/v1/trade/swap":

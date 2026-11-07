@@ -230,7 +230,7 @@ class DataHub:
         parts = []
         if self.app.gmgn:
             g = self.app.gmgn
-            parts.append(f"GMGN 已用权重 {g.weight_used:,}")
+            parts.append(f"GMGN 已用权重 {g.weight_used:,}，被限流 {g.bans} 次")
             if g.paused_until > time.time():
                 parts.append(f"⚠️ GMGN 限流暂停到 {time.strftime('%H:%M:%S', time.localtime(g.paused_until))}")
             if g.disabled:
