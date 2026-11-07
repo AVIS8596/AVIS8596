@@ -119,6 +119,8 @@ class Gmgn:
         self.disabled: set[str] = set()                    # 当前套餐用不了的接口
         self.weight_used = 0
         self.bans = 0
+        self.trade_block_until = 0.0
+        self.trade_block_msg = ""
         self._session: aiohttp.ClientSession | None = None
 
     async def _sess(self) -> aiohttp.ClientSession:
@@ -138,6 +140,8 @@ class Gmgn:
         if path in self.disabled:
             return None
         signed = path in SIGNED
+        if signed and time.time() < self.trade_block_until:
+            raise GmgnError(path, 403, None, "PLAN_UPGRADE_REQUIRED", self.trade_block_msg)
         if signed and not self.pk:
             raise GmgnError(path, 0, None, "NO_PRIVATE_KEY", "交易类接口需要 GMGN_PRIVATE_KEY")
         body_str = json.dumps(body, separators=(",", ":"), ensure_ascii=False) if body is not None else ""
@@ -187,10 +191,19 @@ class Gmgn:
                             time.strftime("%H:%M:%S", time.localtime(self.paused_until)))
                 if attempt < retries and path != "/v1/trade/swap":
                     continue
+            msg = str(js.get("message") or "")
             if err in ("PLAN_UPGRADE_REQUIRED", "PRO_PLAN_REQUIRED"):
-                self.disabled.add(path)
-                log.error("GMGN 接口 %s 当前套餐不可用，已停用：%s", path, js.get("upgrade_message", ""))
-            raise GmgnError(path, status, js.get("code"), err, str(js.get("message") or ""), reset_at)
+                up = str(js.get("upgrade_message") or msg or "")
+                if signed:
+                    # 交易接口不永久停用：免费版"资产≥$100"每小时才更新一次，充值后过一会儿可能就恢复了
+                    self.trade_block_until = time.time() + 1800
+                    self.trade_block_msg = up or "当前套餐不支持 API 交易"
+                    log.error("GMGN 交易接口不可用（30 分钟后再试）：%s | 原始返回：%s", up, text[:500])
+                else:
+                    self.disabled.add(path)
+                    log.error("GMGN 接口 %s 当前套餐不可用，已停用：%s", path, up)
+                msg = up or msg
+            raise GmgnError(path, status, js.get("code"), err, msg, reset_at)
         return None
 
     # ================================================================ 读接口

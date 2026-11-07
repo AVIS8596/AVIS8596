@@ -395,7 +395,7 @@ class GmgnExecutor:
         try:
             r = await self._run(params)
         except GmgnError as e:
-            return Fill(False, error=f"GMGN: {e.error or e.message or e}")
+            return Fill(False, error=f"GMGN: {e.error} {e.message}".strip() if e.error else f"GMGN: {e.message or e}")
         rep = r.get("report") or {}
         h = r.get("hash", "")
         after, dec2 = await self._token_balance(token)
@@ -425,7 +425,7 @@ class GmgnExecutor:
         try:
             r = await self._run(params)
         except GmgnError as e:
-            return Fill(False, error=f"GMGN: {e.error or e.message or e}")
+            return Fill(False, error=f"GMGN: {e.error} {e.message}".strip() if e.error else f"GMGN: {e.message or e}")
         rep = r.get("report") or {}
         after, _ = await self._token_balance(token)
         sold = int(f(rep.get("input_amount"))) or max(have - after, 0)

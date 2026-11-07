@@ -98,7 +98,9 @@ class Telegram:
 
     @staticmethod
     def tx_link(chain: str, tx: str) -> str:
-        if not tx or tx == "DRYRUN":
+        if not tx:
+            return ""
+        if tx == "DRYRUN":
             return "模拟"
         return f'<a href="{CHAINS[chain].explorer_tx.format(tx)}">查看交易</a>'
 
@@ -179,6 +181,13 @@ class Telegram:
             f"{self.tx_link(c, fill.tx)}{tail}")
 
     async def trade_failed(self, chain: str, rep: dict, side: str, fill: "Fill") -> None:
+        if "PLAN_UPGRADE" in fill.error:   # 套餐问题同类提醒 30 分钟只发一次，避免刷屏
+            if time.time() - self._err_sent.get("plan_upgrade", 0) < 1800:
+                return
+            self._err_sent["plan_upgrade"] = time.time()
+            await self.send(f"{self.mode()} ❌ {side}失败 {e(rep.get('symbol') or '?')}：GMGN 提示当前套餐不能用 API 交易。\n"
+                            f"GMGN 原话：{e(fill.error[:300])}\n机器人会每 30 分钟自动重试一次，期间同类提醒不再重复发送。")
+            return
         extra = "\n❗ 交易状态未知，请到区块浏览器确认" if fill.unknown else ""
         await self.send(f"{self.mode()} ❌ {side}失败 {e(rep.get('symbol') or '?')}：{e(fill.error[:300])} "
                         f"{self.tx_link(chain, fill.tx)}{extra}")
