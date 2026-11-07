@@ -146,6 +146,9 @@ exit:
   max_hold_hours: 24              # 最长持仓时间
   follow_smart_sell: true         # 带单的聪明钱卖出时跟着卖
   max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
+  confirm_ticks: 2                # 止损 / 移动止损要连续 2 次检查（约 10 秒）都触发才卖，防插针
+  hard_stop_pct: -50              # 跌破 -50% 不等确认，立刻卖
+  # 移动止损在还没止盈过时先卖一半，剩下一半从当时的价格重新算最高点；剩下的跌回成本就卖
   # 按买入档位区分（覆盖上面的同名项；没写的项沿用上面的）。
   #   stall_hours / stall_min_gain_pct：持有满 N 小时还没涨到 +X% 就卖（"涨不上去就走"，已止盈过的不受影响）
   #   follow_smart_sell_pct：带单聪明钱卖出时跟卖多少（%）

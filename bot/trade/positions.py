@@ -79,9 +79,14 @@ def decide_exit(pos: dict, price: float, cfg: dict, now: float, dyn: dict | None
         if stage == 0 and float(t["gain_pct"]) >= 100 and float(t["sell_pct"]) >= 50:
             return float(t["sell_pct"]), f"止盈·翻倍出本（+{gain:.0f}%，卖出 {float(t['sell_pct']):.0f}% 收回本金）"
         return float(t["sell_pct"]), f"止盈第{stage + 1}档（+{gain:.0f}%）"
+    if pos.get("trail_half") and gain <= 0:
+        return 100, f"移动止损卖过一半后跌回成本（{gain:+.1f}%），剩下的也卖掉"
     if high_gain >= float(cfg.get("trailing_start_pct", 60)):
         drop = (1 - price / high) * 100
         if drop >= float(cfg.get("trailing_drop_pct", 30)) + (10 if strong else 0):
+            if stage == 0 and not pos.get("trail_half") and gain > 5:
+                # 还没止盈过：先卖一半锁定利润，剩下一半重新计算最高点，给回调后再拉升留机会
+                return 50, f"移动止损先卖一半（最高 +{high_gain:.0f}%，回撤 {drop:.0f}%，剩下一半跌回成本就卖）"
             return 100, f"移动止损（最高 +{high_gain:.0f}%，回撤 {drop:.0f}%）"
     held_h = (now - float(pos.get("opened_at") or now)) / 3600
     stall_h = float(cfg.get("stall_hours") or 0) * (2 if strong else 1)
@@ -116,7 +121,24 @@ class PositionManager:
         self._next_try: dict[int, float] = {}   # 卖出失败后的退避时间
         self._last_reconcile = 0.0
         self._checking: set[int] = set()
+        self._breach: dict = {}   # 止损/移动止损连续触发次数（防插针）
         self._check_sem = asyncio.Semaphore(2)
+
+    def _confirmed(self, key, why: str, px: float, entry: float) -> bool:
+        """止损和移动止损要连续两次检查（约 10 秒）都触发才卖，避免被瞬间插针打掉；
+        跌破硬止损（默认 -50%）不等。其他卖出原因不受影响。"""
+        if not why.startswith(("止损", "移动止损")):
+            self._breach.pop(key, None)
+            return True
+        hard = float(self.cfg.get("exit.hard_stop_pct", -50))
+        if entry > 0 and (px / entry - 1) * 100 <= hard:
+            return True
+        n = self._breach.get(key, 0) + 1
+        self._breach[key] = n
+        if n >= int(self.cfg.get("exit.confirm_ticks", 2)):
+            self._breach.pop(key, None)
+            return True
+        return False
 
     @property
     def exit_cfg(self) -> dict:
@@ -221,6 +243,8 @@ class PositionManager:
                 p["high_price"] = px
             dyn = dyn_state(p, dc, now) if mode == "live" else None
             pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
+            if not self._confirmed(p["id"], why, px, float(p["entry_price"] or 0)):
+                continue
             if pct > 0 and p["id"] not in self._selling and now >= self._next_try.get(p["id"], 0):
                 self._spawn(self.sell(p, pct, why, px, urgent=why.startswith(URGENT)))
 
@@ -297,15 +321,18 @@ class PositionManager:
         realized = float(s["realized"]) + sell * px / entry
         stage = int(s["tp_stage"]) + (1 if why.startswith("止盈") else 0)
         reduced = 1 if (why.startswith("健康分") and pct < 100) or s["reduced"] else 0
+        half = 1 if why.startswith("移动止损先卖一半") or s.get("trail_half") else 0
+        high = px if why.startswith("移动止损先卖一半") else float(s.get("high") or px)
         lg = json.loads(s["log"] or "[]")
         lg.append([round(now), round(pct), why, round((px / entry - 1) * 100, 1)])
         closed = 1 if frac <= 0.001 else 0
         await self.app.db.execute(
-            "UPDATE shadow SET frac=?, realized=?, tp_stage=?, reduced=?, log=?, closed=?, closed_at=?, last_price=? "
-            "WHERE pid=? AND variant=?",
+            "UPDATE shadow SET frac=?, realized=?, tp_stage=?, reduced=?, log=?, closed=?, closed_at=?, last_price=?, "
+            "trail_half=?, high=? WHERE pid=? AND variant=?",
             (max(frac, 0.0), realized, stage, reduced, json.dumps(lg[-30:], ensure_ascii=False), closed,
-             now if closed else None, px, s["pid"], s["variant"]))
-        s.update(frac=max(frac, 0.0), realized=realized, tp_stage=stage, reduced=reduced, log=json.dumps(lg))
+             now if closed else None, px, half, high, s["pid"], s["variant"]))
+        s.update(frac=max(frac, 0.0), realized=realized, tp_stage=stage, reduced=reduced, log=json.dumps(lg),
+                 trail_half=half, high=high)
 
     async def _sim(self, s: dict, px: float, now: float, mode: str) -> None:
         db = self.app.db
@@ -318,9 +345,11 @@ class PositionManager:
             await db.execute("UPDATE shadow SET high=?, last_price=? WHERE pid=? AND variant=?",
                              (px, px, s["pid"], s["variant"]))
         v = {"entry_price": s["entry_price"], "high_price": s["high"], "tp_stage": s["tp_stage"],
-             "opened_at": s["opened_at"], "tier": s["tier"]}
+             "opened_at": s["opened_at"], "tier": s["tier"], "trail_half": s.get("trail_half")}
         dyn = dyn_state(s, self.dcfg, now, reduced=int(s["reduced"] or 0)) if s["variant"] == "v2" else None
         pct, why = decide_exit(v, px, self.exit_cfg, now, dyn)
+        if not self._confirmed((s["pid"], s["variant"]), why, px, float(s["entry_price"] or 0)):
+            pct, why = 0, ""
         if pct <= 0 and now - float(s["opened_at"] or now) > 96 * 3600:
             pct, why = 100, "模拟超过 4 天，按当前价结束"
         if pct > 0:
@@ -407,6 +436,9 @@ class PositionManager:
             await self.app.db.execute(
                 "UPDATE positions SET remaining_raw=?, realized_usd=?, tp_stage=?, sell_attempts=0, health_reduced=? "
                 "WHERE id=?", (str(new_remaining), realized, stage, reduced, pid))
+            if reason.startswith("移动止损先卖一半"):   # 剩下一半从当前价重新算最高点
+                await self.app.db.execute("UPDATE positions SET trail_half=1, high_price=? WHERE id=?",
+                                          (price_hint or float(p["high_price"] or 0), pid))
             if reason.startswith(("手动", "带单聪明钱")):
                 await self.shadow_on_manual(pid, pct, reason, price_hint)
             closed = new_remaining <= original * 0.02

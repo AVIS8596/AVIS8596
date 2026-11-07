@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS positions (
   realized_usd REAL DEFAULT 0, opened_at REAL, closed_at REAL, close_reason TEXT,
   tier TEXT,           -- best / good / normal；空 = 分档上线前的老持仓
   entry_snap TEXT, prev_snap TEXT, health INTEGER, health_note TEXT, health_streak INTEGER DEFAULT 0,
-  health_emergency TEXT, health_reduced INTEGER DEFAULT 0, health_at REAL DEFAULT 0
+  health_emergency TEXT, health_reduced INTEGER DEFAULT 0, health_at REAL DEFAULT 0, trail_half INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
 
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS shadow (
   pid INTEGER, variant TEXT, frac REAL, tp_stage INTEGER DEFAULT 0, realized REAL DEFAULT 0,
   high REAL, reduced INTEGER DEFAULT 0, closed INTEGER DEFAULT 0, closed_at REAL, last_price REAL,
-  log TEXT DEFAULT '[]', created_at REAL, PRIMARY KEY (pid, variant)
+  log TEXT DEFAULT '[]', created_at REAL, trail_half INTEGER DEFAULT 0, PRIMARY KEY (pid, variant)
 );
 
 -- 被风控拦下的买入信号：1 小时后回看价格，判断过滤条件是不是太严
@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_signals_wallet ON signals(chain, wallet, ts);
 POSITION_COLUMNS = [
     ("tier", "TEXT"), ("entry_snap", "TEXT"), ("prev_snap", "TEXT"), ("health", "INTEGER"),
     ("health_note", "TEXT"), ("health_streak", "INTEGER DEFAULT 0"), ("health_emergency", "TEXT"),
-    ("health_reduced", "INTEGER DEFAULT 0"), ("health_at", "REAL DEFAULT 0"),
+    ("health_reduced", "INTEGER DEFAULT 0"), ("health_at", "REAL DEFAULT 0"), ("trail_half", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -113,6 +113,9 @@ class DB:
         cur = await self.conn.execute("PRAGMA table_info(wallets)")
         if "avg_hold_sec" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE wallets ADD COLUMN avg_hold_sec REAL")
+        cur = await self.conn.execute("PRAGMA table_info(shadow)")
+        if "trail_half" not in {r[1] for r in await cur.fetchall()}:
+            await self.conn.execute("ALTER TABLE shadow ADD COLUMN trail_half INTEGER DEFAULT 0")
         cur = await self.conn.execute("PRAGMA table_info(positions)")
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in POSITION_COLUMNS:

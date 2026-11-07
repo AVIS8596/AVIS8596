@@ -211,3 +211,26 @@ def test_full_flow(tmp_path):
         await db.close()
 
     asyncio.run(go())
+
+
+def test_trailing_half_and_confirm_ticks():
+    # 最高 +69%、回撤 36%（UNISON 那种）：没止盈过 → 先卖一半
+    pct, why = decide_exit(pos(high_price=1.69), 1.08, EXIT, 1000 + 600, None)
+    assert pct == 50 and why.startswith("移动止损先卖一半")
+    # 卖过一半后最高点从当时重新算：再拉回去不会被移动止损卖；跌回成本才卖剩下的
+    assert decide_exit(pos(high_price=1.08, trail_half=1), 1.6, EXIT, 1000 + 900, None)[0] == 0
+    assert decide_exit(pos(high_price=1.6, trail_half=1), 0.99, EXIT, 1000 + 900, None)[0] == 100
+    # 回撤时已经跌破成本：直接全卖
+    assert decide_exit(pos(high_price=1.65), 1.03, EXIT, 1000 + 600, None)[0] == 100
+    # 止盈过的照旧全卖
+    assert decide_exit(pos(high_price=2.0, tp_stage=1), 1.3, EXIT, 1000 + 600, None)[0] == 100
+
+    pm = PositionManager.__new__(PositionManager)
+    pm.cfg = Cfg({"exit": {}})
+    pm._breach = {}
+    assert not pm._confirmed(1, "止损（-36%）", 0.64, 1.0)        # 第一次触发先等
+    assert pm._confirmed(1, "止损（-37%）", 0.63, 1.0)            # 连续第二次才卖
+    assert not pm._confirmed(2, "移动止损（…）", 1.1, 1.0)
+    assert pm._confirmed(2, "", 1.2, 1.0) and 2 not in pm._breach  # 中间恢复了就清零
+    assert pm._confirmed(3, "止损（-55%）", 0.45, 1.0)            # 跌破硬止损不等
+    assert pm._confirmed(4, "止盈·翻倍出本", 2.0, 1.0)            # 其他原因不受影响
