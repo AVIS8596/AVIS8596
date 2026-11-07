@@ -97,6 +97,7 @@ trading:
   min_holders: 80                 # 持有人太少不买
   loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟
   loss_streak_pause_min: 60
+  max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
   max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）

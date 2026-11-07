@@ -210,9 +210,14 @@ class Trader:
             return "good"
         return "normal"
 
+    @property
+    def sizes_key(self) -> str:
+        """实盘和模拟盘的三档金额分开存：模拟盘调大金额，切回实盘不会跟着变大。"""
+        return "sizes_dry" if self.cfg.dry_run else "sizes"
+
     async def sizes(self, chain: str) -> list[float]:
         """三档金额 [一般, 较好, 优质]。TG 里 /size 设置过就用设置的，否则按配置（一般档 × 2 × 4）。"""
-        saved = (await self.app.db.kv_get("sizes", {}) or {}).get(chain)
+        saved = (await self.app.db.kv_get(self.sizes_key, {}) or {}).get(chain)
         if saved and len(saved) == 3:
             return [float(x) for x in saved]
         base = float(self.cfg.per_chain("trading.buy_amount_native", chain, 0))

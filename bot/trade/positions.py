@@ -514,7 +514,8 @@ class PositionManager:
                 await db.execute("UPDATE skipped SET px_1h=? WHERE id=?", (px.get(r["token"]) or -1, r["id"]))
 
     async def check_daily_loss(self) -> None:
-        limit = float(self.cfg.get("trading.max_daily_loss_usd", 0) or 0)
+        key = "trading.max_daily_loss_usd_dry" if self.cfg.dry_run else "trading.max_daily_loss_usd"
+        limit = float(self.cfg.get(key, 0) or 0)   # 模拟盘默认不设上限，方便积累数据
         if limit <= 0:
             return
         pnl = await self.app.db.realized_today_usd(self.app.day_start(), self.app.cfg.dry_run)

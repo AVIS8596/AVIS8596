@@ -421,14 +421,16 @@ class Telegram:
             if len(vals) != 3 or any(v <= 0 for v in vals) or not (vals[0] <= vals[1] <= vals[2]):
                 await self.send("格式：/size 一般 较好 优质，例如 /size 0.05 0.1 0.2（三个数从小到大）")
                 return
-            saved = await self.app.db.kv_get("sizes", {}) or {}
+            key = self.app.trader.sizes_key
+            saved = await self.app.db.kv_get(key, {}) or {}
             saved[chain] = vals
-            await self.app.db.kv_set("sizes", saved)
+            await self.app.db.kv_set(key, saved)
         sym = CHAINS[chain].native_symbol
         n, g, b = await self.app.trader.sizes(chain)
         t = self.app.cfg.get("trading.tiers", {}) or {}
         await self.send(
-            f"<b>{CHAINS[chain].name} 每笔买入金额</b>{'（已更新）' if args else ''}\n"
+            f"<b>{CHAINS[chain].name} 每笔买入金额（{'🧪 模拟盘' if self.app.cfg.dry_run else '💰 实盘'}）</b>"
+            f"{'（已更新）' if args else ''}\n"
             f"🔥 优质：{b:g} {sym}（评分 ≥ {t.get('best_min_score', 85)} 或 ≥ {t.get('best_min_smart', 3)} 个聪明钱，"
             f"且捆绑 &lt; {t.get('best_max_bundle_pct', 10)}%）\n"
             f"👍 较好：{g:g} {sym}（评分 ≥ {t.get('good_min_score', 70)} 或 ≥ {t.get('good_min_smart', 2)} 个聪明钱）\n"

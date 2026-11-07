@@ -253,7 +253,7 @@ def test_position_tiers_and_sizes(tmp_path):
     from bot.db import DB
     from bot.trade.trader import Trader
 
-    cfg = SimpleNamespace(get=lambda k, d=None: d,
+    cfg = SimpleNamespace(get=lambda k, d=None: d, dry_run=False,
                           per_chain=lambda k, c, d=None: {"trading.buy_amount_native": 0.05}.get(k, d))
 
     async def go():
@@ -268,6 +268,11 @@ def test_position_tiers_and_sizes(tmp_path):
         assert t.tier({"score": 60, "bundle_held_pct": 2}, ["a"]) == "normal"
         assert await t.sizes("solana") == [0.05, 0.1, 0.2]
         await db.kv_set("sizes", {"solana": [0.1, 0.3, 0.5]})
+        assert await t.sizes("solana") == [0.1, 0.3, 0.5]
+        cfg.dry_run = True                                       # 模拟盘的金额单独存，不影响实盘
+        await db.kv_set("sizes_dry", {"solana": [1, 2, 3]})
+        assert await t.sizes("solana") == [1, 2, 3]
+        cfg.dry_run = False
         assert await t.sizes("solana") == [0.1, 0.3, 0.5]
         await db.close()
 
