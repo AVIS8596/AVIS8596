@@ -359,14 +359,25 @@ class GmgnExecutor:
             p["tip_fee"] = self.tip_fee
         return p
 
+    FINAL_OK = ("confirmed", "successful", "success")
+    FINAL_BAD = ("failed", "expired", "cancel", "cancelled", "canceled", "error", "rejected")
+
+    @staticmethod
+    def _st(r: dict) -> str:
+        return str(r.get("status", "")).lower()
+
     async def _run(self, params: dict) -> dict:
-        """提交订单并轮询到最终状态。返回最后一次的订单数据。"""
+        """提交订单并轮询到最终状态（confirmed / failed / expired）。
+
+        注意：GMGN 实际会返回文档里没写的中间状态（比如 submitted），
+        所以这里用"不是最终状态就继续等"的写法，而不是列举中间状态。
+        """
         import asyncio
         import time as _t
         r = await self.gm.swap(params)
         oid = r.get("order_id")
         end = _t.time() + self.timeout
-        while oid and str(r.get("status", "")).lower() in ("", "pending", "processed") and _t.time() < end:
+        while oid and self._st(r) not in self.FINAL_OK + self.FINAL_BAD and _t.time() < end:
             await asyncio.sleep(1.5)
             try:
                 q = await self.gm.query_order(self.chain, oid)
@@ -376,13 +387,26 @@ class GmgnExecutor:
                 log.debug("查询订单 %s: %s", oid, e)
         return r
 
-    @staticmethod
-    def _ok(r: dict) -> bool:
-        return str(r.get("status", "")).lower() in ("confirmed", "successful", "success")
+    def _ok(self, r: dict) -> bool:
+        return self._st(r) in self.FINAL_OK
+
+    def _bad(self, r: dict) -> bool:
+        return self._st(r) in self.FINAL_BAD
 
     @staticmethod
     def _err(r: dict) -> str:
         return str(r.get("error_status") or r.get("error_code") or r.get("status") or "未知错误")
+
+    async def _wait_balance(self, token: str, cond, tries: int = 8, gap: float = 3.0) -> tuple[int, int]:
+        """订单状态未知时，再观察一会儿链上余额，确认到底成交没有。"""
+        import asyncio
+        bal, dec = await self._token_balance(token)
+        for _ in range(tries):
+            if cond(bal):
+                break
+            await asyncio.sleep(gap)
+            bal, dec = await self._token_balance(token)
+        return bal, dec
 
     async def buy(self, token: str, amount: float, slippage_bps: int) -> Fill:
         from ..sources.gmgn import GmgnError
@@ -398,14 +422,16 @@ class GmgnExecutor:
             return Fill(False, error=f"GMGN: {e.error} {e.message}".strip() if e.error else f"GMGN: {e.message or e}")
         rep = r.get("report") or {}
         h = r.get("hash", "")
-        after, dec2 = await self._token_balance(token)
+        if self._bad(r):
+            return Fill(False, h, error=f"GMGN: {self._err(r)}")
+        # 成功或状态未知：都以链上余额为准（未知时多等一会儿）
+        after, dec2 = await self._wait_balance(token, lambda b: b > before, tries=2 if self._ok(r) else 10)
         got = int(f(rep.get("output_amount"))) or max(after - before, 0)
         dec2 = int(f(rep.get("output_token_decimals"))) or dec2 or dec
         spent = int(f(rep.get("input_amount"))) / 10 ** self.ndec if rep.get("input_amount") else amount
-        if self._ok(r) or (after > before and str(r.get("status", "")).lower() not in ("failed", "expired")):
+        if self._ok(r) or after > before:
             return Fill(True, h, got, dec2, spent)
-        pending = str(r.get("status", "")).lower() in ("", "pending", "processed")
-        return Fill(False, h, error=f"GMGN: {self._err(r)}", unknown=pending)
+        return Fill(False, h, error=f"GMGN: 订单状态 {self._st(r) or '未知'}，链上暂未看到到账", unknown=True)
 
     async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int) -> Fill:
         from ..sources.gmgn import GmgnError
@@ -416,6 +442,7 @@ class GmgnExecutor:
         if g:
             return Fill(False, error=g)
         raw = min(raw, have)
+        native_before = await self.native_balance()
         params = self._base_params(token, self.native, slippage_bps)
         if raw >= have * 0.999:     # 全部卖出用百分比，避免余额精度问题留下碎渣
             params["input_amount"] = "0"
@@ -427,11 +454,15 @@ class GmgnExecutor:
         except GmgnError as e:
             return Fill(False, error=f"GMGN: {e.error} {e.message}".strip() if e.error else f"GMGN: {e.message or e}")
         rep = r.get("report") or {}
-        after, _ = await self._token_balance(token)
+        h = r.get("hash", "")
+        if self._bad(r):
+            return Fill(False, h, error=f"GMGN: {self._err(r)}")
+        after, _ = await self._wait_balance(token, lambda b: b < have, tries=2 if self._ok(r) else 10)
         sold = int(f(rep.get("input_amount"))) or max(have - after, 0)
         out_dec = int(f(rep.get("output_token_decimals"))) or self.ndec
         got = int(f(rep.get("output_amount"))) / 10 ** out_dec
-        if self._ok(r) or (have - after > 0 and str(r.get("status", "")).lower() not in ("failed", "expired")):
-            return Fill(True, r.get("hash", ""), sold, decimals or dec, got)
-        pending = str(r.get("status", "")).lower() in ("", "pending", "processed")
-        return Fill(False, r.get("hash", ""), error=f"GMGN: {self._err(r)}", unknown=pending)
+        if not got and sold:
+            got = max(await self.native_balance() - native_before, 0.0)   # 没有成交回报时按余额变化估算
+        if self._ok(r) or after < have:
+            return Fill(True, h, sold, decimals or dec, got)
+        return Fill(False, h, error=f"GMGN: 订单状态 {self._st(r) or '未知'}，链上暂未看到卖出", unknown=True)

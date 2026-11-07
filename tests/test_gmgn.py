@@ -170,9 +170,13 @@ def test_gmgn_executor_buy_and_sell_flow():
 
         async def swap(self, p):
             self.params.append(p)
-            return {"order_id": "o", "status": "pending"}
+            self.polls = 0
+            return {"order_id": "o", "status": "submitted"}   # 实测 GMGN 会返回文档里没有的 submitted
 
         async def query_order(self, chain, oid):
+            self.polls += 1
+            if self.polls == 1:
+                return {"status": "submitted"}
             p = self.params[-1]
             if p["input_token"] == GmgnExecutor.EVM_NATIVE:
                 return {"status": "confirmed", "hash": "0xh",

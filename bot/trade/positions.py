@@ -48,6 +48,7 @@ class PositionManager:
         self._selling: set[int] = set()
         self._tasks: set[asyncio.Task] = set()
         self._next_try: dict[int, float] = {}   # 卖出失败后的退避时间
+        self._last_reconcile = 0.0
 
     async def run(self) -> None:
         interval = float(self.cfg.get("exit.check_interval_sec", 10))
@@ -59,10 +60,31 @@ class PositionManager:
                 log.exception("持仓检查失败: %s", e)
             await asyncio.sleep(interval)
 
+    async def reconcile(self, pos: list[dict]) -> None:
+        """每 3 分钟对一次账：实盘持仓在链上已经没有币了（之前的卖出其实成功了、或你手动卖了），就把持仓关掉。"""
+        if time.time() - self._last_reconcile < 180:
+            return
+        self._last_reconcile = time.time()
+        for p in pos:
+            if p.get("dry_run") or p["id"] in self._selling or time.time() - float(p["opened_at"] or 0) < 180:
+                continue
+            ex = self.app.trader.exec.get(p["chain"])
+            if not hasattr(ex, "_token_balance"):
+                continue
+            try:
+                bal, _ = await ex._token_balance(p["token"])
+            except Exception:  # noqa: BLE001
+                continue
+            if bal == 0:
+                await self._close(p, float(p["realized_usd"] or 0), "对账：链上已无该币（之前的卖出实际已成交或手动卖出）")
+                await self.app.tg.send(f"🔄 #{p['id']} {p['symbol']} 对账发现链上已经没有这个币了，持仓已自动关闭。"
+                                       f"如果之前收到过它的「卖出失败」，说明那笔卖出其实已经成交，可以到 GMGN 钱包确认收益。")
+
     async def tick(self) -> None:
         pos = await self.app.db.open_positions()
         if not pos:
             return
+        await self.reconcile(pos)
         by_chain: dict[str, list[dict]] = {}
         for p in pos:
             by_chain.setdefault(p["chain"], []).append(p)
