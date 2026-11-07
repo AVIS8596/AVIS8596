@@ -133,3 +133,23 @@ def test_fire_requires_token_score_and_hourly_cap(tmp_path):
         await db.close()
 
     asyncio.run(go())
+
+
+def test_explain_lines():
+    from types import SimpleNamespace as NS
+    from bot.trade.trader import Trader
+    tr = Trader.__new__(Trader)
+    tr.cfg = NS(get=lambda k, d=None: d)
+    rep = {"risks": [], "liquidity": 106000, "bundle_held_pct": 5, "insider_held_pct": 0, "top10_pct": 18.75,
+           "change_1h": 1160, "age_hours": 0.4, "mcap": 223700, "volume_1h": 855000, "buys_1h": 900,
+           "sells_1h": 700, "holders": 1560}
+    lines = tr.explain(rep)
+    assert all(ln.startswith("✅") for ln in lines), lines
+    st = Strategies(NS(cfg=NS(get=lambda k, d=None: d), hub=NS(_tasks=set())))
+    it = {**CLEAN, "address": "FRODO1", "symbol": "FRODO", "_stage": "已毕业", "bundler_trader_amount_rate": 0.3041,
+          "renowned_count": 3, "smart_degen_count": 44, "volume_24h": 855000, "volume_1h": None, "holder_count": 1560,
+          "created_timestamp": time.time() - 1300}
+    st.last_items["solana"] = {"FRODO1": it}
+    out = st.explain("solana", "FRODO1")
+    assert any("捆绑交易 30.4%，上限 30%" in x for x in out) and any("强叙事评分" in x for x in out)
+    assert "不在 GMGN" in st.explain("solana", "NOPE")[0]

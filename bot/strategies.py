@@ -85,7 +85,7 @@ def structure_problem(it: dict, cfg: dict) -> str:
     ]
     for v, key, name in checks:
         if v > float(cfg[key]):
-            return f"{name} {v * 100:.0f}%"
+            return f"{name} {v * 100:.1f}%，上限 {float(cfg[key]) * 100:.0f}%"
     return ""
 
 
@@ -179,6 +179,8 @@ class Strategies:
         self.stats: dict[str, dict] = {}    # 每条链最近一轮扫描的概况（/status 里显示）
         self.pending: dict[str, dict] = {}  # 达标但还在观察是否持续的币
         self.attempts: deque = deque(maxlen=50)   # 最近交给确认期的时间（每小时限量）
+        self.last_items: dict[str, dict[str, dict]] = {}   # 最近一轮列表（/whynot 用）
+        self.missed: dict[str, float] = {}   # 热度够但结构不过关、已记录过的币
 
     def conf(self, name: str) -> dict:
         base = EARLY_DEFAULTS if name == "early" else NARRATIVE_DEFAULTS
@@ -242,11 +244,21 @@ class Strategies:
             if not reason and nc["enabled"]:
                 created = f(it.get("created_timestamp"))
                 n = norm_name(it)
-                ok_basic = (not created or now - created <= float(nc["max_age_hours"]) * 3600) \
+                ok_size = (not created or now - created <= float(nc["max_age_hours"]) * 3600) \
                     and int(f(it.get("holder_count"))) >= int(nc["min_holders"]) \
-                    and volume(it) >= float(nc["min_volume"]) \
-                    and not structure_problem(it, nc)
-                if ok_basic:
+                    and volume(it) >= float(nc["min_volume"])
+                prob = structure_problem(it, nc) if ok_size else ""
+                if prob and f"{chain}:{addr}" not in self.missed:
+                    msc, _ = narrative_score(it, names.get(n, 0), True, now)
+                    if msc >= int(nc["min_score"]):
+                        # 热度够、结构不过关：记入"被过滤的信号"，1 小时后回看，检验这条结构过滤是否太严
+                        self.missed[f"{chain}:{addr}"] = now
+                        rep = {"symbol": it.get("symbol", ""), "price": f(it.get("price"))}
+                        t = asyncio.create_task(self.app.trader.skip(
+                            chain, addr, rep, NARRATIVE, f"论证：叙事分 {msc} 够，但结构不过关（{prob}）"))
+                        self.app.hub._tasks.add(t)
+                        t.add_done_callback(self.app.hub._tasks.discard)
+                if ok_size and not prob:
                     is_leader = bool(n) and leader.get(n, (0, ""))[1] == str(it.get("address"))
                     if names.get(n, 0) >= 3 and not is_leader:
                         continue   # 同名跟风盘，不碰
@@ -279,6 +291,7 @@ class Strategies:
                 self.app.hub._tasks.add(t)
                 t.add_done_callback(self.app.hub._tasks.discard)
         self.stats[chain] = st
+        self.last_items[chain] = {norm_addr(chain, it["address"]): it for it in items if it.get("address")}
         cutoff = now - 3600
         for k in [k for k, d in self.hist.items() if d and d[-1][0] < cutoff]:
             self.hist.pop(k, None)
@@ -286,7 +299,45 @@ class Strategies:
             self.fired.pop(k, None)
         for k in [k for k, v in self.pending.items() if now - v["last"] > 900]:
             self.pending.pop(k, None)
+        for k in [k for k, t in self.missed.items() if now - t > 12 * 3600]:
+            self.missed.pop(k, None)
         return fired
+
+    def explain(self, chain: str, addr: str) -> list[str]:
+        """这个币在主动建仓两条策略里的情况（给 /whynot 用）。"""
+        it = (self.last_items.get(chain) or {}).get(addr)
+        if not it:
+            return ["不在 GMGN 当前的「快毕业/已毕业」列表里（列表只有各 60 个最新的币），主动建仓扫不到它"]
+        ec, nc = self.conf("early"), self.conf("narrative")
+        out = [f"在 GMGN「{it.get('_stage')}」列表里"]
+        now = time.time()
+        created = f(it.get("created_timestamp"))
+        age_h = (now - created) / 3600 if created else 0
+        if it.get("_stage") == "即将毕业":
+            prob = structure_problem(it, ec)
+            out.append(("❌ 早期建仓：结构不过关（" + prob + "）") if prob else "✅ 早期建仓：结构干净（还要看持有人 3 分钟增长 ≥ 15%）")
+        prob = structure_problem(it, nc)
+        n_names = sum(1 for x in (self.last_items.get(chain) or {}).values() if norm_name(x) == norm_name(it))
+        sc, notes = narrative_score(it, n_names, True, now)
+        basic = []
+        if age_h > float(nc["max_age_hours"]):
+            basic.append(f"发币 {age_h:.0f} 小时")
+        if int(f(it.get("holder_count"))) < int(nc["min_holders"]):
+            basic.append(f"持有人 {int(f(it.get('holder_count')))}")
+        if volume(it) < float(nc["min_volume"]):
+            basic.append(f"成交 ${volume(it):,.0f}")
+        out.append(f"{'✅' if sc >= int(nc['min_score']) else '❌'} 强叙事评分 {sc}（要 ≥ {nc['min_score']}）："
+                   + ("、".join(notes) or "没有加分项"))
+        if prob:
+            out.append(f"❌ 强叙事结构：{prob}（GMGN 数据，上限见 config 的 strategies.narrative）")
+        if basic:
+            out.append("❌ 强叙事基础条件不够：" + "、".join(basic))
+        key = f"{chain}:{addr}"
+        if key in self.pending:
+            out.append(f"⏳ 正在观察中（已 {(now - self.pending[key]['first']) / 60:.0f} 分钟）")
+        if now - self.fired.get(key, 0) < 12 * 3600:
+            out.append("☑️ 已经触发过（12 小时内不重复）")
+        return out
 
     def status_text(self, chain: str) -> str:
         st = self.stats.get(chain)

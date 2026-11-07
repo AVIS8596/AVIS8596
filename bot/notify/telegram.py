@@ -23,6 +23,7 @@ HELP = """<b>命令列表</b>
 /status 运行状态
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
+/whynot 代币地址 这个币为什么没买（逐条列出每项检查）
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
@@ -256,6 +257,8 @@ class Telegram:
                 return
             from ..trade.review import why_text
             await self.send(await why_text(self.app, int(args[0])))
+        elif cmd == "/whynot":
+            await self._whynot(args)
         elif cmd == "/review":
             from ..trade.review import daily_review
             await self.send(await daily_review(self.app, self.app.day_start()))
@@ -323,6 +326,32 @@ class Telegram:
                 await self.send("地址标记记录：" + "，".join(f"{names.get(k, k)} {v} 次" for k, v in cnt.items()))
         else:
             await self.send("看不懂这个命令。\n" + HELP)
+
+    async def _whynot(self, args: list[str]) -> None:
+        chains = self.app.cfg.enabled_chains
+        chain = "solana" if "solana" in chains else chains[0]
+        if args and args[0].lower() in chains:
+            chain, args = args[0].lower(), args[1:]
+        if not args:
+            await self.send("格式：/whynot 代币地址，例：/whynot 6NeJ...Loat（完整地址）")
+            return
+        token = norm_addr(chain, args[0])
+        await self.send("检查中，大约 10~30 秒……")
+        rep = await self.app.analyzer.analyze(chain, token, source="whynot", force=True)
+        if not rep:
+            await self.send("分析失败（接口没数据），稍后再试")
+            return
+        lines = [f"<b>{e(rep.get('symbol') or '?')} 为什么没买</b>",
+                 f"代币评分 {rep['score']}（强叙事要 ≥ 55、早期建仓要 ≥ 50）| 聪明钱 {len(rep.get('smart_buyers') or [])} 个",
+                 "", "<b>主动建仓</b>"]
+        strat = getattr(self.app, "strategies", None)
+        lines += strat.explain(chain, token) if strat else ["主动建仓未启用"]
+        lines += ["", "<b>风控过滤</b>（所有买入方式都要过）"] + self.app.trader.explain(rep)
+        sk = await self.app.db.fetchone("SELECT reason, ts FROM skipped WHERE chain=? AND token=? ORDER BY id DESC LIMIT 1",
+                                        (chain, token))
+        if sk:
+            lines.append(f"\n最近一次被拦：{e(sk['reason'])}（{self.app.fmt_time(sk['ts'])}）")
+        await self.send("\n".join(lines))
 
     async def _dynamic(self, args: list[str]) -> None:
         from ..trade.review import MODE_TEXT, shadow_compare

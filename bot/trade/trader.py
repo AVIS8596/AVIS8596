@@ -131,6 +131,32 @@ class Trader:
             return "冷却期内"
         return ""
 
+    def explain(self, rep: dict, reason: str = "强叙事") -> list[str]:
+        """把买入前的每一条风控过滤逐条列出来（✅ 通过 / ❌ 不通过），给 /whynot 用。"""
+        t = self.cfg.get("trading", {}) or {}
+        age = float(rep.get("age_hours") or 0)
+        chg = float(rep.get("change_1h") or 0)
+        b, sl = int(rep.get("buys_1h") or 0), int(rep.get("sells_1h") or 0)
+        young = age < 1
+        rows = [
+            (not rep.get("risks"), "安全风险：" + ("；".join(rep.get("risks") or []) or "无")),
+            (rep["liquidity"] >= float(t.get("min_liquidity_usd", 8000)),
+             f"流动性 ${rep['liquidity']:,.0f}（要 ≥ ${float(t.get('min_liquidity_usd', 8000)):,.0f}）"),
+            (rep["bundle_held_pct"] <= float(t.get("max_bundle_pct", 25)),
+             f"捆绑地址持有 {rep['bundle_held_pct']}%（要 ≤ {t.get('max_bundle_pct', 25)}%）"),
+            (rep["insider_held_pct"] <= float(t.get("max_insider_pct", 20)),
+             f"埋伏地址持有 {rep['insider_held_pct']}%（要 ≤ {t.get('max_insider_pct', 20)}%）"),
+            (rep["top10_pct"] <= float(t.get("max_top10_pct", 45)),
+             f"前10持仓 {rep['top10_pct']}%（要 ≤ {t.get('max_top10_pct', 45)}%）"),
+            (young or chg <= float(t.get("max_change_1h_pct", 300)),
+             f"1 小时涨幅 {chg:.0f}%（要 ≤ {t.get('max_change_1h_pct', 300)}%" + ("，发币不到 1 小时不查）" if young else "）")),
+            (not looks_fake(rep, t), looks_fake(rep, t) or "市值和成交量匹配"),
+            (not (sl >= 30 and sl > b * float(t.get("max_sell_buy_ratio", 1.5))), f"1 小时买 {b} 笔 / 卖 {sl} 笔"),
+            (int(rep.get("holders") or 0) >= int(t.get("min_holders", 80)),
+             f"持有人 {rep.get('holders')}（要 ≥ {t.get('min_holders', 80)}）"),
+        ]
+        return [("✅ " if ok else "❌ ") + txt for ok, txt in rows]
+
     async def consider(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str],
                        tier: str | None = None) -> None:
         key = f"{chain}:{token}"
@@ -161,10 +187,15 @@ class Trader:
         if await db.fetchone("SELECT 1 FROM skipped WHERE chain=? AND token=? AND ts>?",
                              (chain, token, time.time() - 1800)):
             return   # 同一个币半小时内只记一次
+        price = float(rep.get("price") or 0)
+        if price <= 0:
+            try:
+                price = await self.app.data.price(chain, token)
+            except Exception:  # noqa: BLE001
+                price = 0.0
         await db.execute(
             "INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) VALUES(?,?,?,?,?,?,?,?)",
-            (time.time(), chain, token, rep.get("symbol", ""), trigger, skip_cat(why), why,
-             float(rep.get("price") or 0)))
+            (time.time(), chain, token, rep.get("symbol", ""), trigger, skip_cat(why), why, price))
 
     def tier(self, rep: dict, wallets: list[str]) -> str:
         """按标的质量分档：best 优质 / good 较好 / normal 一般。"""
