@@ -232,11 +232,25 @@ class Trader:
                                     exit_rules(self.cfg.get("exit", {}) or {}, tier))
 
     async def on_smart_sell(self, s: "Signal") -> None:
+        """带单的聪明钱卖出时跟卖。多个钱包一起带单的，要过半数卖出才跟——
+        不然一个快进快出的钱包先走，就会把其他钱包还拿着的好单子提前卖掉。"""
         if not self.cfg.get("exit.follow_smart_sell", True):
             return
         for p in await self.app.db.open_positions():
-            if p["chain"] == s.chain and p["token"] == s.token and s.wallet in json.loads(p["source_wallets"] or "[]"):
-                pct = float(exit_rules(self.cfg.get("exit", {}) or {}, p.get("tier")).get("follow_smart_sell_pct", 100))
-                if pct > 0:
-                    tail = "" if pct >= 100 else f"，跟卖 {pct:.0f}%"
-                    await self.app.positions.sell(p, pct, f"带单聪明钱 {s.wallet[:6]}… 卖出{tail}")
+            sources = json.loads(p["source_wallets"] or "[]")
+            if p["chain"] != s.chain or p["token"] != s.token or s.wallet not in sources:
+                continue
+            rows = await self.app.db.fetchall(
+                "SELECT wallet, side FROM signals WHERE chain=? AND token=? AND ts>=? ORDER BY ts",
+                (s.chain, s.token, float(p["opened_at"] or 0) - 3600))
+            last = {r["wallet"]: r["side"] for r in rows if r["wallet"] in sources}
+            last[s.wallet] = "sell"
+            sold = sum(1 for w in sources if last.get(w) == "sell")
+            if len(sources) > 1 and sold * 2 <= len(sources):
+                log.info("#%s %s 带单钱包 %d/%d 卖出，未过半，继续持有", p["id"], p["symbol"], sold, len(sources))
+                continue
+            pct = float(exit_rules(self.cfg.get("exit", {}) or {}, p.get("tier")).get("follow_smart_sell_pct", 100))
+            if pct > 0:
+                tail = "" if pct >= 100 else f"，跟卖 {pct:.0f}%"
+                who = f"{s.wallet[:6]}…" if len(sources) == 1 else f"{sold}/{len(sources)} 个"
+                await self.app.positions.sell(p, pct, f"带单聪明钱 {who} 卖出{tail}")

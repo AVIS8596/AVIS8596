@@ -182,3 +182,38 @@ def test_loss_streak_and_skipped_review(tmp_path):
         await db.close()
 
     asyncio.run(go())
+
+
+def test_follow_sell_needs_majority(tmp_path):
+    async def go():
+        db = DB(tmp_path / "m.db")
+        await db.open()
+        app = _app(db, [])
+        sells = []
+
+        async def sell(p, pct, why, *a, **k):
+            sells.append((p["id"], pct, why))
+        app.positions = SimpleNamespace(sell=sell)
+        tr = Trader(app)
+        now = time.time()
+        pid = await db.execute(
+            "INSERT INTO positions(chain,token,symbol,status,source_wallets,opened_at,tier) "
+            "VALUES('solana','TOK','X','open',?,?,'good')", ('["A","B","C"]', now - 60))
+        for w in ("A", "B", "C"):
+            await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                             (now - 120, "solana", w, "TOK", "buy", "b" + w))
+        await tr.on_smart_sell(Signal("solana", "A", "TOK", "sell", 1, 1, "sA", now))
+        assert not sells                                   # 1/3 卖出：继续拿
+        await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                         (now, "solana", "A", "TOK", "sell", "sA"))
+        await tr.on_smart_sell(Signal("solana", "B", "TOK", "sell", 1, 1, "sB", now + 1))
+        assert sells and sells[0][0] == pid and "2/3" in sells[0][2]   # 过半：跟卖
+        # 单个钱包带单的，它卖就跟
+        sells.clear()
+        await db.execute("INSERT INTO positions(chain,token,symbol,status,source_wallets,opened_at,tier) "
+                         "VALUES('solana','T2','Y','open',?,?,'normal')", ('["D"]', now - 60))
+        await tr.on_smart_sell(Signal("solana", "D", "T2", "sell", 1, 1, "sD", now))
+        assert sells and sells[0][1] == 100
+        await db.close()
+
+    asyncio.run(go())
