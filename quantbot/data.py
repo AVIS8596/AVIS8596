@@ -104,6 +104,28 @@ def fetch_ccxt(
 
 
 BINANCE_DATA_URL = "https://data-api.binance.vision/api/v3/klines"
+RETRY_DELAYS = (5.0, 20.0)  # 网络临时故障 (如 DNS 解析失败) 时的重试间隔, 秒
+
+
+def urlopen_retry(req, timeout: float, delays: tuple[float, ...] | None = None) -> bytes:
+    """读取 URL; 遇到网络错误、超时、429 或 5xx 时按 delays 重试, 其他 HTTP 错误直接抛出。"""
+    import time
+    import urllib.error
+    import urllib.request
+
+    delays = RETRY_DELAYS if delays is None else delays
+    for attempt in range(len(delays) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if (e.code != 429 and e.code < 500) or attempt == len(delays):
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == len(delays):
+                raise
+        time.sleep(delays[attempt])
+    raise RuntimeError("unreachable")
 
 
 def fetch_binance(
@@ -140,8 +162,7 @@ def fetch_binance(
             query["endTime"] = end_ms
         url = f"{base_url}?{urllib.parse.urlencode(query)}"
         req = urllib.request.Request(url, headers={"User-Agent": "quantbot"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            batch = json.loads(resp.read())
+        batch = json.loads(urlopen_retry(req, timeout=30))
         if not batch:
             break
         rows.extend(batch)
@@ -178,8 +199,7 @@ def _archive_csv_rows(url: str) -> list[list[str]] | None:
 
     req = urllib.request.Request(url, headers={"User-Agent": "quantbot"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            payload = resp.read()
+        payload = urlopen_retry(req, timeout=60)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None

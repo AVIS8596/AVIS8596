@@ -38,9 +38,10 @@ def _call(token: str, method: str, payload: dict | None = None, timeout: float =
     url = f"{API}/bot{token}/{method}"
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    from .data import urlopen_retry
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read())
+        body = json.loads(urlopen_retry(req, timeout=timeout))
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
         # 不在错误信息里带出 token

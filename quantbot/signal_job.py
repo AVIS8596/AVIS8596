@@ -173,6 +173,18 @@ def format_message(st: PaperState, events: list[Event], comps: pd.DataFrame, str
     return "\n".join(lines)
 
 
+def signal_overdue(last_bar: str | None, now: datetime | None = None, grace_hours: float = 3.0) -> bool:
+    """最后处理的日线之后, 下一根日线已收盘超过 grace_hours 仍未处理, 才算信号被耽误。
+
+    日线以 UTC 开盘日期命名: "2026-11-06" 在 11-07 00:00 收盘, 下一根在 11-08 00:00 收盘。
+    """
+    if not last_bar:
+        return True
+    now = now or datetime.now(timezone.utc)
+    next_close = pd.Timestamp(last_bar, tz="UTC") + pd.Timedelta(days=2)
+    return now >= next_close + pd.Timedelta(hours=grace_hours)
+
+
 def default_state_path(symbol: str) -> str:
     return f"~/quantbot-data/state_{symbol.replace('/', '').upper()}.json"
 

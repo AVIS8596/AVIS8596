@@ -171,10 +171,14 @@ def cmd_signal(a) -> None:
         text = run_signal_job(a.symbol, a.state, a.env, a.capital)
         print(text or "没有新的已收盘日线。")
     except Exception as exc:
-        # 报警推送: 同一状态文件 6 小时内最多报一次, 避免每小时刷屏
+        # 只在信号真正被耽误时报警 (下一根日线收盘后 3 小时仍未处理), 且 6 小时内最多一次;
+        # 没有新日线的整点运行遇到临时网络故障只写日志, 下一小时自动重试。
+        from .signal_job import load_state, signal_overdue
+
         marker = os.path.expanduser(a.state) + ".alert"
         recent = os.path.exists(marker) and time.time() - os.path.getmtime(marker) < 6 * 3600
-        if not recent:
+        st = load_state(os.path.expanduser(a.state))
+        if not recent and signal_overdue(st.last_bar if st else None):
             env = load_env_file(os.path.expanduser(a.env))
             try:
                 send_telegram(env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", ""),

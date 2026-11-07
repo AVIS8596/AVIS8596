@@ -105,3 +105,48 @@ def test_state_files_are_per_symbol_and_guarded(tmp_path, monkeypatch):
     run_signal_job("BTCUSDT", state_path=state, env_path=None, fetcher=_fake_fetcher(df), sender=lambda *a: None)
     with pytest.raises(RuntimeError, match="属于 BTCUSDT"):
         run_signal_job("ETHUSDT", state_path=state, env_path=None, fetcher=_fake_fetcher(df), sender=lambda *a: None)
+
+
+def test_signal_overdue_only_after_next_close_plus_grace():
+    from datetime import datetime, timezone
+
+    from quantbot.signal_job import signal_overdue
+
+    utc = timezone.utc
+    assert signal_overdue(None)
+    # 11-06 的日线已在 11-07 07:07 处理; 11-07 12:07 的临时故障不算耽误
+    assert not signal_overdue("2026-11-06", datetime(2026, 11, 7, 12, 7, tzinfo=utc))
+    assert not signal_overdue("2026-11-06", datetime(2026, 11, 8, 2, 7, tzinfo=utc))
+    assert signal_overdue("2026-11-06", datetime(2026, 11, 8, 3, 7, tzinfo=utc))
+
+
+def test_urlopen_retry_recovers_from_transient_dns_error(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    from quantbot import data as qdata
+
+    calls = {"n": 0}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    def fake_urlopen(req, timeout):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.URLError("[Errno -3] Temporary failure in name resolution")
+        return Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert qdata.urlopen_retry("http://x", timeout=1) == b"ok" and calls["n"] == 3
+    calls["n"] = -10
+    with pytest.raises(urllib.error.URLError):
+        qdata.urlopen_retry("http://x", timeout=1, delays=(0.0,))
