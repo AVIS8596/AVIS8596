@@ -116,6 +116,30 @@ def test_exit_rules():
     assert decide_exit(pos(tp_stage=1, high_price=2.0), 1.3, EXIT, 1001)[0] == 100   # 移动止损
     assert decide_exit(pos(), 1.1, EXIT, 1000 + 25 * 3600)[0] == 100          # 超时
     assert decide_exit(pos(), 1.1, EXIT, 1001)[0] == 0
+    assert decide_exit(pos(), 1.1, EXIT, 1000 + 3 * 3600)[0] == 0              # 老持仓（无档位）没有"涨不上去"规则
+
+
+def test_exit_tiers():
+    h = 3600
+    # 一般档：1 小时还没到 +15% 就卖；到了就继续拿；6 小时超时
+    assert decide_exit(pos(tier="normal"), 1.1, EXIT, 1000 + 0.5 * h)[0] == 0
+    pct, why = decide_exit(pos(tier="normal"), 1.1, EXIT, 1000 + 1.5 * h)
+    assert pct == 100 and why.startswith("涨不上去")
+    assert decide_exit(pos(tier="normal"), 1.2, EXIT, 1000 + 1.5 * h)[0] == 0
+    assert decide_exit(pos(tier="normal"), 1.2, EXIT, 1000 + 7 * h)[0] == 100
+    # 优质档：同样 +10%，5 小时不卖，13 小时卖；+50% 拿到 30 小时也不卖（一般档早超时了）
+    assert decide_exit(pos(tier="best"), 1.1, EXIT, 1000 + 5 * h)[0] == 0
+    assert decide_exit(pos(tier="best"), 1.1, EXIT, 1000 + 13 * h)[0] == 100
+    assert decide_exit(pos(tier="best", high_price=1.5), 1.5, EXIT, 1000 + 30 * h)[0] == 0
+    # 优质档止盈只卖 30%；回撤 30% 不触发（阈值 35%），一般档会触发
+    assert decide_exit(pos(tier="best"), 2.1, EXIT, 1001)[0] == 30
+    assert decide_exit(pos(tier="best", tp_stage=1, high_price=2.0), 1.4, EXIT, 1001)[0] == 0
+    assert decide_exit(pos(tier="good", tp_stage=1, high_price=2.0), 1.4, EXIT, 1001)[0] == 100
+    # 已经止盈过的不受"涨不上去"影响
+    assert decide_exit(pos(tier="normal", tp_stage=1, high_price=1.1), 1.05, EXIT, 1000 + 2 * h)[0] == 0
+    # config 里的覆盖优先于默认
+    cfg = {**EXIT, "tiers": {"normal": {"stall_hours": 3}}}
+    assert decide_exit(pos(tier="normal"), 1.1, cfg, 1000 + 2 * h)[0] == 0
 
 
 # ---------------------------------------------------------------- 交易解析

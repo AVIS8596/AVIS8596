@@ -164,12 +164,18 @@ class Telegram:
         await self.send("\n".join(lines))
 
     async def trade_buy(self, pid: int, chain: str, rep: dict, fill: "Fill", entry: float, cost_usd: float,
-                        reason: str) -> None:
+                        reason: str, rules: dict | None = None) -> None:
+        plan = ""
+        if rules:
+            plan = f"卖出计划：止损 {float(rules.get('stop_loss_pct', -35)):.0f}%"
+            if rules.get("stall_hours"):
+                plan += f" | {float(rules['stall_hours']):g} 小时涨不到 +{float(rules.get('stall_min_gain_pct', 0)):g}% 就卖"
+            plan += f" | 最长拿 {float(rules.get('max_hold_hours', 24)):g} 小时\n"
         await self.send(
             f"{self.mode()} ✅ <b>买入 #{pid}</b> {self.tok_link(chain, rep['address'], rep.get('symbol') or '?')}\n"
             f"原因：{e(reason)} | 评分 {rep['score']}\n"
             f"花费 {fill.native:.4f} {CHAINS[chain].native_symbol}（{fmt_usd(cost_usd)}）| 成本价 {fmt_price(entry)}\n"
-            f"{self.tx_link(chain, fill.tx)}")
+            f"{plan}{self.tx_link(chain, fill.tx)}")
 
     async def trade_sell(self, p: dict, fill: "Fill", usd: float, reason: str, closed: bool, realized: float) -> None:
         c = p["chain"]
@@ -376,8 +382,10 @@ class Telegram:
                 px = prices.get(p["token"]) or prices.get(p["token"].lower()) or 0
                 g = (px / p["entry_price"] - 1) * 100 if px and p["entry_price"] else 0
                 flag = " ⚠️无法卖出" if p["status"] == "stuck" else ""
-                lines.append(f"#{p['id']} {self.tok_link(c, p['token'], p['symbol'] or '?')} {CHAINS[c].name} "
-                             f"成本{fmt_usd(p['cost_usd'])} 现{g:+.1f}%{flag}")
+                tier = {"best": "🔥", "good": "👍"}.get(p.get("tier") or "", "")
+                held = (time.time() - float(p["opened_at"] or time.time())) / 3600
+                lines.append(f"#{p['id']} {tier}{self.tok_link(c, p['token'], p['symbol'] or '?')} {CHAINS[c].name} "
+                             f"成本{fmt_usd(p['cost_usd'])} 现{g:+.1f}% 已拿{held:.1f}h{flag}")
         return "\n".join(lines)
 
     async def _wallets(self, chain: Any) -> str:

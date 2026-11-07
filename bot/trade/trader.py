@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .executors import DryRunExecutor, EvmExecutor, Fill, GmgnExecutor, SolanaExecutor
+from .positions import exit_rules
 
 if TYPE_CHECKING:
     from ..app import App
@@ -165,15 +166,20 @@ class Trader:
             return
         pid = await self.app.db.execute(
             """INSERT INTO positions(chain,token,symbol,status,dry_run,reason,source_wallets,entry_price,cost_native,
-                 cost_usd,amount_raw,decimals,remaining_raw,high_price,opened_at)
-               VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?)""",
+                 cost_usd,amount_raw,decimals,remaining_raw,high_price,opened_at,tier)
+               VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?)""",
             (chain, token, rep.get("symbol", ""), int(self.cfg.dry_run), reason, json.dumps(wallets[:20]),
-             entry, fill.native, cost_usd, str(fill.token_raw), fill.decimals, str(fill.token_raw), entry, time.time()))
-        await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason)
+             entry, fill.native, cost_usd, str(fill.token_raw), fill.decimals, str(fill.token_raw), entry, time.time(),
+             tier))
+        await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason,
+                                    exit_rules(self.cfg.get("exit", {}) or {}, tier))
 
     async def on_smart_sell(self, s: "Signal") -> None:
         if not self.cfg.get("exit.follow_smart_sell", True):
             return
         for p in await self.app.db.open_positions():
             if p["chain"] == s.chain and p["token"] == s.token and s.wallet in json.loads(p["source_wallets"] or "[]"):
-                await self.app.positions.sell(p, 100, f"带单聪明钱 {s.wallet[:6]}… 卖出")
+                pct = float(exit_rules(self.cfg.get("exit", {}) or {}, p.get("tier")).get("follow_smart_sell_pct", 100))
+                if pct > 0:
+                    tail = "" if pct >= 100 else f"，跟卖 {pct:.0f}%"
+                    await self.app.positions.sell(p, pct, f"带单聪明钱 {s.wallet[:6]}… 卖出{tail}")

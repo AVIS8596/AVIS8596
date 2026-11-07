@@ -131,6 +131,29 @@ exit:
   max_hold_hours: 24              # 最长持仓时间
   follow_smart_sell: true         # 带单的聪明钱卖出时跟着卖
   max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
+  # 按买入档位区分（覆盖上面的同名项；没写的项沿用上面的）。
+  #   stall_hours / stall_min_gain_pct：持有满 N 小时还没涨到 +X% 就卖（"涨不上去就走"，已止盈过的不受影响）
+  #   follow_smart_sell_pct：带单聪明钱卖出时跟卖多少（%）
+  tiers:
+    normal:                       # 一般
+      max_hold_hours: 6
+      stall_hours: 1
+      stall_min_gain_pct: 15
+    good:                         # 👍 较好
+      max_hold_hours: 24
+      stall_hours: 4
+      stall_min_gain_pct: 20
+    best:                         # 🔥 优质：拿得久、止盈卖得少，让利润多跑一会
+      max_hold_hours: 72
+      stall_hours: 12
+      stall_min_gain_pct: 30
+      trailing_start_pct: 80
+      trailing_drop_pct: 35
+      follow_smart_sell_pct: 50
+      take_profit:
+        - { gain_pct: 100, sell_pct: 30 }
+        - { gain_pct: 300, sell_pct: 30 }
+        - { gain_pct: 1000, sell_pct: 50 }
 
 # ---------------- 其他接口限速（Birdeye / Jupiter / 0x 只在对应模式下用到） ----------------
 budget:

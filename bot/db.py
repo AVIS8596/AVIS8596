@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS positions (
   entry_price REAL, cost_native REAL, cost_usd REAL,
   amount_raw TEXT, decimals INTEGER, remaining_raw TEXT,
   high_price REAL, tp_stage INTEGER DEFAULT 0, sell_attempts INTEGER DEFAULT 0,
-  realized_usd REAL DEFAULT 0, opened_at REAL, closed_at REAL, close_reason TEXT
+  realized_usd REAL DEFAULT 0, opened_at REAL, closed_at REAL, close_reason TEXT,
+  tier TEXT            -- best / good / normal；空 = 分档上线前的老持仓
 );
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
 
@@ -85,6 +86,15 @@ class DB:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        # 老数据库补列（新增列只能 ALTER，CREATE TABLE IF NOT EXISTS 不会改已存在的表）
+        cur = await self.conn.execute("PRAGMA table_info(positions)")
+        if "tier" not in {r[1] for r in await cur.fetchall()}:
+            await self.conn.execute("ALTER TABLE positions ADD COLUMN tier TEXT")
+            # 分档买入上线后、本列加上之前买的持仓：从买入原因里认出档位
+            await self.conn.execute(
+                "UPDATE positions SET tier = CASE WHEN reason LIKE '%| 🔥优质%' THEN 'best' "
+                "WHEN reason LIKE '%| 👍较好%' THEN 'good' WHEN reason LIKE '%| 一般' THEN 'normal' END "
+                "WHERE tier IS NULL")
         await self.conn.commit()
 
     async def close(self) -> None:

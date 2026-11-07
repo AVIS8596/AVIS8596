@@ -13,12 +13,33 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("memebot.positions")
 
+# 按买入档位区分的卖出规则（config.yaml 的 exit.tiers 可以覆盖其中任意一项）。
+# 好标的拿得更久、止盈卖得更少；但到了"观察期"还涨不上去就卖掉，不干耗。
+DEFAULT_EXIT_TIERS: dict[str, dict] = {
+    "normal": {"max_hold_hours": 6, "stall_hours": 1, "stall_min_gain_pct": 15},
+    "good": {"max_hold_hours": 24, "stall_hours": 4, "stall_min_gain_pct": 20},
+    "best": {"max_hold_hours": 72, "stall_hours": 12, "stall_min_gain_pct": 30,
+             "trailing_start_pct": 80, "trailing_drop_pct": 35, "follow_smart_sell_pct": 50,
+             "take_profit": [{"gain_pct": 100, "sell_pct": 30}, {"gain_pct": 300, "sell_pct": 30},
+                             {"gain_pct": 1000, "sell_pct": 50}]},
+}
+
+
+def exit_rules(cfg: dict, tier: str | None) -> dict:
+    """某个档位实际生效的卖出规则 = 全局 exit 配置 + 档位默认 + config 里的档位覆盖。
+    tier 为空（分档功能上线前买的老持仓）时只用全局配置，行为和以前一样。"""
+    base = {k: v for k, v in (cfg or {}).items() if k != "tiers"}
+    if not tier:
+        return base
+    return {**base, **DEFAULT_EXIT_TIERS.get(tier, {}), **(((cfg or {}).get("tiers") or {}).get(tier) or {})}
+
 
 def decide_exit(pos: dict, price: float, cfg: dict, now: float) -> tuple[float, str]:
-    """返回 (卖出比例 0~100, 原因)。0 表示不动。
+    """返回 (卖出比例 0~100, 原因)。0 表示不动。cfg 为全局 exit 配置，按持仓的 tier 自动套用档位规则。
 
     价格 <= 0（取价失败）时绝不触发止损，避免把"没取到价格"当成"归零"误卖。
     """
+    cfg = exit_rules(cfg, pos.get("tier"))
     entry = float(pos.get("entry_price") or 0)
     if price <= 0 or entry <= 0:
         return 0, ""
@@ -36,7 +57,12 @@ def decide_exit(pos: dict, price: float, cfg: dict, now: float) -> tuple[float, 
         drop = (1 - price / high) * 100
         if drop >= float(cfg.get("trailing_drop_pct", 30)):
             return 100, f"移动止损（最高 +{high_gain:.0f}%，回撤 {drop:.0f}%）"
-    if now - float(pos.get("opened_at") or now) > float(cfg.get("max_hold_hours", 24)) * 3600:
+    held_h = (now - float(pos.get("opened_at") or now)) / 3600
+    stall_h = float(cfg.get("stall_hours") or 0)
+    stall_gain = float(cfg.get("stall_min_gain_pct") or 0)
+    if stall_h and stage == 0 and held_h >= stall_h and gain < stall_gain:
+        return 100, f"涨不上去（持有 {held_h:.1f} 小时，当前 {gain:+.1f}%，没到 +{stall_gain:.0f}%）"
+    if held_h > float(cfg.get("max_hold_hours", 24)):
         return 100, f"持仓超时（当前 {gain:+.1f}%）"
     return 0, ""
 
