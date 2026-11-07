@@ -27,6 +27,7 @@ HELP = """<b>命令列表</b>
 /learn 学习中的高手列表 + 共同规律 + 参数建议
 /learn 钱包地址 [备注] 学习这个人（生成交易画像）
 /learn auto 立即自动找一轮高手 | /learn del 地址 不再学习
+/learn token 代币地址 拆解这个币的盈利前 20 名（什么时候、什么市值买的，是不是内部人）
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
@@ -343,6 +344,9 @@ class Telegram:
             await self.send("开始自动找高手：收集 KOL / 聪明钱钱包 → 按 30 天利润取前 20 → 逐个生成画像，大约需要几分钟……")
             n = await ln.auto("solana")
             await self.send(f"自动学习完成，新增/更新 {n} 个画像。发 /learn 查看汇总")
+        elif args[0].lower() == "token" and len(args) > 1:
+            await self.send("拆解中：拉盈利前 20 名 → 逐个看入场时间/市值/标签 → 给能学的人生成画像，大约 1~2 分钟……")
+            await self.send(await ln.learn_token("solana", args[1]))
         elif args[0].lower() == "del" and len(args) > 1:
             await self.app.db.execute("DELETE FROM learn_wallets WHERE address=?", (args[1],))
             await self.send("已删除")

@@ -254,6 +254,70 @@ class Learner:
             return profile_text(label, addr, prof, stats) + tail
         return profile_text(label, addr, prof, stats)
 
+    async def learn_token(self, chain: str, token: str, top: int = 20) -> str:
+        """拆解一个币：盈利前 N 名分别在什么时候、什么市值买的，赚了几倍，是不是内部人；
+        能学的人顺便生成画像加入学习库（达标的进监听）。"""
+        token = norm_addr(chain, token)
+        gm = self.app.gmgn
+        ov = await self.app.data.overview(chain, token)
+        rows = await gm.top_traders(chain, token, 50, order_by="profit")
+        traders = [r for r in rows if int(f(r.get("addr_type"))) != 2 and f(r.get("profit")) > 0][:top]
+        if not traders:
+            return "没拿到这个币的交易者数据（地址不对，或者 GMGN 暂时没数据）"
+        sym = html.escape(str(ov.get("symbol") or "?"))
+        created, supply = f(ov.get("created_ts")), f(ov.get("total_supply"))
+        tag_name = {"sniper": "狙击", "bundler": "捆绑", "rat_trader": "老鼠仓", "dev": "dev",
+                    "smart_degen": "聪明钱", "renowned": "KOL", "kol": "KOL"}
+        lines = [f"<b>{sym} 盈利前 {len(traders)} 名</b>（市值 {fmt_usd(ov.get('mcap', 0))}）"]
+        insider, ages, mcaps, rois, learnable = 0, [], [], [], []
+        for i, r in enumerate(traders, 1):
+            a = norm_addr(chain, r.get("address") or "")
+            tags = {str(t).lower() for t in (r.get("maker_token_tags") or []) + (r.get("tags") or [])}
+            names = [tag_name[t] for t in tags if t in tag_name]
+            is_insider = bool(tags & {"sniper", "bundler", "rat_trader", "dev"})
+            insider += is_insider
+            start = f(r.get("start_holding_at"))
+            age = (start - created) / 60 if created and start >= created else None
+            mcap = f(r.get("avg_cost")) * supply if supply else 0
+            roi = f(r.get("profit_change"))
+            sold = f(r.get("sell_amount_percentage"))
+            exit_x = f(r.get("avg_sold")) / f(r.get("avg_cost")) if f(r.get("avg_cost")) > 0 and f(r.get("avg_sold")) > 0 else 0
+            if not is_insider:
+                if age is not None:
+                    ages.append(age)
+                if mcap:
+                    mcaps.append(mcap)
+                rois.append(roi)
+                learnable.append(a)
+            lines.append(
+                f"{i}. {a[:4]}…{a[-4:]} 赚 {fmt_usd(r.get('profit', 0))}（{roi * 100:+.0f}%）"
+                + (f"｜发币后 {age:.0f} 分钟" if age is not None else "")
+                + (f"、市值 {fmt_usd(mcap)} 买" if mcap else "")
+                + f"｜投入 {fmt_usd(r.get('history_bought_cost', 0))}"
+                + (f"｜卖出均价 {exit_x:.1f} 倍、已卖 {sold * 100:.0f}%" if exit_x else f"｜已卖 {sold * 100:.0f}%")
+                + (f"｜{'、'.join(names)}" if names else ""))
+        lines.append("")
+        lines.append(f"其中 {insider} 个是狙击/捆绑/老鼠仓/dev（内部人，学不来）")
+        if ages or mcaps:
+            lines.append(f"其余 {len(learnable)} 人：中位在发币后 {_med(ages):.0f} 分钟、市值 {fmt_usd(_med(mcaps))} 入场，"
+                         f"中位赚 {_med(rois) * 100:+.0f}%")
+        # 能学的人生成画像（看他们平时是不是也这样做，还是这次碰巧）
+        good = 0
+        for i, a in enumerate(learnable[:top], 1):
+            try:
+                await self.learn(chain, a, label=f"{sym} 盈利第{i}", source="token")
+                r2 = await self.app.db.fetchone("SELECT profile FROM learn_wallets WHERE chain=? AND address=?", (chain, a))
+                if r2 and not bot_like(json.loads(r2["profile"] or "{}")):
+                    good += 1
+            except Exception as e:  # noqa: BLE001
+                log.debug("画像 %s 失败: %s", a, e)
+            await asyncio.sleep(0.5)
+        lines.append(f"已给其余 {len(learnable)} 人生成画像，其中平时打法机器人学得来的 {good} 个，已加入学习库"
+                     "（发 /learn 看共同规律，达标的已加入聪明钱监听）")
+        if learnable:
+            await self.app.smart.evaluate_many(chain, {a: f"token_top:{sym}" for a in learnable})
+        return "\n".join(lines)
+
     async def summary(self) -> str:
         rows = await self.app.db.fetchall("SELECT * FROM learn_wallets ORDER BY profiled_at DESC LIMIT 50")
         if not rows:

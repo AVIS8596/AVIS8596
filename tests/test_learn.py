@@ -99,3 +99,53 @@ def test_learn_flow(tmp_path):
             await db.close()
 
     asyncio.run(go())
+
+
+def test_learn_token(tmp_path):
+    from bot.db import DB
+    acts, holds = _acts(age_sec=1800)
+    T = 1_800_000_000
+
+    class GM:
+        async def top_traders(self, chain, token, limit, order_by="profit"):
+            return [
+                {"address": "POOL", "addr_type": 2, "profit": "999999"},
+                {"address": "SNIPER1", "profit": "50000", "profit_change": "20", "start_holding_at": T + 2,
+                 "avg_cost": "0.000002", "avg_sold": "0.00004", "sell_amount_percentage": "1",
+                 "history_bought_cost": "500", "maker_token_tags": ["sniper"]},
+                {"address": "HUMAN1", "profit": "8000", "profit_change": "4", "start_holding_at": T + 1800,
+                 "avg_cost": "0.00005", "avg_sold": "0.00025", "sell_amount_percentage": "0.8",
+                 "history_bought_cost": "2000", "tags": ["smart_degen"]},
+            ]
+
+        async def wallet_activity(self, *a, **k):
+            return {"activities": acts}
+
+        async def wallet_holdings(self, *a, **k):
+            return {"list": holds}
+
+        async def wallet_stats(self, *a, **k):
+            return {"realized_profit": "9000", "pnl_stat": {"winrate": 0.66}}
+
+    async def go():
+        db = DB(tmp_path / "t.db")
+        await db.open()
+        ev = []
+
+        async def evaluate_many(chain, addrs):
+            ev.append(dict(addrs))
+
+        async def overview(chain, token):
+            return {"symbol": "MEME", "created_ts": T, "total_supply": 1e9, "mcap": 3e6}
+        app = SimpleNamespace(gmgn=GM(), db=db, cfg=SimpleNamespace(get=lambda k, d=None: d),
+                              data=SimpleNamespace(overview=overview), smart=SimpleNamespace(evaluate_many=evaluate_many))
+        try:
+            txt = await Learner(app).learn_token("solana", "TOKENX")
+            assert "MEME 盈利前 2 名" in txt and "POOL" not in txt
+            assert "1 个是狙击" in txt and "狙击" in txt.split("\n")[1]
+            assert "发币后 30 分钟、市值 $50.0K 买" in txt and "卖出均价 5.0 倍" in txt and "聪明钱" in txt
+            assert ev and set(ev[-1]) == {"HUMAN1"}
+        finally:
+            await db.close()
+
+    asyncio.run(go())
