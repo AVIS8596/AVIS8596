@@ -24,6 +24,9 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/learn 学习中的高手列表 + 共同规律 + 参数建议
+/learn 钱包地址 [备注] 学习这个人（生成交易画像）
+/learn auto 立即自动找一轮高手 | /learn del 地址 不再学习
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
@@ -257,6 +260,8 @@ class Telegram:
                 return
             from ..trade.review import why_text
             await self.send(await why_text(self.app, int(args[0])))
+        elif cmd == "/learn":
+            await self._learn(args)
         elif cmd == "/whynot":
             await self._whynot(args)
         elif cmd == "/review":
@@ -326,6 +331,24 @@ class Telegram:
                 await self.send("地址标记记录：" + "，".join(f"{names.get(k, k)} {v} 次" for k, v in cnt.items()))
         else:
             await self.send("看不懂这个命令。\n" + HELP)
+
+    async def _learn(self, args: list[str]) -> None:
+        ln = getattr(self.app, "learner", None)
+        if not ln:
+            await self.send("学习功能需要 GMGN 接口")
+            return
+        if not args:
+            await self.send(await ln.summary())
+        elif args[0].lower() == "auto":
+            await self.send("开始自动找高手：收集 KOL / 聪明钱钱包 → 按 30 天利润取前 20 → 逐个生成画像，大约需要几分钟……")
+            n = await ln.auto("solana")
+            await self.send(f"自动学习完成，新增/更新 {n} 个画像。发 /learn 查看汇总")
+        elif args[0].lower() == "del" and len(args) > 1:
+            await self.app.db.execute("DELETE FROM learn_wallets WHERE address=?", (args[1],))
+            await self.send("已删除")
+        else:
+            await self.send("分析中，大约需要 20~40 秒……")
+            await self.send(await ln.learn("solana", args[0], " ".join(args[1:])))
 
     async def _whynot(self, args: list[str]) -> None:
         chains = self.app.cfg.enabled_chains

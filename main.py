@@ -74,6 +74,9 @@ async def run_bot(cfg) -> None:
         from bot.strategies import Strategies
         strat = Strategies(app)
         app.strategies = strat
+        from bot.learn import Learner
+        app.learner = Learner(app)
+        jobs.append(("学习高手", app.learner.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
     for c in cfg.enabled_chains:

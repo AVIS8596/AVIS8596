@@ -88,6 +88,12 @@ CREATE TABLE IF NOT EXISTS skipped (
   trigger TEXT, cat TEXT, reason TEXT, price REAL, px_1h REAL
 );
 CREATE INDEX IF NOT EXISTS idx_skipped_ts ON skipped(ts);
+
+-- 学习中的顶级交易者及其交易画像
+CREATE TABLE IF NOT EXISTS learn_wallets (
+  chain TEXT, address TEXT, label TEXT, source TEXT, added_at REAL, profiled_at REAL, profile TEXT,
+  PRIMARY KEY (chain, address)
+);
 CREATE INDEX IF NOT EXISTS idx_signals_wallet ON signals(chain, wallet, ts);
 """
 

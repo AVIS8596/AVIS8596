@@ -35,6 +35,7 @@ WEIGHTS = {
     "/v1/market/token_kline": 2, "/v1/market/rank": 1, "/v1/trenches": 3,
     "/v1/user/smartmoney": 1, "/v1/user/kol": 1, "/v1/user/wallet_stats": 3,
     "/v1/user/info": 2, "/v1/user/created_tokens": 3,
+    "/v1/user/wallet_holdings": 2, "/v1/user/wallet_activity": 3, "/v1/user/wallet_profits": 3,
     "/v1/trade/swap": 10, "/v1/trade/query_order": 5, "/v1/trade/gas_price": 1, "/v1/trade/quote": 10,
 }
 SIGNED = {"/v1/trade/swap", "/v1/trade/query_order", "/v1/trade/multi_swap",
@@ -140,7 +141,8 @@ class Gmgn:
         if path in self.disabled:
             return None
         signed = path in SIGNED
-        if signed and time.time() < self.trade_block_until:
+        trade = path.startswith("/v1/trade/")
+        if trade and time.time() < self.trade_block_until:
             raise GmgnError(path, 403, None, "PLAN_UPGRADE_REQUIRED", self.trade_block_msg)
         if signed and not self.pk:
             raise GmgnError(path, 0, None, "NO_PRIVATE_KEY", "交易类接口需要 GMGN_PRIVATE_KEY")
@@ -194,7 +196,7 @@ class Gmgn:
             msg = str(js.get("message") or "")
             if err in ("PLAN_UPGRADE_REQUIRED", "PRO_PLAN_REQUIRED"):
                 up = str(js.get("upgrade_message") or msg or "")
-                if signed:
+                if trade:
                     # 交易接口不永久停用：免费版"资产≥$100"每小时才更新一次，充值后过一会儿可能就恢复了
                     self.trade_block_until = time.time() + 1800
                     self.trade_block_msg = up or "当前套餐不支持 API 交易"
@@ -273,6 +275,25 @@ class Gmgn:
             d = d[0] if d else {}
         return d or {}
 
+    async def wallet_activity(self, chain: str, wallet: str, limit: int = 50, cursor: str | None = None) -> dict:
+        """钱包交易流水。返回 {"activities": [...], "next": 游标}。每条有 event_type、token.address、
+        cost_usd、price_usd、timestamp。"""
+        return await self.request("GET", "/v1/user/wallet_activity", {
+            "chain": CHAIN_MAP[chain], "wallet_address": wallet, "limit": limit, "cursor": cursor}) or {}
+
+    async def wallet_holdings(self, chain: str, wallet: str, limit: int = 50, cursor: str | None = None) -> dict:
+        """钱包持仓（含已清仓的），按最近活跃排序。返回 {"list": [...], "next": 游标}。需要签名。"""
+        return await self.request("GET", "/v1/user/wallet_holdings", {
+            "chain": CHAIN_MAP[chain], "wallet_address": wallet, "limit": limit, "cursor": cursor,
+            "order_by": "last_active_timestamp", "direction": "desc", "hide_closed": "false",
+            "hide_airdrop": "true", "hide_abnormal": "true"}) or {}
+
+    async def wallet_profits(self, chain: str, wallets: list[str], period: str = "30d") -> list[dict]:
+        """一次查最多 100 个钱包的盈亏（realized_profit 等是字符串）。"""
+        d = await self.request("POST", "/v1/user/wallet_profits", {}, {
+            "chain": CHAIN_MAP[chain], "period": period, "wallet_addresses": wallets[:100]})
+        return _rows(d)
+
     async def user_info(self) -> Any:
         return await self.request("GET", "/v1/user/info")
 
@@ -292,7 +313,7 @@ def _rows(d: Any) -> list[dict]:
     if isinstance(d, list):
         return d
     if isinstance(d, dict):
-        for k in ("list", "holders", "traders", "rank", "items", "data"):
+        for k in ("list", "activities", "holders", "traders", "rank", "items", "data"):
             v = d.get(k)
             if isinstance(v, list):
                 return v

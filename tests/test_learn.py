@@ -1,0 +1,96 @@
+"""向高手学习：画像计算（不连网）。"""
+import asyncio
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from bot.learn import Learner, build_positions, profile_from, suggestions  # noqa: E402
+
+T0 = 1_800_000_000
+
+
+def _acts(n=8):
+    acts, holds = [], []
+    for i in range(n):
+        tok = f"T{i}"
+        created = T0 + i * 10000
+        buy_ts = created + 120            # 发币后 2 分钟买
+        win = i % 4 != 0                  # 75% 赚钱
+        sell_px = 2e-5 if win else 0.7e-5
+        acts.append({"event_type": "buy", "token": {"address": tok, "symbol": f"S{i}"}, "price_usd": "1e-5",
+                     "cost_usd": "100", "timestamp": buy_ts, "launchpad_platform": "Pump.fun"})
+        acts.append({"event_type": "sell", "token": {"address": tok}, "price_usd": str(sell_px * 0.8),
+                     "cost_usd": "60", "timestamp": buy_ts + 600})
+        acts.append({"event_type": "sell", "token": {"address": tok}, "price_usd": str(sell_px),
+                     "cost_usd": "80", "timestamp": buy_ts + 1200})
+        holds.append({"token": {"token_address": tok, "creation_timestamp": created, "total_supply": "1000000000"},
+                      "history_bought_cost": "100", "history_sold_income": "200" if win else "70",
+                      "total_profit_pnl": "1.0" if win else "-0.25", "balance": "0", "usd_value": "0",
+                      "end_holding_at": buy_ts + 1200})
+    return acts, holds
+
+
+def test_profile():
+    acts, holds = _acts()
+    pos = build_positions(acts, holds)
+    assert len(pos) == 8 and abs(pos[0]["entry_age_min"] - 2) < 0.01 and abs(pos[0]["entry_mcap"] - 10000) < 1
+    pr = profile_from(pos)
+    assert pr["n"] == 8 and abs(pr["win_rate"] - 0.75) < 1e-9
+    assert pr["entry_age_min"] == 2 and pr["hold_min"] == 20 and pr["early_pct"] == 1.0
+    assert pr["loss_cut"] == -25 and pr["win_gain"] == 100 and pr["style"].startswith("狙击型")
+    cfg = SimpleNamespace(get=lambda k, d=None: {"exit.stop_loss_pct": -35,
+                                                  "exit.take_profit": [{"gain_pct": 100}]}.get(k, d))
+    tips = suggestions([pr, pr, pr], cfg)
+    assert any("狙击" in t for t in tips) and any("止损" in t for t in tips)
+    assert "至少 3 个" in suggestions([pr], cfg)[0]
+
+
+def test_learn_flow(tmp_path):
+    from bot.db import DB
+    acts, holds = _acts()
+
+    class GM:
+        async def wallet_activity(self, chain, w, limit=50, cursor=None):
+            return {"activities": acts, "next": None}
+
+        async def wallet_holdings(self, chain, w, limit=50, cursor=None):
+            return {"list": holds, "next": None}
+
+        async def wallet_stats(self, chain, w, period="30d"):
+            return {"realized_profit": "25000", "pnl_stat": {"winrate": 0.7}, "common": {"twitter_username": "ace"}}
+
+        async def kol(self, chain, n):
+            return [{"maker": "W1"}, {"maker": "W2"}]
+
+        async def smartmoney(self, chain, n):
+            return [{"maker": "W2"}, {"maker": "W3"}]
+
+        async def wallet_profits(self, chain, ws, period):
+            return [{"wallet_address": w, "realized_profit": str(1000 * (i + 1))} for i, w in enumerate(ws)]
+
+    async def go():
+        db = DB(tmp_path / "l.db")
+        await db.open()
+        evaluated = []
+
+        async def evaluate_many(chain, addrs):
+            evaluated.append(dict(addrs))
+            return 0
+
+        async def wallet(chain, a):
+            return None
+        db.wallet = wallet
+        app = SimpleNamespace(gmgn=GM(), db=db, cfg=SimpleNamespace(get=lambda k, d=None: d, enabled_chains=["solana"]),
+                              smart=SimpleNamespace(evaluate_many=evaluate_many))
+        ln = Learner(app)
+        txt = await ln.learn("solana", "WALLETX", "")
+        assert "@ace" in txt and "入场" in txt and "只学习" in txt
+        n = await ln.auto("solana", top=2)
+        assert n == 2 and set(evaluated[-1]) == {"W3", "W2"}       # 30 天利润最高的 2 个
+        s = await ln.summary()
+        assert "学习中的交易者 3 个" in s
+        await db.close()
+
+    asyncio.run(go())
