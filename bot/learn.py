@@ -134,7 +134,7 @@ def profile_text(label: str, addr: str, prof: dict, stats: dict | None = None) -
         f"{prof['early_pct'] * 100:.0f}% 在毕业前买",
         f"仓位：中位 {fmt_usd(prof['size'])}/笔",
         f"持有：中位 {prof['hold_min']:.0f} 分钟",
-        f"止盈：第一次卖出时中位 +{prof['first_sell_gain']:.0f}%；盈利单最后中位 +{prof['win_gain']:.0f}%；"
+        f"止盈：第一次卖出时中位 {prof['first_sell_gain']:+.0f}%；盈利单最后中位 {prof['win_gain']:+.0f}%；"
         f"一般分 {prof['sells_per_pos']:.0f} 次卖",
         f"止损：亏损单中位 {prof['loss_cut']:.0f}% 离场",
         f"利润集中度：前 3 个大单占 {prof['top3_share'] * 100:.0f}% 利润"
@@ -143,19 +143,36 @@ def profile_text(label: str, addr: str, prof: dict, stats: dict | None = None) -
     ])
 
 
+def bot_like(p: dict) -> str:
+    """机器人学不来的打法：狙击（发币几分钟内买）或秒进秒出（几分钟内卖），多半是程序化的狙击/高频机器人。"""
+    if p.get("n", 0) < 5:
+        return "样本太少"
+    if float(p.get("hold_min") or 0) < 5:
+        return "秒进秒出"
+    if float(p.get("entry_age_min") or 0) < 5:
+        return "狙击"
+    return ""
+
+
 def suggestions(profiles: list[dict], cfg) -> list[str]:
-    """把多个高手的共同规律和机器人当前参数对比，给出建议（只建议，不自动改）。"""
-    ps = [p for p in profiles if p.get("n", 0) >= 5]
+    """把多个高手的共同规律和机器人当前参数对比，给出建议（只建议，不自动改）。
+    只用"机器人学得来"的人：狙击型和秒进秒出的是程序化打法，拿来调参数会把机器人带偏。"""
+    ok = [p for p in profiles if not bot_like(p)]
+    skipped = Counter(bot_like(p) for p in profiles if bot_like(p))
+    note = ("（已排除 " + "、".join(f"{k} {v} 个" for k, v in skipped.items()) + "：这些是狙击/高频程序的打法，机器人学不来）"
+            if skipped else "")
+    ps = ok
     if len(ps) < 3:
-        return [f"有效画像只有 {len(ps)} 个，至少 3 个才能总结共同规律"]
+        return [f"能学的画像只有 {len(ps)} 个{note}，至少 3 个才能总结共同规律。"
+                "可以多 /learn 几个持仓时间长一点（十几分钟以上）的人"]
     out = []
     age = _med([p["entry_age_min"] for p in ps])
     hold = _med([p["hold_min"] for p in ps])
     fs = _med([p["first_sell_gain"] for p in ps])
     loss = _med([p["loss_cut"] for p in ps])
     early = _med([p["early_pct"] for p in ps])
-    out.append(f"共同规律（{len(ps)} 人的中位数）：发币后 {age:.0f} 分钟入场、{early * 100:.0f}% 在毕业前买、"
-               f"拿 {hold:.0f} 分钟、第一次卖在 +{fs:.0f}%、亏 {-loss:.0f}% 砍仓")
+    out.append(f"共同规律（{len(ps)} 人的中位数{note}）：发币后 {age:.0f} 分钟入场、{early * 100:.0f}% 在毕业前买、"
+               f"拿 {hold:.0f} 分钟、第一次卖在 {fs:+.0f}%、亏 {-loss:.0f}% 砍仓")
     if age < 5 or early > 0.6:
         out.append("• 他们大多在发币几分钟内、毕业前就买（狙击/内盘），机器人通过 API 下单慢几秒，这部分学不来，"
                    "直接跟他们的单容易买在被抬高的价格上")
@@ -165,7 +182,7 @@ def suggestions(profiles: list[dict], cfg) -> list[str]:
     tps = cfg.get("exit.take_profit") or [{"gain_pct": 100}]
     tp1 = float(tps[0]["gain_pct"]) if tps else 100
     if fs and fs < tp1 * 0.7:
-        out.append(f"• 他们第一次止盈中位在 +{fs:.0f}%，机器人第一档是 +{tp1:.0f}%：可以考虑增加一档更早的小止盈")
+        out.append(f"• 他们第一次止盈中位在 {fs:+.0f}%，机器人第一档是 +{tp1:.0f}%：可以考虑增加一档更早的小止盈")
     if hold and hold < 60:
         out.append(f"• 他们中位只拿 {hold:.0f} 分钟，比机器人"
                    f"一般档的 1 小时观察期短：跟这类人要更快止盈")
@@ -234,16 +251,17 @@ class Learner:
         rows = await self.app.db.fetchall("SELECT * FROM learn_wallets ORDER BY profiled_at DESC LIMIT 50")
         if not rows:
             return "还没有学习任何钱包。发 /learn 钱包地址 添加，或发 /learn auto 让机器人自动找"
-        profs = []
-        lines = [f"<b>学习中的交易者 {len(rows)} 个</b>"]
-        for r in sorted(rows, key=lambda r: -f((json.loads(r["profile"] or "{}").get("stats") or {}).get("realized_usd"))):
-            p = json.loads(r["profile"] or "{}")
-            profs.append(p)
+        profs = [json.loads(r["profile"] or "{}") for r in rows]
+        n_bot = sum(1 for p in profs if bot_like(p))
+        lines = [f"<b>学习中的交易者 {len(rows)} 个</b>（🤖 狙击/秒进秒出 {n_bot} 个，机器人学不来，只看不学）"]
+        order = sorted(zip(rows, profs), key=lambda x: (bool(bot_like(x[1])),
+                                                        -f((x[1].get("stats") or {}).get("realized_usd"))))
+        for r, p in order[:15]:
             st = p.get("stats") or {}
-            if len(lines) <= 15:
-                lines.append(f"{html.escape(r['label'] or r['address'][:6] + '…')}（{'手动' if r['source'] == 'manual' else '自动'}）"
-                             f" {p.get('style', '?')} | 30天 {fmt_usd(st.get('realized_usd', 0))}"
-                             f" | 拿 {p.get('hold_min', 0):.0f} 分钟 | 第一次卖 +{p.get('first_sell_gain', 0):.0f}%")
+            mark = "🤖 " if bot_like(p) else ""
+            lines.append(f"{mark}{html.escape(r['label'] or r['address'][:6] + '…')}（{'手动' if r['source'] == 'manual' else '自动'}）"
+                         f" {p.get('style', '?')} | 30天 {fmt_usd(st.get('realized_usd', 0))}"
+                         f" | 拿 {p.get('hold_min', 0):.0f} 分钟 | 第一次卖 {p.get('first_sell_gain', 0):+.0f}%")
         lines.append("")
         lines += suggestions(profs, self.cfg)
         lines.append("\n查看某个人的详细画像：/learn 钱包地址")
@@ -271,19 +289,23 @@ class Learner:
             except Exception as e:  # noqa: BLE001
                 log.warning("批量查盈亏失败: %s", e)
         ranked.sort(reverse=True)
-        n = 0
-        for profit, a in ranked[:top]:
-            if profit <= 0:
+        n, good = 0, []
+        for profit, a in ranked[:top * 3]:   # 狙击/高频程序占大多数，多看一些，凑够 N 个"学得来"的
+            if profit <= 0 or len(good) >= top:
                 break
             try:
                 await self.learn(chain, a, source="auto")
                 n += 1
+                r = await self.app.db.fetchone("SELECT profile FROM learn_wallets WHERE chain=? AND address=?",
+                                               (chain, a))
+                if r and not bot_like(json.loads(r["profile"] or "{}")):
+                    good.append(a)
             except Exception as e:  # noqa: BLE001
                 log.warning("学习 %s 失败: %s", a, e)
             await asyncio.sleep(1)
-        if ranked:
-            # 达标的自动进监听名单（照常过聪明钱标准）
-            await self.app.smart.evaluate_many(chain, {a: "learn_top" for _, a in ranked[:top]})
+        if good:
+            # 学得来的、达标的自动进监听名单（照常过聪明钱标准）
+            await self.app.smart.evaluate_many(chain, {a: "learn_top" for a in good})
         return n
 
     async def run(self) -> None:

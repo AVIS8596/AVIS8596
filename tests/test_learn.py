@@ -11,12 +11,12 @@ from bot.learn import Learner, build_positions, profile_from, suggestions  # noq
 T0 = 1_800_000_000
 
 
-def _acts(n=8):
+def _acts(n=8, age_sec=120):
     acts, holds = [], []
     for i in range(n):
         tok = f"T{i}"
         created = T0 + i * 10000
-        buy_ts = created + 120            # 发币后 2 分钟买
+        buy_ts = created + age_sec        # 默认发币后 2 分钟买
         win = i % 4 != 0                  # 75% 赚钱
         sell_px = 2e-5 if win else 0.7e-5
         acts.append({"event_type": "buy", "token": {"address": tok, "symbol": f"S{i}"}, "price_usd": "1e-5",
@@ -42,14 +42,17 @@ def test_profile():
     assert pr["loss_cut"] == -25 and pr["win_gain"] == 100 and pr["style"].startswith("狙击型")
     cfg = SimpleNamespace(get=lambda k, d=None: {"exit.stop_loss_pct": -35,
                                                   "exit.take_profit": [{"gain_pct": 100}]}.get(k, d))
-    tips = suggestions([pr, pr, pr], cfg)
-    assert any("狙击" in t for t in tips) and any("止损" in t for t in tips)
-    assert "至少 3 个" in suggestions([pr], cfg)[0]
+    # 狙击型学不来：不拿来总结规律
+    assert "能学的画像只有 0 个" in suggestions([pr, pr, pr], cfg)[0]
+    good = profile_from(build_positions(*_acts(age_sec=1800)))     # 发币 30 分钟后买、拿 20 分钟
+    assert good["style"].startswith("早期型")
+    tips = suggestions([good, good, good, pr], cfg)
+    assert "排除 狙击 1 个" in tips[0] and any("止损" in t for t in tips) and any("+100%" in t for t in tips)
 
 
 def test_learn_flow(tmp_path):
     from bot.db import DB
-    acts, holds = _acts()
+    acts, holds = _acts(age_sec=1800)
 
     class GM:
         async def wallet_activity(self, chain, w, limit=50, cursor=None):
@@ -85,12 +88,14 @@ def test_learn_flow(tmp_path):
         app = SimpleNamespace(gmgn=GM(), db=db, cfg=SimpleNamespace(get=lambda k, d=None: d, enabled_chains=["solana"]),
                               smart=SimpleNamespace(evaluate_many=evaluate_many))
         ln = Learner(app)
-        txt = await ln.learn("solana", "WALLETX", "")
-        assert "@ace" in txt and "入场" in txt and "只学习" in txt
-        n = await ln.auto("solana", top=2)
-        assert n == 2 and set(evaluated[-1]) == {"W3", "W2"}       # 30 天利润最高的 2 个
-        s = await ln.summary()
-        assert "学习中的交易者 3 个" in s
-        await db.close()
+        try:
+            txt = await ln.learn("solana", "WALLETX", "")
+            assert "@ace" in txt and "入场" in txt and "只学习" in txt
+            n = await ln.auto("solana", top=2)
+            assert n == 2 and set(evaluated[-1]) == {"W3", "W2"}       # 30 天利润最高的 2 个
+            s = await ln.summary()
+            assert "学习中的交易者 3 个" in s and "共同规律" in s
+        finally:
+            await db.close()
 
     asyncio.run(go())
