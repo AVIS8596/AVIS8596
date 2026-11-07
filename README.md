@@ -92,8 +92,8 @@ bash deploy/install.sh
 
 # 3. 按第二节生成 GMGN 密钥、申请 API、加白名单（代码已强制走 IPv4，关 IPv6 可跳过）
 
-# 4. 填写 key
-nano .env
+# 4. 填写 key（一问一答，粘贴后回车即可）
+python3 deploy/setup_env.py
 
 # 5. 检查所有 key（会给你的 TG 发一条测试消息）
 .venv/bin/python main.py check
@@ -117,7 +117,8 @@ tail -f logs/memebot.log
 | 回测近 7 天信号 | `.venv/bin/python main.py backtest --days 7` |
 | 回测并淘汰差钱包 | `.venv/bin/python main.py backtest --days 7 --apply` |
 | 手动跑一轮聪明钱发现 | `.venv/bin/python main.py discover` |
-| 更新到最新代码 | `cd ~/memebot && git pull origin claude/memebot && sudo systemctl restart memebot` |
+| 更新到最新代码 | `cd ~/memebot && git pull --rebase --autostash origin claude/memebot && sudo systemctl restart memebot` |
+| 修改 key / 节点地址 | `python3 deploy/setup_env.py`（一问一答，不用 nano） |
 
 ---
 
