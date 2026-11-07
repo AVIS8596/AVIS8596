@@ -404,6 +404,12 @@ class Telegram:
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
         r = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>?", (time.time() - 3600,))
         lines.append(f"近1小时信号 {r['n']} 条")
+        sk = await db.fetchone("SELECT COUNT(*) n FROM skipped WHERE ts>?", (time.time() - 3600,))
+        lines.append(f"近1小时被风控拦下 {sk['n']} 个币")
+        strat = getattr(self.app, "strategies", None)
+        if strat:
+            for c in self.app.cfg.enabled_chains:
+                lines.append(strat.status_text(c))
         usage = self.app.data.usage_text()
         if usage:
             lines.append(usage)

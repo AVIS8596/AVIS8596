@@ -144,6 +144,7 @@ class Strategies:
         self.cfg = app.cfg
         self.hist: dict[tuple[str, str], deque] = {}
         self.fired: dict[str, float] = {}   # 已触发的币（12 小时内不重复）
+        self.stats: dict[str, dict] = {}    # 每条链最近一轮扫描的概况（/status 里显示）
 
     def conf(self, name: str) -> dict:
         base = EARLY_DEFAULTS if name == "early" else NARRATIVE_DEFAULTS
@@ -156,6 +157,7 @@ class Strategies:
                 await self.poll(chain)
             except Exception as e:  # noqa: BLE001
                 log.warning("%s 主动建仓扫描失败: %s", chain, e)
+                self.stats.setdefault(chain, {})["error"] = str(e)[:80]
             await asyncio.sleep(poll)
 
     async def poll(self, chain: str, items: list[dict] | None = None) -> list[tuple[str, str, str]]:
@@ -173,6 +175,8 @@ class Strategies:
             if n and v > leader.get(n, (-1.0, ""))[0]:
                 leader[n] = (v, str(it.get("address")))
         fired: list[tuple[str, str, str]] = []
+        st = {"ts": now, "items": len(items), "near": 0, "clean": 0, "best_growth": None, "best_narr": None,
+              "error": ""}
         for it in items:
             if not it.get("address"):
                 continue
@@ -184,6 +188,15 @@ class Strategies:
             if now - self.fired.get(f"{chain}:{addr}", 0) < 12 * 3600:
                 continue
             reason, tier = "", "normal"
+            if it.get("_stage") == "即将毕业":
+                st["near"] += 1
+                if not structure_problem(it, ec):
+                    st["clean"] += 1
+                    old = [(t, h) for t, h in dq_before if now - t <= float(ec["growth_window_min"]) * 120]
+                    if old and old[0][1] > 0 and now - old[0][0] >= 60:
+                        g = (int(f(it.get("holder_count"))) / old[0][1] - 1) * 100
+                        if st["best_growth"] is None or g > st["best_growth"][0]:
+                            st["best_growth"] = (g, str(it.get("symbol") or "?"))
             if ec["enabled"] and it.get("_stage") == "即将毕业":
                 reason = early_signal(it, dq_before, now, ec)
                 if reason and (int(f(it.get("smart_degen_count"))) >= 2 or int(f(it.get("renowned_count"))) >= 1):
@@ -200,6 +213,8 @@ class Strategies:
                     if names.get(n, 0) >= 3 and not is_leader:
                         continue   # 同名跟风盘，不碰
                     sc, notes = narrative_score(it, names.get(n, 0), is_leader)
+                    if st["best_narr"] is None or sc > st["best_narr"][0]:
+                        st["best_narr"] = (sc, str(it.get("symbol") or "?"))
                     if sc >= int(nc["min_score"]):
                         reason = f"{NARRATIVE}（{sc} 分：{'、'.join(notes[:4])}）"
             if reason:
@@ -208,12 +223,30 @@ class Strategies:
                 t = asyncio.create_task(self.fire(chain, addr, reason, tier))
                 self.app.hub._tasks.add(t)
                 t.add_done_callback(self.app.hub._tasks.discard)
+        self.stats[chain] = st
         cutoff = now - 3600
         for k in [k for k, d in self.hist.items() if d and d[-1][0] < cutoff]:
             self.hist.pop(k, None)
         for k in [k for k, t in self.fired.items() if now - t > 12 * 3600]:
             self.fired.pop(k, None)
         return fired
+
+    def status_text(self, chain: str) -> str:
+        st = self.stats.get(chain)
+        if not st:
+            return "主动建仓：还没扫完第一轮"
+        if st.get("error") and not st.get("items"):
+            return f"主动建仓：扫描出错 {st['error']}"
+        ago = time.time() - st["ts"]
+        ec, nc = self.conf("early"), self.conf("narrative")
+        g = st.get("best_growth")
+        nb = st.get("best_narr")
+        parts = [f"主动建仓（{ago:.0f} 秒前扫描 {st['items']} 个币）",
+                 f"  快毕业 {st['near']} 个，结构干净 {st['clean']} 个"
+                 + (f"，持有人增长最快 {g[1]} +{g[0]:.0f}%（要 ≥{ec['min_holder_growth_pct']}%）" if g else "")]
+        if nb:
+            parts.append(f"  叙事分最高 {nb[1]} {nb[0]} 分（要 ≥{nc['min_score']}）")
+        return "\n".join(parts)
 
     async def fire(self, chain: str, token: str, reason: str, tier: str) -> None:
         name = "early" if reason.startswith(EARLY) else "narrative"
