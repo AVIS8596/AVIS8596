@@ -17,6 +17,28 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("memebot.trader")
 TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
+# 这些拒绝原因和标的好坏无关（开关、持仓满、冷却……），不记入"被过滤的信号"统计
+NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期")
+SKIP_CATS = [("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
+             ("跟这个钱包", "快手/战绩差钱包"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
+             ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
+             ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少")]
+
+
+def skip_cat(why: str) -> str:
+    for pre, name in SKIP_CATS:
+        if why.startswith(pre):
+            return name
+    return "其他"
+
+
+def looks_fake(rep: dict, t: dict) -> str:
+    """市值和成交量严重不匹配（比如市值上亿、1 小时只成交 1 万）= 虚高市值的盘子。返回原因，正常返回空。"""
+    mcap, vol = float(rep.get("mcap") or 0), float(rep.get("volume_1h") or 0)
+    ratio = float(t.get("fake_mcap_vol_ratio", 500))
+    if mcap >= float(t.get("fake_mcap_min_usd", 3_000_000)) and mcap > max(vol, 1) * ratio:
+        return f"市值虚高（市值 ${mcap / 1e6:.1f}M，1 小时成交只有 ${vol:,.0f}）"
+    return ""
 
 
 class Trader:
@@ -54,9 +76,12 @@ class Trader:
         until = float(await self.app.db.kv_get("pause_until", 0) or 0)
         if until > time.time():
             return "当日亏损达到上限，暂停到明天"
+        su = float(await self.app.db.kv_get("streak_pause_until", 0) or 0)
+        if su > time.time():
+            return f"连亏熔断，暂停买入到 {self.app.fmt_time(su)}"
         return ""
 
-    async def check(self, chain: str, token: str, rep: dict) -> str:
+    async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None) -> str:
         """返回拒绝原因；空字符串表示可以买。"""
         t = self.cfg.get("trading", {}) or {}
         if not t.get("enabled", False):
@@ -81,6 +106,18 @@ class Trader:
         age = rep.get("age_hours", 0) or 0
         if age and age > float(t.get("max_token_age_hours", 72)):
             return f"代币上线 {age:.0f} 小时，超过上限"
+        n_smart = len(set(wallets or []) | set(rep.get("smart_buyers") or []))
+        chg = float(rep.get("change_1h") or 0)
+        if chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
+            return f"1 小时已涨 {chg:.0f}%，不追高（3 个以上聪明钱一起买才追）"
+        fake = looks_fake(rep, t)
+        if fake:
+            return fake
+        b, sl = int(rep.get("buys_1h") or 0), int(rep.get("sells_1h") or 0)
+        if sl >= 30 and sl > b * float(t.get("max_sell_buy_ratio", 1.5)):
+            return f"卖盘明显大于买盘（1 小时买 {b} 笔 / 卖 {sl} 笔）"
+        if 0 < int(rep.get("holders") or 0) < int(t.get("min_holders", 80)):
+            return f"持有人只有 {rep['holders']} 个，太少"
         db = self.app.db
         if await db.has_open_position(chain, token):
             return "已有持仓"
@@ -99,17 +136,31 @@ class Trader:
         async with lock:
             self._buying.add(key)
             try:
-                why = await self.check(chain, token, rep)
+                why = await self.check(chain, token, rep, wallets)
                 if why:
-                    log.info("跳过 %s %s（%s）：%s", chain, rep.get("symbol"), reason, why)
-                    if self.cfg.get("trading.notify_skips", False):
-                        await self.app.tg.send(f"⏭ 跳过 {rep.get('symbol')}（{reason}）：{why}")
+                    await self.skip(chain, token, rep, reason, why)
                     return
                 await self._buy(chain, token, rep, reason, wallets)
             finally:
                 self._buying.discard(key)
                 if len(self._locks) > 5000:
                     self._locks = {k: v for k, v in self._locks.items() if v.locked()}
+
+    async def skip(self, chain: str, token: str, rep: dict, trigger: str, why: str) -> None:
+        """记录一次被拦下的买入信号。和标的质量有关的会存下来，1 小时后回看价格，用于复盘过滤条件是否太严。"""
+        log.info("跳过 %s %s（%s）：%s", chain, rep.get("symbol"), trigger, why)
+        if self.cfg.get("trading.notify_skips", False):
+            await self.app.tg.send(f"⏭ 跳过 {rep.get('symbol')}（{trigger}）：{why}")
+        if why.startswith(NOT_QUALITY):
+            return
+        db = self.app.db
+        if await db.fetchone("SELECT 1 FROM skipped WHERE chain=? AND token=? AND ts>?",
+                             (chain, token, time.time() - 1800)):
+            return   # 同一个币半小时内只记一次
+        await db.execute(
+            "INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) VALUES(?,?,?,?,?,?,?,?)",
+            (time.time(), chain, token, rep.get("symbol", ""), trigger, skip_cat(why), why,
+             float(rep.get("price") or 0)))
 
     def tier(self, rep: dict, wallets: list[str]) -> str:
         """按标的质量分档：best 优质 / good 较好 / normal 一般。"""

@@ -58,11 +58,16 @@ async def daily_review(app: "App", start: float) -> str:
         lines += _group(closed, lambda p: reason_cat(p.get("close_reason")))
     else:
         lines.append("今天没有平仓")
+    sk = await skipped_review(app, start)
+    if sk:
+        lines.append(sk)
     n_open = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE status='open'")
     lines.append(f"当前持仓 {n_open['n']} 个")
     mode = await app.positions.mode()
     if mode != "off":
         lines.append(f"<b>动态管理</b>（{MODE_TEXT[mode]}）\n{await shadow_compare(app)}")
+    nw = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE status IN ('active','manual')")
+    lines.append(f"监听聪明钱 {nw['n']} 个")
     sig = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>=?", (start,))
     neww = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE created_at>=? AND status='active'", (start,))
     lines.append(f"聪明钱信号 {sig['n']} 条，新增聪明钱 {neww['n']} 个\n{app.data.usage_text()}")
@@ -70,6 +75,23 @@ async def daily_review(app: "App", start: float) -> str:
 
 
 MODE_TEXT = {"off": "已关闭", "shadow": "观察中，只记录不执行", "live": "已接管卖出"}
+
+
+async def skipped_review(app: "App", start: float) -> str:
+    """被风控拦下的信号，1 小时后涨跌如何。平均为负说明拦得对；经常大涨说明这条过滤可能太严。"""
+    rows = await app.db.fetchall(
+        "SELECT cat, price, px_1h FROM skipped WHERE ts>=? AND px_1h>0 AND price>0", (start - 3600,))
+    if not rows:
+        return ""
+    g: dict[str, list[float]] = {}
+    for r in rows:
+        g.setdefault(r["cat"], []).append((float(r["px_1h"]) / float(r["price"]) - 1) * 100)
+    lines = ["<b>被过滤的信号</b>（1 小时后涨跌，平均为负说明拦得对）"]
+    for cat, ch in sorted(g.items(), key=lambda kv: -len(kv[1])):
+        up = sum(1 for c in ch if c >= 30)
+        down = sum(1 for c in ch if c <= -30)
+        lines.append(f"  {cat}：{len(ch)} 个，平均 {sum(ch) / len(ch):+.0f}%（大涨 {up} 个 / 大跌 {down} 个）")
+    return "\n".join(lines)
 
 
 def _mult(s: dict) -> float:

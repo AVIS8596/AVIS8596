@@ -169,6 +169,7 @@ class Analyzer:
             "chain": chain, "address": token, "symbol": facts.symbol, "name": facts.name,
             "price": facts.price, "liquidity": facts.liquidity, "mcap": facts.mcap, "holders": facts.holders,
             "volume_1h": facts.volume_1h, "change_1h": facts.change_1h, "age_hours": round(facts.age_hours, 2),
+            "buys_1h": facts.buys_1h, "sells_1h": facts.sells_1h,
             "top10_pct": round(facts.top10_pct, 2), "dev_held_pct": facts.dev_held_pct,
             "bundle_held_pct": facts.bundle_held_pct, "insider_held_pct": facts.insider_held_pct,
             "sniper_held_pct": facts.sniper_held_pct, "sell_tax": facts.sell_tax, "buy_tax": facts.buy_tax,

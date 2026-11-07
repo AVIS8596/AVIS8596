@@ -137,10 +137,15 @@ class PositionManager:
 
     async def run(self) -> None:
         interval = float(self.cfg.get("exit.check_interval_sec", 10))
+        last_fill = 0.0
         while True:
             try:
                 await self.tick()
                 await self.check_daily_loss()
+                await self.check_loss_streak()
+                if time.time() - last_fill > 300:
+                    last_fill = time.time()
+                    await self.fill_skipped()
             except Exception as e:  # noqa: BLE001
                 log.exception("持仓检查失败: %s", e)
             await asyncio.sleep(interval)
@@ -421,6 +426,40 @@ class PositionManager:
             col = "follow_wins" if win else "follow_losses"
             await self.app.db.execute(f"UPDATE wallets SET {col}={col}+1 WHERE chain=? AND address=?",
                                       (p["chain"], w))
+
+    async def check_loss_streak(self) -> None:
+        """连亏熔断：连续 N 笔亏损（亏超 3%）平仓，暂停买入一段时间。通常说明行情转冷或带单钱包状态不好。"""
+        t = self.cfg.get("trading", {}) or {}
+        n = int(t.get("loss_streak", 4) or 0)
+        if n <= 0:
+            return
+        db = self.app.db
+        since = float(await db.kv_get("streak_reset_at", 0) or 0)
+        rows = await db.fetchall(
+            "SELECT realized_usd, cost_usd, closed_at FROM positions WHERE status='closed' AND dry_run=? "
+            "AND closed_at>? ORDER BY closed_at DESC LIMIT ?", (int(self.cfg.dry_run), since, n))
+        if len(rows) < n or not all(float(r["realized_usd"] or 0) < float(r["cost_usd"] or 0) * 0.97 for r in rows):
+            return
+        mins = float(t.get("loss_streak_pause_min", 60))
+        until = time.time() + mins * 60
+        await db.kv_set("streak_reset_at", time.time())
+        await db.kv_set("streak_pause_until", until)
+        loss = sum(float(r["cost_usd"] or 0) - float(r["realized_usd"] or 0) for r in rows)
+        await self.app.tg.send(f"🧊 连续 {n} 笔亏损（共 ${loss:.1f}），暂停买入 {mins:.0f} 分钟到 "
+                               f"{self.app.fmt_time(until)}，持仓照常管理。想马上恢复发 /resume")
+
+    async def fill_skipped(self) -> None:
+        """被过滤的信号满 1 小时后回看价格（取不到记 -1，统计时跳过）。"""
+        db = self.app.db
+        rows = await db.fetchall("SELECT id, chain, token FROM skipped WHERE px_1h IS NULL AND ts<? LIMIT 40",
+                                 (time.time() - 3600,))
+        by: dict[str, list[dict]] = {}
+        for r in rows:
+            by.setdefault(r["chain"], []).append(r)
+        for chain, lst in by.items():
+            px = await self.app.data.prices(chain, list({r["token"] for r in lst}))
+            for r in lst:
+                await db.execute("UPDATE skipped SET px_1h=? WHERE id=?", (px.get(r["token"]) or -1, r["id"]))
 
     async def check_daily_loss(self) -> None:
         limit = float(self.cfg.get("trading.max_daily_loss_usd", 0) or 0)

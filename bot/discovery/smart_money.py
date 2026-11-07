@@ -85,7 +85,7 @@ class SmartMoney:
         if sol_px <= 0:
             sol_px = 150.0   # 兜底，防止取价失败把门槛变成 0
             log.warning("SOL 价格获取失败，门槛按 $150/SOL 估算")
-        return float(self.cfg.get("smart_money.min_realized_profit_sol", 100)) * sol_px
+        return float(self.cfg.get("smart_money.min_realized_profit_sol", 50)) * sol_px
 
     # ------------------------------------------------------------------ Birdeye 候选（备用数据源）
     async def birdeye_candidates(self, chain: str) -> dict[str, str]:
@@ -170,7 +170,7 @@ class SmartMoney:
                     await db.upsert_wallet(chain, a, status="active" if ok else "inactive",
                                            source=addrs.get(a, "") or (existing or {}).get("source", ""),
                                            realized_usd=p["realized_usd"], win_rate=p["win_rate"],
-                                           trades=p["trades"], score=sc)
+                                           trades=p["trades"], score=sc, avg_hold_sec=float(hold or 0))
                 if ok:
                     added += 1
                     log.info("✅ %s 聪明钱 %s 利润$%.0f 胜率%.0f%% 交易%d", chain, a, p["realized_usd"],
@@ -179,9 +179,10 @@ class SmartMoney:
 
     async def reevaluate(self) -> None:
         hours = float(self.cfg.get("smart_money.reevaluate_hours", 24))
+        # 到期复查的 + 还没有平均持仓时间数据的（升级后第一次启动会补齐）
         rows = await self.app.db.fetchall(
-            "SELECT chain,address,source,status FROM wallets WHERE status='active' AND evaluated_at<? LIMIT 1000",
-            (time.time() - hours * 3600,))
+            "SELECT chain,address,source,status FROM wallets WHERE status='active' "
+            "AND (evaluated_at<? OR avg_hold_sec IS NULL) LIMIT 1000", (time.time() - hours * 3600,))
         by_chain: dict[str, dict[str, str]] = {}
         for r in rows:
             if r["chain"] in self.cfg.enabled_chains:

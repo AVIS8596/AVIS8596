@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS wallets (
   realized_usd REAL DEFAULT 0, win_rate REAL DEFAULT 0, trades INTEGER DEFAULT 0,
   score REAL DEFAULT 0,
   follow_wins INTEGER DEFAULT 0, follow_losses INTEGER DEFAULT 0,
-  evaluated_at REAL DEFAULT 0, created_at REAL,
+  evaluated_at REAL DEFAULT 0, created_at REAL, avg_hold_sec REAL,
   PRIMARY KEY (chain, address)
 );
 CREATE INDEX IF NOT EXISTS idx_wallets_status ON wallets(chain, status, score);
@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS shadow (
   high REAL, reduced INTEGER DEFAULT 0, closed INTEGER DEFAULT 0, closed_at REAL, last_price REAL,
   log TEXT DEFAULT '[]', created_at REAL, PRIMARY KEY (pid, variant)
 );
+
+-- 被风控拦下的买入信号：1 小时后回看价格，判断过滤条件是不是太严
+CREATE TABLE IF NOT EXISTS skipped (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, chain TEXT, token TEXT, symbol TEXT,
+  trigger TEXT, cat TEXT, reason TEXT, price REAL, px_1h REAL
+);
+CREATE INDEX IF NOT EXISTS idx_skipped_ts ON skipped(ts);
+CREATE INDEX IF NOT EXISTS idx_signals_wallet ON signals(chain, wallet, ts);
 """
 
 # 老数据库需要补的列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）
@@ -102,6 +110,9 @@ class DB:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        cur = await self.conn.execute("PRAGMA table_info(wallets)")
+        if "avg_hold_sec" not in {r[1] for r in await cur.fetchall()}:
+            await self.conn.execute("ALTER TABLE wallets ADD COLUMN avg_hold_sec REAL")
         cur = await self.conn.execute("PRAGMA table_info(positions)")
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in POSITION_COLUMNS:
@@ -172,16 +183,17 @@ class DB:
         return await self.fetchone("SELECT * FROM wallets WHERE chain=? AND address=?", (chain, address))
 
     async def upsert_wallet(self, chain: str, address: str, *, status: str, source: str,
-                            realized_usd: float, win_rate: float, trades: int, score: float) -> None:
+                            realized_usd: float, win_rate: float, trades: int, score: float,
+                            avg_hold_sec: float = 0.0) -> None:
         t = time.time()
         await self.execute(
-            """INSERT INTO wallets(chain,address,status,source,realized_usd,win_rate,trades,score,evaluated_at,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO wallets(chain,address,status,source,realized_usd,win_rate,trades,score,evaluated_at,created_at,
+                 avg_hold_sec) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(chain,address) DO UPDATE SET
                  status=CASE WHEN wallets.status IN ('manual','blacklist') THEN wallets.status ELSE excluded.status END,
                  realized_usd=excluded.realized_usd, win_rate=excluded.win_rate, trades=excluded.trades,
-                 score=excluded.score, evaluated_at=excluded.evaluated_at""",
-            (chain, address, status, source, realized_usd, win_rate, trades, score, t, t))
+                 score=excluded.score, evaluated_at=excluded.evaluated_at, avg_hold_sec=excluded.avg_hold_sec""",
+            (chain, address, status, source, realized_usd, win_rate, trades, score, t, t, avg_hold_sec))
 
     async def tags_for(self, chain: str, address: str) -> list[dict]:
         return await self.fetchall("SELECT tag, token FROM address_tags WHERE chain=? AND address=?",

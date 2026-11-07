@@ -267,6 +267,8 @@ class Telegram:
         elif cmd == "/resume":
             await db.kv_set("paused", False)
             await db.kv_set("pause_until", 0)
+            await db.kv_set("streak_pause_until", 0)
+            await db.kv_set("streak_reset_at", time.time())
             await self.send("▶️ 已恢复买入")
         elif cmd == "/sell" and args:
             p = await db.fetchone("SELECT * FROM positions WHERE id=? AND status IN ('open','stuck')", (int(args[0]),))

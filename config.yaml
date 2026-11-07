@@ -34,10 +34,10 @@ chains:
 
 # ---------------- 聪明钱筛选 ----------------
 smart_money:
-  refresh_hours: 6                # 每隔多少小时找一次新的聪明钱
+  refresh_hours: 3                # 每隔多少小时找一次新的聪明钱
   reevaluate_hours: 24            # 已入库地址多久复查一次（不达标就停用）
   pnl_duration: "30d"             # 统计周期
-  min_realized_profit_sol: 100    # 近30天已实现利润 ≥ 100 SOL（EVM 链按美元等值换算）
+  min_realized_profit_sol: 50     # 近30天已实现利润 ≥ 50 SOL（EVM 链按美元等值换算）
   min_win_rate: 0.60              # 胜率 ≥ 60%（GMGN 按"交易过的代币"计算：赚钱的币 / 全部币）
   min_trades: 10                  # 30天交易过的代币数太少的不算（运气成分大）
   max_trades: 1500                # 30天交易超过 1500 个币（每天 50 个），基本是扫盘机器人，排除
@@ -82,6 +82,21 @@ trading:
   auto_trade: true                # 新币评分高 + 聪明钱共振 → 自动买
   auto_min_score: 75
   auto_min_cluster: 2
+  # ---- 买入时机 ----
+  solo_min_hold_sec: 600          # 单个聪明钱买入就跟，要求它平均持仓 ≥ 10 分钟（快进快出的钱包要 2 个以上一起买才跟）
+  solo_bad_follow_min: 8          # 跟某个钱包满 8 笔、胜率低于 40%，也不再单独跟它
+  solo_bad_follow_wr: 0.4
+  confirm_sec: 30                 # 确认期：信号出现后等 30 秒，带单钱包没卖、价格没拉飞/没砸才买
+  confirm_max_rise_pct: 25        # 确认期内涨超 25% 不追
+  confirm_max_drop_pct: 15        # 确认期内跌超 15% 不买
+  max_change_1h_pct: 300          # 1 小时已涨超 300% 不追（3 个以上聪明钱一起买除外）
+  chase_ok_smart: 3
+  fake_mcap_min_usd: 3000000      # 市值 ≥ $3M 且超过 1 小时成交量的 500 倍 → 市值虚高，不买也不推送
+  fake_mcap_vol_ratio: 500
+  max_sell_buy_ratio: 1.5         # 1 小时卖出笔数超过买入的 1.5 倍（且 ≥ 30 笔）不买
+  min_holders: 80                 # 持有人太少不买
+  loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟
+  loss_streak_pause_min: 60
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
   max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
