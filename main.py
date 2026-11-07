@@ -230,9 +230,54 @@ async def _bal(ex, chain: str) -> str:
     return f"{b:.4f} {CHAINS[chain].native_symbol}"
 
 
+async def trenches_debug(cfg) -> None:
+    """诊断主动建仓：看 GMGN 快毕业/已毕业列表实际返回了哪些字段、各条件卡掉了多少个币。"""
+    from collections import Counter
+    from bot.strategies import EARLY_DEFAULTS, NARRATIVE_DEFAULTS, structure_problem
+    from bot.utils import f
+    app = App(cfg)
+    items = await app.gmgn.trenches("solana", ["near_completion", "completed"], 80)
+    await app.gmgn.close()
+    print(f"共 {len(items)} 个：", dict(Counter(it.get("_stage") for it in items)))
+    keys = ["holder_count", "volume_1h", "volume_24h", "swaps_1h", "created_timestamp", "renowned_count",
+            "smart_degen_count", "x_user_follower", "twitter", "rug_ratio", "top_10_holder_rate",
+            "bundler_trader_amount_rate", "rat_trader_amount_rate", "creator_balance_rate", "usd_market_cap"]
+    print("字段有值的个数：", {k: sum(1 for it in items if it.get(k) not in (None, "", 0, "0")) for k in keys})
+    now = time.time()
+    fails: Counter = Counter()
+    for it in items:
+        nc = NARRATIVE_DEFAULTS
+        if f(it.get("created_timestamp")) and now - f(it.get("created_timestamp")) > nc["max_age_hours"] * 3600:
+            fails["超过24小时"] += 1
+        elif int(f(it.get("holder_count"))) < nc["min_holders"]:
+            fails["持有人<200"] += 1
+        elif f(it.get("volume_1h")) < nc["min_volume_1h"]:
+            fails["1h成交<3万"] += 1
+        elif structure_problem(it, nc):
+            fails["结构:" + structure_problem(it, nc).split(" ")[0]] += 1
+        else:
+            fails["通过基础条件"] += 1
+    print("强叙事基础条件：", dict(fails))
+    early = Counter()
+    for it in items:
+        if it.get("_stage") != "即将毕业":
+            continue
+        if int(f(it.get("holder_count"))) < EARLY_DEFAULTS["min_holders"]:
+            early["持有人<150"] += 1
+        elif f(it.get("volume_1h")) < EARLY_DEFAULTS["min_volume_1h"]:
+            early["1h成交<2万"] += 1
+        elif structure_problem(it, EARLY_DEFAULTS):
+            early["结构:" + structure_problem(it, EARLY_DEFAULTS).split(" ")[0]] += 1
+        else:
+            early["通过(还要看增长)"] += 1
+    print("早期建仓条件（快毕业的币）：", dict(early))
+    for it in items[:2]:
+        print("样例：", {k: it.get(k) for k in ["symbol", "_stage"] + keys})
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "check", "discover", "backtest"])
+    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "check", "discover", "backtest", "trenches"])
     ap.add_argument("--days", type=float, default=7)
     ap.add_argument("--limit", type=int, default=300)
     ap.add_argument("--apply", action="store_true")
@@ -256,6 +301,8 @@ def main() -> None:
                 print(f"{c}: 新增 {n} 个聪明钱")
             await app.close()
         asyncio.run(go())
+    elif a.cmd == "trenches":
+        asyncio.run(trenches_debug(cfg))
     elif a.cmd == "backtest":
         async def bt() -> None:
             from bot.backtest import run_backtest
