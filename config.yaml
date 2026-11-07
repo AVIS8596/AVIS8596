@@ -202,22 +202,22 @@ strategies:
   early:                          # 早期建仓：快毕业、结构干净、持有人快速增长
     enabled: true
     max_age_min: 180              # 发币 3 小时内
-    min_holders: 150
+    min_holders: 100
     growth_window_min: 3          # 观察 3 分钟
     min_holder_growth_pct: 15     # 3 分钟内持有人增长 ≥ 15%
-    min_volume_1h: 20000
+    min_volume: 15000             # 发币以来累计成交额（GMGN 列表只给 24h 成交）
     max_rug_ratio: 0.2            # 以下比例都是 0~1
     max_top10_rate: 0.3
     max_bundler_rate: 0.15
     max_insider_rate: 0.15
     max_creator_rate: 0.05
     max_per_day: 6
-  narrative:                      # 强叙事：KOL / 聪明钱 / X 粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分
+  narrative:                      # 强叙事：KOL / 聪明钱 / 引用大号新推文 / 项目粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分
     enabled: true
     min_score: 60
     max_age_hours: 24
-    min_holders: 200
-    min_volume_1h: 30000
+    min_holders: 150
+    min_volume: 30000
     max_rug_ratio: 0.3
     max_top10_rate: 0.4
     max_bundler_rate: 0.3

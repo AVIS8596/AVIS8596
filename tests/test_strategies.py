@@ -34,16 +34,28 @@ def test_structure_and_early():
     # 结构不干净 / 太老 / 持有人太少
     assert early_signal({**CLEAN, "top_10_holder_rate": 0.5}, h, NOW, EARLY_DEFAULTS) == ""
     assert early_signal({**CLEAN, "created_timestamp": NOW - 5 * 3600}, h, NOW, EARLY_DEFAULTS) == ""
-    assert early_signal({**CLEAN, "holder_count": 120}, deque([(NOW - 180, 80)]), NOW, EARLY_DEFAULTS) == ""
+    assert early_signal({**CLEAN, "holder_count": 90}, deque([(NOW - 180, 60)]), NOW, EARLY_DEFAULTS) == ""
 
 
 def test_narrative_score():
     hot = {**CLEAN, "renowned_count": 3, "smart_degen_count": 2, "twitter": "x.com/cat", "telegram": "t.me/cat",
-           "website": "cat.xyz", "x_user_follower": 25000, "volume_1h": 150000, "holder_count": 900}
+           "website": "cat.xyz", "x_user_follower": 25000, "volume_1h": None, "volume_24h": 300000, "holder_count": 900}
     sc, notes = narrative_score(hot, 4, True)
     assert sc >= 80 and any("KOL" in n for n in notes) and any("同名" in n for n in notes)
     sc2, _ = narrative_score(CLEAN, 1, True)
     assert sc2 < 60
+    # 绑定的是大号 2 小时前的推文 → 正在发酵的热点；8 年前的旧推文不算
+    from bot.strategies import TWITTER_EPOCH_MS, tweet_info
+    tid = (int((NOW - 7200) * 1000) - TWITTER_EPOCH_MS) << 22
+    fresh = {**CLEAN, "twitter": f"nikitabier/status/{tid}", "x_user_follower": 1_356_527}
+    assert tweet_info(fresh, NOW)[0] == "nikitabier" and abs(tweet_info(fresh, NOW)[1] - 2) < 0.01
+    sc3, notes3 = narrative_score(fresh, 1, True, NOW)
+    assert sc3 >= 30 and "nikitabier" in notes3[0]
+    old = {**CLEAN, "twitter": "elonmusk/status/1359791422711492608", "x_user_follower": 241_433_363}
+    assert narrative_score(old, 1, True, NOW)[0] == 0
+    # 只有 24h 成交额（GMGN 列表实际情况）也能用
+    from bot.strategies import volume
+    assert volume({"volume_1h": None, "volume_24h": "25115.42"}) == 25115.42
 
 
 def test_poll_triggers_once_and_skips_copycats():

@@ -233,7 +233,7 @@ async def _bal(ex, chain: str) -> str:
 async def trenches_debug(cfg) -> None:
     """诊断主动建仓：看 GMGN 快毕业/已毕业列表实际返回了哪些字段、各条件卡掉了多少个币。"""
     from collections import Counter
-    from bot.strategies import EARLY_DEFAULTS, NARRATIVE_DEFAULTS, structure_problem
+    from bot.strategies import EARLY_DEFAULTS, NARRATIVE_DEFAULTS, narrative_score, structure_problem, volume
     from bot.utils import f
     app = App(cfg)
     items = await app.gmgn.trenches("solana", ["near_completion", "completed"], 80)
@@ -250,9 +250,9 @@ async def trenches_debug(cfg) -> None:
         if f(it.get("created_timestamp")) and now - f(it.get("created_timestamp")) > nc["max_age_hours"] * 3600:
             fails["超过24小时"] += 1
         elif int(f(it.get("holder_count"))) < nc["min_holders"]:
-            fails["持有人<200"] += 1
-        elif f(it.get("volume_1h")) < nc["min_volume_1h"]:
-            fails["1h成交<3万"] += 1
+            fails[f"持有人<{nc['min_holders']}"] += 1
+        elif volume(it) < nc["min_volume"]:
+            fails["成交额不够"] += 1
         elif structure_problem(it, nc):
             fails["结构:" + structure_problem(it, nc).split(" ")[0]] += 1
         else:
@@ -263,16 +263,19 @@ async def trenches_debug(cfg) -> None:
         if it.get("_stage") != "即将毕业":
             continue
         if int(f(it.get("holder_count"))) < EARLY_DEFAULTS["min_holders"]:
-            early["持有人<150"] += 1
-        elif f(it.get("volume_1h")) < EARLY_DEFAULTS["min_volume_1h"]:
-            early["1h成交<2万"] += 1
+            early[f"持有人<{EARLY_DEFAULTS['min_holders']}"] += 1
+        elif volume(it) < EARLY_DEFAULTS["min_volume"]:
+            early["成交额不够"] += 1
         elif structure_problem(it, EARLY_DEFAULTS):
             early["结构:" + structure_problem(it, EARLY_DEFAULTS).split(" ")[0]] += 1
         else:
             early["通过(还要看增长)"] += 1
     print("早期建仓条件（快毕业的币）：", dict(early))
-    for it in items[:2]:
-        print("样例：", {k: it.get(k) for k in ["symbol", "_stage"] + keys})
+    scored = sorted(((narrative_score(it, 1, True)[0], it.get("symbol"), narrative_score(it, 1, True)[1])
+                     for it in items), key=lambda x: -x[0])[:5]
+    print("叙事分前 5：")
+    for sc, sym, notes in scored:
+        print(f"  {sym} {sc} 分：{'、'.join(notes)}")
 
 
 def main() -> None:

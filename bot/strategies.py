@@ -31,12 +31,12 @@ EARLY = "早期建仓"
 NARRATIVE = "强叙事"
 
 EARLY_DEFAULTS = {
-    "enabled": True, "max_age_min": 180, "min_holders": 150, "growth_window_min": 3,
-    "min_holder_growth_pct": 15, "min_volume_1h": 20000, "max_rug_ratio": 0.2, "max_top10_rate": 0.3,
+    "enabled": True, "max_age_min": 180, "min_holders": 100, "growth_window_min": 3,
+    "min_holder_growth_pct": 15, "min_volume": 15000, "max_rug_ratio": 0.2, "max_top10_rate": 0.3,
     "max_bundler_rate": 0.15, "max_insider_rate": 0.15, "max_creator_rate": 0.05, "max_per_day": 6,
 }
 NARRATIVE_DEFAULTS = {
-    "enabled": True, "min_score": 60, "max_age_hours": 24, "min_holders": 200, "min_volume_1h": 30000,
+    "enabled": True, "min_score": 60, "max_age_hours": 24, "min_holders": 150, "min_volume": 30000,
     "max_rug_ratio": 0.3, "max_top10_rate": 0.4, "max_bundler_rate": 0.3, "max_insider_rate": 0.2,
     "max_creator_rate": 0.1, "max_per_day": 6,
 }
@@ -49,6 +49,24 @@ def _rate(it: dict, *keys: str) -> float:
             v = f(it.get(k))
             return v / 100 if v > 1 else v
     return 0.0
+
+
+def volume(it: dict) -> float:
+    """成交额。trenches 列表实测只有 24h 成交额（没有 1h），列表里的币基本都是 24 小时内发的，24h ≈ 发币以来累计。"""
+    return f(it.get("volume_1h")) or f(it.get("volume_24h"))
+
+
+TWITTER_EPOCH_MS = 1288834974657
+
+
+def tweet_info(it: dict, now: float) -> tuple[str, float]:
+    """代币绑定的是一条推文（x.com/某人/status/ID）时，返回 (发推人, 推文距今小时数)；绑定的是账号主页返回 ("", -1)。
+    推文时间从推文 ID 里算出来（X 的 ID 自带毫秒时间戳）。"""
+    m = re.search(r"([A-Za-z0-9_]{1,30})/status(?:es)?/(\d{10,25})", str(it.get("twitter") or ""))
+    if not m:
+        return "", -1.0
+    ts = ((int(m.group(2)) >> 22) + TWITTER_EPOCH_MS) / 1000
+    return m.group(1), max(now - ts, 0) / 3600
 
 
 def structure_problem(it: dict, cfg: dict) -> str:
@@ -75,7 +93,7 @@ def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
     if created and now - created > float(cfg["max_age_min"]) * 60:
         return ""
     holders = int(f(it.get("holder_count")))
-    if holders < int(cfg["min_holders"]) or f(it.get("volume_1h")) < float(cfg["min_volume_1h"]):
+    if holders < int(cfg["min_holders"]) or volume(it) < float(cfg["min_volume"]):
         return ""
     if structure_problem(it, cfg):
         return ""
@@ -98,13 +116,18 @@ def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
             + ("，" + "，".join(extra) if extra else "") + "）")
 
 
+def _k(n: float) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}K"
+
+
 def norm_name(it: dict) -> str:
     s = str(it.get("symbol") or it.get("name") or "").lower()
     return re.sub(r"[^0-9a-z一-鿿]", "", s)
 
 
-def narrative_score(it: dict, same_name: int, is_leader: bool) -> tuple[int, list[str]]:
+def narrative_score(it: dict, same_name: int, is_leader: bool, now: float | None = None) -> tuple[int, list[str]]:
     """市场注意力评分 0~100。"""
+    now = now or time.time()
     s = 0
     notes: list[str] = []
 
@@ -120,8 +143,15 @@ def narrative_score(it: dict, same_name: int, is_leader: bool) -> tuple[int, lis
     if sm:
         add(20 if sm >= 3 else 10 if sm == 2 else 5, f"聪明钱 {sm} 个")
     fol = int(f(it.get("x_user_follower")))
-    if it.get("twitter") and fol >= 1000:
-        add(15 if fol >= 100_000 else 10 if fol >= 10_000 else 5, f"X 粉丝 {fol / 1000:.0f}K")
+    author, age_h = tweet_info(it, now)
+    if author:
+        # 绑定的是别人的一条推文：粉丝数是发推人的。新推文 + 大号 = 正在发酵的热点；旧推文不算
+        if age_h <= 12 and fol >= 100_000:
+            add(30, f"引用 @{author} {age_h:.0f} 小时前的推文（粉丝 {_k(fol)}）")
+        elif age_h <= 12 and fol >= 20_000:
+            add(15, f"引用 @{author} 新推文（粉丝 {_k(fol)}）")
+    elif it.get("twitter") and fol >= 1000:
+        add(15 if fol >= 100_000 else 10 if fol >= 10_000 else 5, f"项目 X 粉丝 {_k(fol)}")
     if it.get("twitter") and it.get("telegram") and it.get("website"):
         add(5, "社交齐全")
     if str(it.get("dexscr_ad", "")).lower() in ("true", "1") or f(it.get("dexscr_boost_fee")) > 0 \
@@ -129,9 +159,9 @@ def narrative_score(it: dict, same_name: int, is_leader: bool) -> tuple[int, lis
         add(10, "项目方在付费推广")
     if same_name >= 3 and is_leader:
         add(10, f"同名币 {same_name} 个、它领跑")
-    if f(it.get("volume_1h")) >= 100_000:
-        add(10, f"1h 成交 ${f(it.get('volume_1h')) / 1000:.0f}K")
-    if int(f(it.get("swaps_1h"))) >= 1000:
+    if volume(it) >= 200_000:
+        add(10, f"成交 ${volume(it) / 1000:.0f}K")
+    if int(f(it.get("swaps_1h"))) >= 1000 or int(f(it.get("swaps_24h"))) >= 5000:
         add(5, "交易活跃")
     if int(f(it.get("holder_count"))) >= 500:
         add(5, f"持有人 {int(f(it.get('holder_count')))}")
@@ -171,7 +201,7 @@ class Strategies:
         names = Counter(norm_name(it) for it in items if norm_name(it))
         leader: dict[str, tuple[float, str]] = {}
         for it in items:
-            n, v = norm_name(it), f(it.get("volume_1h"))
+            n, v = norm_name(it), volume(it)
             if n and v > leader.get(n, (-1.0, ""))[0]:
                 leader[n] = (v, str(it.get("address")))
         fired: list[tuple[str, str, str]] = []
@@ -206,13 +236,13 @@ class Strategies:
                 n = norm_name(it)
                 ok_basic = (not created or now - created <= float(nc["max_age_hours"]) * 3600) \
                     and int(f(it.get("holder_count"))) >= int(nc["min_holders"]) \
-                    and f(it.get("volume_1h")) >= float(nc["min_volume_1h"]) \
+                    and volume(it) >= float(nc["min_volume"]) \
                     and not structure_problem(it, nc)
                 if ok_basic:
                     is_leader = bool(n) and leader.get(n, (0, ""))[1] == str(it.get("address"))
                     if names.get(n, 0) >= 3 and not is_leader:
                         continue   # 同名跟风盘，不碰
-                    sc, notes = narrative_score(it, names.get(n, 0), is_leader)
+                    sc, notes = narrative_score(it, names.get(n, 0), is_leader, now)
                     if st["best_narr"] is None or sc > st["best_narr"][0]:
                         st["best_narr"] = (sc, str(it.get("symbol") or "?"))
                     if sc >= int(nc["min_score"]):
