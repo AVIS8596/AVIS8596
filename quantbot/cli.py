@@ -226,8 +226,48 @@ def cmd_live(a) -> None:
                 shutil.copy(real, cfg.state_path)
             text = run_live(cfg, ex, a.env)
     else:
-        text = run_live(cfg, ex, a.env)
+        try:
+            text = run_live(cfg, ex, a.env)
+        except Exception as exc:
+            _alert_live_failure(cfg, a.env, exc)
+            raise
     print(text or "没有新的已收盘日线, 对账正常。")
+
+
+def _alert_live_failure(cfg, env_path: str, exc: Exception) -> None:
+    """自动交易出错时报警: 当天日线收盘 3 小时后仍未处理, 或任何时候连续失败超过 3 小时; 6 小时内最多一次。"""
+    import json
+    import os
+    import time
+
+    from .notify import load_env_file, send_telegram
+    from .signal_job import signal_overdue
+
+    state_path = os.path.expanduser(cfg.state_path)
+    marker = state_path + ".alert"
+    first_fail = state_path + ".firstfail"
+    now = time.time()
+    if not os.path.exists(first_fail):
+        with open(first_fail, "w") as f:
+            f.write(str(now))
+    with open(first_fail) as f:
+        failing_for = now - float(f.read() or now)
+    last_bar = None
+    if os.path.exists(state_path):
+        with open(state_path, encoding="utf-8") as f:
+            last_bar = json.load(f).get("last_bar")
+    recent = os.path.exists(marker) and now - os.path.getmtime(marker) < 6 * 3600
+    if recent or not (signal_overdue(last_bar) or failing_for >= 3 * 3600):
+        return
+    env = load_env_file(os.path.expanduser(env_path))
+    try:
+        send_telegram(env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", ""),
+                      f"⚠️ 自动交易任务失败 ({cfg.symbol} @ {cfg.venue}): {exc}\n"
+                      "已挂的止损单仍在交易所生效。下次定时运行会自动重试。")
+        with open(marker, "w") as f:
+            f.write(str(exc))
+    except Exception:
+        pass
 
 
 def cmd_telegram_setup(a) -> None:

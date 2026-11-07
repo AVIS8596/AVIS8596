@@ -179,3 +179,20 @@ def test_follows_strategy_through_many_days(tmp_path):
         assert ex.usdt >= 300 - 1e-6  # 不归机器人管的 300 USDT 从未被动用
         if st.qty * ex.px >= 5.0:  # 低于交易所最小金额的 "粉尘" 无法也无需挂止损
             assert st.stop_order_id is not None
+
+
+def test_halt_notification_is_rate_limited(tmp_path):
+    from datetime import timedelta
+
+    df, i = _bars_with_target()
+    ex = FakeExchange(price=float(df["close"].iloc[i]))
+    cfg = _cfg(tmp_path, stop_loss=None)
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    ex.base = 0.0  # 币被转走 -> 停机
+    t0 = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+    first = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None, now=t0)
+    again = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None,
+                     now=t0 + timedelta(hours=1))
+    later = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None,
+                     now=t0 + timedelta(hours=7))
+    assert "已停机" in first and again is None and "已停机" in later

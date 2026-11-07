@@ -116,6 +116,7 @@ class LiveState:
     stop_order_id: str | None = None
     stop_price: float | None = None
     halted: str | None = None
+    halt_notified_at: str | None = None  # 停机通知最多每 6 小时一次
     fills: list = field(default_factory=list)
     peak_equity: float = 0.0
 
@@ -266,6 +267,11 @@ class LiveTrader:
             st.halted = f"交易所余额 {base_total:.6f} 少于机器人持仓 {st.qty:.6f}"
             _save(self.path, st)
         if st.halted:
+            last = pd.Timestamp(st.halt_notified_at) if st.halt_notified_at else None
+            if last is not None and self.now - last.to_pydatetime() < timedelta(hours=6) and not events:
+                return None
+            st.halt_notified_at = self.now.isoformat(timespec="seconds")
+            _save(self.path, st)
             return self._message(st, None, events + [f"⛔ 已停机: {st.halted}。请检查账户后联系维护者。"], force=True)
 
         killed = os.path.exists(os.path.expanduser(cfg.kill_switch))
@@ -372,6 +378,10 @@ def run_live(cfg: LiveConfig, ex: SpotExchange, env_path: str | None, notify: bo
         except BlockingIOError:
             return None  # 另一个实例正在运行
         text = LiveTrader(cfg, ex, fetcher, now).run()
+        try:
+            os.remove(os.path.expanduser(cfg.state_path) + ".firstfail")
+        except FileNotFoundError:
+            pass
     if text and notify:
         env = load_env_file(os.path.expanduser(env_path)) if env_path else {}
         try:
