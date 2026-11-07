@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,8 @@ async def daily_review(app: "App", start: float) -> str:
         wins = sum(1 for p in closed if _pnl(p) > 0)
         lines.append(f"平仓 {len(closed)} 笔：赚 {wins} 笔、亏 {len(closed) - wins} 笔，"
                      f"胜率 {wins / len(closed) * 100:.0f}%，已实现 <b>{fmt_usd(pnl)}</b>")
+        lines.append("<b>按买入来源</b>")
+        lines += _group(closed, lambda p: re.split(r"[（(|]", p.get("reason") or "其他")[0].strip() or "其他")
         lines.append("<b>按档位</b>")
         lines += _group(closed, lambda p: TIER_LABEL.get(p.get("tier"), "老持仓"))
         lines.append("<b>按卖出原因</b>（最后一笔）")

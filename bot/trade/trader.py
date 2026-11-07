@@ -81,7 +81,7 @@ class Trader:
             return f"连亏熔断，暂停买入到 {self.app.fmt_time(su)}"
         return ""
 
-    async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None) -> str:
+    async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None, reason: str = "") -> str:
         """返回拒绝原因；空字符串表示可以买。"""
         t = self.cfg.get("trading", {}) or {}
         if not t.get("enabled", False):
@@ -108,7 +108,8 @@ class Trader:
             return f"代币上线 {age:.0f} 小时，超过上限"
         n_smart = len(set(wallets or []) | set(rep.get("smart_buyers") or []))
         chg = float(rep.get("change_1h") or 0)
-        if chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
+        early = reason.startswith(("早期建仓", "强叙事"))   # 刚发的币 1h 涨幅天然很大，靠确认期防追高
+        if not early and chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
             return f"1 小时已涨 {chg:.0f}%，不追高（3 个以上聪明钱一起买才追）"
         fake = looks_fake(rep, t)
         if fake:
@@ -128,7 +129,8 @@ class Trader:
             return "冷却期内"
         return ""
 
-    async def consider(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str]) -> None:
+    async def consider(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str],
+                       tier: str | None = None) -> None:
         key = f"{chain}:{token}"
         if key in self._buying:
             return
@@ -136,11 +138,11 @@ class Trader:
         async with lock:
             self._buying.add(key)
             try:
-                why = await self.check(chain, token, rep, wallets)
+                why = await self.check(chain, token, rep, wallets, reason)
                 if why:
                     await self.skip(chain, token, rep, reason, why)
                     return
-                await self._buy(chain, token, rep, reason, wallets)
+                await self._buy(chain, token, rep, reason, wallets, tier)
             finally:
                 self._buying.discard(key)
                 if len(self._locks) > 5000:
@@ -184,8 +186,9 @@ class Trader:
         m = self.cfg.get("trading.size_multiplier", {}) or {}
         return [base, base * float(m.get("good", 2)), base * float(m.get("best", 4))]
 
-    async def _buy(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str]) -> None:
-        tier = self.tier(rep, wallets)
+    async def _buy(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str],
+                   tier: str | None = None) -> None:
+        tier = tier or self.tier(rep, wallets)
         amount = (await self.sizes(chain))[{"normal": 0, "good": 1, "best": 2}[tier]]
         if amount <= 0:
             return

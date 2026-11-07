@@ -70,6 +70,11 @@ async def run_bot(cfg) -> None:
     for c in cfg.evm_chains:
         m = EvmWalletMonitor(app, c)
         jobs.append((f"{c}聪明钱监听", m.run))
+    if app.gmgn:
+        from bot.strategies import Strategies
+        strat = Strategies(app)
+        for c in cfg.enabled_chains:
+            jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
     for c in cfg.enabled_chains:
         if app.data.use_gmgn or c != "solana":
             jobs.append((f"{c}新币", lambda c=c: newtok.listings(c)))

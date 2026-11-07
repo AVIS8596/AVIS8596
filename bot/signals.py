@@ -145,8 +145,12 @@ class SignalHub:
             await self.app.trader.skip(s.chain, s.token, rep, "跟单", solo_why)
 
     async def _confirm(self, s: Signal, rep: dict, reason: str) -> None:
+        await self.confirm_and_buy(s.chain, s.token, rep, reason, watch_wallet=s.wallet, since=s.ts)
+
+    async def confirm_and_buy(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str] | None = None,
+                              watch_wallet: str = "", since: float = 0.0, tier: str | None = None) -> None:
         """确认期：等 30 秒再看——带单钱包是不是已经卖了、价格是不是已经拉飞或在砸。都没问题才买。"""
-        key = (s.chain, s.token)
+        key = (chain, token)
         if key in self._confirming:
             return
         self._confirming.add(key)
@@ -154,28 +158,33 @@ class SignalHub:
             t = self.cfg.get("trading", {}) or {}
             delay = float(t.get("confirm_sec", 30))
             data = self.app.data
-            p0 = await data.price(s.chain, s.token) or float(rep.get("price") or 0)
+            p0 = await data.price(chain, token) or float(rep.get("price") or 0)
             if delay > 0:
                 await asyncio.sleep(delay)
-            sold = await self.app.db.fetchone(
-                "SELECT 1 FROM signals WHERE chain=? AND token=? AND wallet=? AND side='sell' AND ts>=?",
-                (s.chain, s.token, s.wallet, s.ts))
-            if sold:
-                await self.app.trader.skip(s.chain, s.token, rep, reason, f"确认期：带单钱包 {delay:.0f} 秒内就卖了")
-                return
-            p1 = await data.price(s.chain, s.token)
+            if watch_wallet:
+                sold = await self.app.db.fetchone(
+                    "SELECT 1 FROM signals WHERE chain=? AND token=? AND wallet=? AND side='sell' AND ts>=?",
+                    (chain, token, watch_wallet, since))
+                if sold:
+                    await self.app.trader.skip(chain, token, rep, reason, f"确认期：带单钱包 {delay:.0f} 秒内就卖了")
+                    return
+            p1 = await data.price(chain, token)
             if p0 > 0 and p1 > 0:
                 chg = (p1 / p0 - 1) * 100
                 if chg > float(t.get("confirm_max_rise_pct", 25)):
-                    await self.app.trader.skip(s.chain, s.token, rep, reason, f"确认期：{delay:.0f} 秒内已涨 {chg:.0f}%，不追")
+                    await self.app.trader.skip(chain, token, rep, reason, f"确认期：{delay:.0f} 秒内已涨 {chg:.0f}%，不追")
                     return
                 if chg < -float(t.get("confirm_max_drop_pct", 15)):
-                    await self.app.trader.skip(s.chain, s.token, rep, reason, f"确认期：{delay:.0f} 秒内跌了 {-chg:.0f}%")
+                    await self.app.trader.skip(chain, token, rep, reason, f"确认期：{delay:.0f} 秒内跌了 {-chg:.0f}%")
                     return
             if p1 > 0:
                 rep = {**rep, "price": p1}
-            await self.app.trader.consider(s.chain, s.token, rep, reason=reason,
-                                           wallets=await self._cluster(s.chain, s.token))
+            if wallets is None:
+                wallets = await self._cluster(chain, token)
+            if tier:
+                await self.app.trader.consider(chain, token, rep, reason=reason, wallets=wallets, tier=tier)
+            else:
+                await self.app.trader.consider(chain, token, rep, reason=reason, wallets=wallets)
         except Exception as e:  # noqa: BLE001
             log.exception("确认期处理失败: %s", e)
         finally:
