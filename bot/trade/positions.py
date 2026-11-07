@@ -29,10 +29,27 @@ DEFAULT_EXIT_TIERS: dict[str, dict] = {
 }
 
 
+# 观察模式里的第三套规则：参考向高手学到的习惯（快止盈、紧止损、拿得短），只模拟不执行。
+# 学到的高手多做已站稳的币，新币波动更大，所以止损没有照搬他们的 -11%，取 -20%。config 的 exit.learned 可改。
+LEARNED_DEFAULT = {
+    "stop_loss_pct": -20,
+    "take_profit": [{"gain_pct": 30, "sell_pct": 30}, {"gain_pct": 60, "sell_pct": 40}, {"gain_pct": 100, "sell_pct": 100}],
+    "trailing_start_pct": 30, "trailing_drop_pct": 15, "max_hold_hours": 2,
+    "stall_hours": 0.5, "stall_min_gain_pct": 10,
+}
+VARIANTS = ("v1", "v2", "v3")
+VARIANT_NAME = {"v1": "旧规则", "v2": "动态管理", "v3": "高手规则"}
+
+
+def learned_rules(cfg: dict) -> dict:
+    base = {k: v for k, v in (cfg or {}).items() if k not in ("tiers", "dynamic", "learned")}
+    return {**base, **LEARNED_DEFAULT, **((cfg or {}).get("learned") or {})}
+
+
 def exit_rules(cfg: dict, tier: str | None) -> dict:
     """某个档位实际生效的卖出规则 = 全局 exit 配置 + 档位默认 + config 里的档位覆盖。
     tier 为空（分档功能上线前买的老持仓）时只用全局配置，行为和以前一样。"""
-    base = {k: v for k, v in (cfg or {}).items() if k not in ("tiers", "dynamic")}
+    base = {k: v for k, v in (cfg or {}).items() if k not in ("tiers", "dynamic", "learned")}
     if not tier:
         return base
     return {**base, **DEFAULT_EXIT_TIERS.get(tier, {}), **(((cfg or {}).get("tiers") or {}).get(tier) or {})}
@@ -295,14 +312,14 @@ class PositionManager:
     async def _ensure_shadows(self, pos: list[dict]) -> None:
         """给还没有虚拟记录的持仓建两份：v1 = 旧规则，v2 = 新规则。从持仓当前状态开始模拟。"""
         db = self.app.db
-        have = {r["pid"] for r in await db.fetchall("SELECT DISTINCT pid FROM shadow")}
+        have = {(r["pid"], r["variant"]) for r in await db.fetchall("SELECT pid, variant FROM shadow")}
         for p in pos:
-            if p["id"] in have or float(p.get("entry_price") or 0) <= 0:
+            if all((p["id"], v) in have for v in VARIANTS) or float(p.get("entry_price") or 0) <= 0:
                 continue
             amt = int(p["amount_raw"] or 0)
             frac = int(p["remaining_raw"] or 0) / amt if amt else 1.0
             realized = float(p["realized_usd"] or 0) / float(p["cost_usd"]) if float(p["cost_usd"] or 0) else 0.0
-            for v in ("v1", "v2"):
+            for v in VARIANTS:
                 await db.execute(
                     "INSERT OR IGNORE INTO shadow(pid,variant,frac,tp_stage,realized,high,reduced,last_price,created_at) "
                     "VALUES(?,?,?,?,?,?,?,?,?)",
@@ -347,7 +364,10 @@ class PositionManager:
         v = {"entry_price": s["entry_price"], "high_price": s["high"], "tp_stage": s["tp_stage"],
              "opened_at": s["opened_at"], "tier": s["tier"], "trail_half": s.get("trail_half")}
         dyn = dyn_state(s, self.dcfg, now, reduced=int(s["reduced"] or 0)) if s["variant"] == "v2" else None
-        pct, why = decide_exit(v, px, self.exit_cfg, now, dyn)
+        if s["variant"] == "v3":
+            pct, why = decide_exit({**v, "tier": None}, px, learned_rules(self.exit_cfg), now, None)
+        else:
+            pct, why = decide_exit(v, px, self.exit_cfg, now, dyn)
         if not self._confirmed((s["pid"], s["variant"]), why, px, float(s["entry_price"] or 0)):
             pct, why = 0, ""
         if pct <= 0 and now - float(s["opened_at"] or now) > 96 * 3600:

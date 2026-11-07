@@ -194,7 +194,7 @@ def test_full_flow(tmp_path):
         # 3) 复盘、对比、诊断都能正常出文字
         from bot.trade.review import daily_review, shadow_compare, why_text
         await db.execute("UPDATE shadow SET closed=1, last_price=1.0 WHERE pid=?", (pid,))
-        assert "已对比 1 个" in await shadow_compare(app)
+        assert "动态管理 vs 旧规则（1 个持仓" in await shadow_compare(app)
         assert "紧急卖出" in await daily_review(app, now - 3600)
         assert "健康分" in await why_text(app, pid)
         assert "没有这个持仓" in await why_text(app, 999)
@@ -234,3 +234,13 @@ def test_trailing_half_and_confirm_ticks():
     assert pm._confirmed(2, "", 1.2, 1.0) and 2 not in pm._breach  # 中间恢复了就清零
     assert pm._confirmed(3, "止损（-55%）", 0.45, 1.0)            # 跌破硬止损不等
     assert pm._confirmed(4, "止盈·翻倍出本", 2.0, 1.0)            # 其他原因不受影响
+
+
+def test_learned_variant_rules():
+    from bot.trade.positions import learned_rules
+    lr = learned_rules(EXIT)
+    p = pos(tier=None)
+    assert decide_exit(p, 0.79, lr, 1001)[1].startswith("止损")                 # -21%：高手规则止损 -20%
+    assert decide_exit(p, 0.79, EXIT, 1001)[0] == 0                            # 旧规则 -35% 才止损
+    assert decide_exit(p, 1.32, lr, 1001) == (30, "止盈第1档（+32%）")          # +30% 先卖 30%
+    assert decide_exit(p, 1.05, lr, 1000 + 40 * 60)[1].startswith("涨不上去")  # 半小时没到 +10%

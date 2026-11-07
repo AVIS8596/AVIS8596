@@ -105,33 +105,38 @@ def _mult(s: dict) -> float:
 
 
 async def shadow_compare(app: "App") -> str:
+    """观察模式：同一批持仓按旧规则 / 动态管理 / 高手规则分别虚拟卖出，比较谁赚得多。"""
+    from .positions import VARIANT_NAME
     rows = await app.db.fetchall(
         "SELECT s.*, p.entry_price, p.cost_usd, p.symbol FROM shadow s JOIN positions p ON p.id=s.pid")
     by: dict[int, dict[str, dict]] = {}
     for r in rows:
         by.setdefault(r["pid"], {})[r["variant"]] = r
-    done = [(pid, v) for pid, v in by.items() if "v1" in v and "v2" in v and v["v1"]["closed"] and v["v2"]["closed"]]
     running = sum(1 for v in by.values() if not all(x["closed"] for x in v.values()))
-    if not done:
-        return f"还没有两套规则都卖完的持仓可以对比（进行中 {running} 个）"
-    u1 = sum(float(v["v1"]["cost_usd"] or 0) * (_mult(v["v1"]) - 1) for _, v in done)
-    u2 = sum(float(v["v2"]["cost_usd"] or 0) * (_mult(v["v2"]) - 1) for _, v in done)
-    a1 = sum(_mult(v["v1"]) - 1 for _, v in done) / len(done) * 100
-    a2 = sum(_mult(v["v2"]) - 1 for _, v in done) / len(done) * 100
-    better = sum(1 for _, v in done if _mult(v["v2"]) > _mult(v["v1"]) + 0.005)
-    worse = sum(1 for _, v in done if _mult(v["v2"]) < _mult(v["v1"]) - 0.005)
-    lines = [f"已对比 {len(done)} 个持仓（进行中 {running} 个，不含手续费和滑点）：",
-             f"  旧规则：平均 {a1:+.1f}%，合计 {fmt_usd(u1)}",
-             f"  新规则：平均 {a2:+.1f}%，合计 {fmt_usd(u2)}",
-             f"  新规则更好 {better} 个，更差 {worse} 个，其余一样"]
-    diffs = sorted(done, key=lambda x: abs(_mult(x[1]["v2"]) - _mult(x[1]["v1"])), reverse=True)[:3]
-    for pid, v in diffs:
-        d = (_mult(v["v2"]) - _mult(v["v1"])) * 100
-        if abs(d) < 0.5:
-            break
-        last = (json.loads(v["v2"]["log"] or "[]") or [[0, 0, "", 0]])[-1][2]
-        lines.append(f"  #{pid} {v['v1']['symbol']}：新规则 {d:+.0f}%（{last[:40]}）")
-    return "\n".join(lines)
+    lines: list[str] = []
+    for b in ("v2", "v3"):
+        done = [(pid, v) for pid, v in by.items() if "v1" in v and b in v and v["v1"]["closed"] and v[b]["closed"]]
+        if not done:
+            continue
+        u1 = sum(float(v["v1"]["cost_usd"] or 0) * (_mult(v["v1"]) - 1) for _, v in done)
+        ub = sum(float(v[b]["cost_usd"] or 0) * (_mult(v[b]) - 1) for _, v in done)
+        a1 = sum(_mult(v["v1"]) - 1 for _, v in done) / len(done) * 100
+        ab = sum(_mult(v[b]) - 1 for _, v in done) / len(done) * 100
+        better = sum(1 for _, v in done if _mult(v[b]) > _mult(v["v1"]) + 0.005)
+        worse = sum(1 for _, v in done if _mult(v[b]) < _mult(v["v1"]) - 0.005)
+        name = VARIANT_NAME[b]
+        lines += [f"{name} vs 旧规则（{len(done)} 个持仓，不含手续费和滑点）：",
+                  f"  旧规则 平均 {a1:+.1f}%，合计 {fmt_usd(u1)} | {name} 平均 {ab:+.1f}%，合计 {fmt_usd(ub)}",
+                  f"  {name}更好 {better} 个，更差 {worse} 个"]
+        for pid, v in sorted(done, key=lambda x: abs(_mult(x[1][b]) - _mult(x[1]["v1"])), reverse=True)[:2]:
+            d = (_mult(v[b]) - _mult(v["v1"])) * 100
+            if abs(d) < 0.5:
+                break
+            last = (json.loads(v[b]["log"] or "[]") or [[0, 0, "", 0]])[-1][2]
+            lines.append(f"  #{pid} {v['v1']['symbol']}：{name} {d:+.0f}%（{last[:40]}）")
+    if not lines:
+        return f"还没有可以对比的已卖完持仓（进行中 {running} 个）"
+    return "\n".join(lines + [f"（进行中 {running} 个）"])
 
 
 async def why_text(app: "App", pid: int) -> str:
@@ -194,7 +199,8 @@ async def why_text(app: "App", pid: int) -> str:
             st = "已卖完" if s["closed"] else f"还剩 {float(s['frac']) * 100:.0f}%"
             return f"{st}，收益 {(_mult(s) - 1) * 100:+.1f}%"
         if "v1" in sh and "v2" in sh:
-            lines.append(f"\n<b>模拟对比</b>：旧规则 {desc(sh['v1'])} | 新规则 {desc(sh['v2'])}")
+            lines.append(f"\n<b>模拟对比</b>：旧规则 {desc(sh['v1'])} | 动态管理 {desc(sh['v2'])}"
+                         + (f" | 高手规则 {desc(sh['v3'])}" if "v3" in sh else ""))
             lg = json.loads(sh["v2"]["log"] or "[]")
             if lg:
                 lines.append(f"  新规则最近一次：卖 {lg[-1][1]}%（{lg[-1][2]}）")

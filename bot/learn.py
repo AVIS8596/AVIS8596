@@ -65,7 +65,11 @@ def build_positions(activities: list[dict], holdings: list[dict]) -> list[dict]:
         first_ts, first_px = p["buys"][0][0], p["buys"][0][1]
         amt = sum(c / px for _, px, c in p["buys"] if px > 0)
         bought = sum(c for _, _, c in p["buys"])
-        avg_px = bought / amt if amt > 0 else first_px
+        # 第一次卖出的涨幅：只和"第一次卖出之前"的买入均价比（之后的加仓不算）
+        t_sell = p["sells"][0][0] if p["sells"] else float("inf")
+        pre = [(px, c) for t, px, c in p["buys"] if t <= t_sell and px > 0]
+        pre_amt = sum(c / px for px, c in pre)
+        avg_px = sum(c for _, c in pre) / pre_amt if pre_amt > 0 else (bought / amt if amt > 0 else first_px)
         created = f(dig(h, "token.creation_timestamp", default=0))
         supply = f(dig(h, "token.total_supply", "token.max_supply", default=0))
         cost_all = f(h.get("history_bought_cost")) or bought
@@ -131,7 +135,7 @@ def profile_text(label: str, addr: str, prof: dict, stats: dict | None = None) -
         f"样本：最近 {prof['n']} 个币（已清仓 {prof['closed']} 个，赚钱 {prof['win_rate'] * 100:.0f}%）",
         f"入场：发币后中位 {prof['entry_age_min']:.0f} 分钟买；入场市值中位 {fmt_usd(prof['entry_mcap'])}"
         f"（多数在 {fmt_usd(prof['entry_mcap_lo'])}~{fmt_usd(prof['entry_mcap_hi'])}），"
-        f"{prof['early_pct'] * 100:.0f}% 在毕业前买",
+        f"{prof['early_pct'] * 100:.0f}% 的单入场市值低于 $7 万",
         f"仓位：中位 {fmt_usd(prof['size'])}/笔",
         f"持有：中位 {prof['hold_min']:.0f} 分钟",
         f"止盈：第一次卖出时中位 {prof['first_sell_gain']:+.0f}%；盈利单最后中位 {prof['win_gain']:+.0f}%；"
@@ -171,11 +175,14 @@ def suggestions(profiles: list[dict], cfg) -> list[str]:
     fs = _med([p["first_sell_gain"] for p in ps])
     loss = _med([p["loss_cut"] for p in ps])
     early = _med([p["early_pct"] for p in ps])
-    out.append(f"共同规律（{len(ps)} 人的中位数{note}）：发币后 {age:.0f} 分钟入场、{early * 100:.0f}% 在毕业前买、"
+    out.append(f"共同规律（{len(ps)} 人的中位数{note}）：发币后 {age:.0f} 分钟入场、{early * 100:.0f}% 的单入场市值低于 $7 万、"
                f"拿 {hold:.0f} 分钟、第一次卖在 {fs:+.0f}%、亏 {-loss:.0f}% 砍仓")
-    if age < 5 or early > 0.6:
+    if age < 5:
         out.append("• 他们大多在发币几分钟内、毕业前就买（狙击/内盘），机器人通过 API 下单慢几秒，这部分学不来，"
                    "直接跟他们的单容易买在被抬高的价格上")
+    if age > 24 * 60:
+        out.append(f"• 注意：他们多数在发币 {age / 1440:.0f} 天后才买（已经站稳的币），波动比机器人做的新币小得多，"
+                   "止损/止盈的数字不能直接照搬，已放进观察模式的「高手规则」里模拟验证")
     stop = float(cfg.get("exit.stop_loss_pct", -35))
     if loss and loss > stop + 5:
         out.append(f"• 他们亏 {-loss:.0f}% 左右就走，机器人止损是 {stop:.0f}%：可以考虑收紧止损")
