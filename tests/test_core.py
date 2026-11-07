@@ -111,7 +111,7 @@ def pos(**kw):
 def test_exit_rules():
     assert decide_exit(pos(), 0.6, EXIT, 1001)[0] == 100                      # 止损
     assert decide_exit(pos(), 0.0, EXIT, 1001)[0] == 0                        # 取价失败绝不卖
-    assert decide_exit(pos(), 2.1, EXIT, 1001) == (50, "止盈第1档（+110%）")
+    assert decide_exit(pos(), 2.1, EXIT, 1001) == (50, "止盈·翻倍出本（+110%，卖出 50% 收回本金）")
     assert decide_exit(pos(tp_stage=1, high_price=2.1), 2.1, EXIT, 1001)[0] == 0
     assert decide_exit(pos(tp_stage=1, high_price=2.0), 1.3, EXIT, 1001)[0] == 100   # 移动止损
     assert decide_exit(pos(), 1.1, EXIT, 1000 + 25 * 3600)[0] == 100          # 超时
@@ -131,8 +131,9 @@ def test_exit_tiers():
     assert decide_exit(pos(tier="best"), 1.1, EXIT, 1000 + 5 * h)[0] == 0
     assert decide_exit(pos(tier="best"), 1.1, EXIT, 1000 + 13 * h)[0] == 100
     assert decide_exit(pos(tier="best", high_price=1.5), 1.5, EXIT, 1000 + 30 * h)[0] == 0
-    # 优质档止盈只卖 30%；回撤 30% 不触发（阈值 35%），一般档会触发
-    assert decide_exit(pos(tier="best"), 2.1, EXIT, 1001)[0] == 30
+    # 优质档翻倍出本卖 50%，第 2 档只卖 30%；回撤 30% 不触发（阈值 35%），较好档会触发
+    assert decide_exit(pos(tier="best"), 2.1, EXIT, 1001)[0] == 50
+    assert decide_exit(pos(tier="best", tp_stage=1, high_price=4.1), 4.1, EXIT, 1001)[0] == 30
     assert decide_exit(pos(tier="best", tp_stage=1, high_price=2.0), 1.4, EXIT, 1001)[0] == 0
     assert decide_exit(pos(tier="good", tp_stage=1, high_price=2.0), 1.4, EXIT, 1001)[0] == 100
     # 已经止盈过的不受"涨不上去"影响

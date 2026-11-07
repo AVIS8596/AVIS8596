@@ -21,7 +21,11 @@ e = html.escape
 
 HELP = """<b>命令列表</b>
 /status 运行状态
-/positions 当前持仓
+/positions 当前持仓（🔥优质 👍较好，带健康分）
+/why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
+/dynamic 动态管理状态和新旧规则对比
+/dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
+/review 立即看今日复盘
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
 /size 查看每笔买入金额（一般 / 较好 / 优质 三档）
 /size 0.05 0.1 0.2 修改 Solana 三档金额（单位 SOL）
@@ -246,6 +250,17 @@ class Telegram:
             await self.send(await self._positions())
         elif cmd == "/size":
             await self._size(args)
+        elif cmd == "/why":
+            if not args or not args[0].isdigit():
+                await self.send("格式：/why 持仓编号，例：/why 3（编号在 /positions 里看）")
+                return
+            from ..trade.review import why_text
+            await self.send(await why_text(self.app, int(args[0])))
+        elif cmd == "/review":
+            from ..trade.review import daily_review
+            await self.send(await daily_review(self.app, self.app.day_start()))
+        elif cmd == "/dynamic":
+            await self._dynamic(args)
         elif cmd == "/pause":
             await db.kv_set("paused", True)
             await self.send("⏸ 已暂停买入（持仓止盈止损继续运行）")
@@ -306,6 +321,30 @@ class Telegram:
                 await self.send("地址标记记录：" + "，".join(f"{names.get(k, k)} {v} 次" for k, v in cnt.items()))
         else:
             await self.send("看不懂这个命令。\n" + HELP)
+
+    async def _dynamic(self, args: list[str]) -> None:
+        from ..trade.review import MODE_TEXT, shadow_compare
+        db = self.app.db
+        names = {"on": "live", "live": "live", "shadow": "shadow", "off": "off"}
+        if args:
+            m = names.get(args[0].lower())
+            if not m:
+                await self.send("格式：/dynamic on（接管卖出）| /dynamic shadow（只观察）| /dynamic off（关闭）")
+                return
+            await db.kv_set("dyn_mode", m)
+            if m == "shadow":
+                await db.kv_set("dyn_since", time.time())
+                await db.kv_set("dyn_reported", False)
+        mode = await self.app.positions.mode()
+        dc = self.app.positions.dcfg
+        tip = {"shadow": "想让新规则接管，发 /dynamic on", "live": "想退回只观察，发 /dynamic shadow",
+               "off": "想重新开启观察，发 /dynamic shadow"}[mode]
+        await self.send(
+            f"<b>动态管理：{MODE_TEXT[mode]}</b>{'（已切换）' if args else ''}\n"
+            f"每 {int(dc['check_sec']) // 60} 分钟复查一次持仓，健康分 < {dc['reduce_below']} 卖一半、"
+            f"< {dc['exit_below']} 全卖（连续 {dc['confirm_checks']} 次才动手），> {dc['strong_above']} 放宽止盈；"
+            f"涨过 +{dc['breakeven_after_pct']}% 后保本；撤池子/dev 清仓立刻卖\n\n"
+            f"{await shadow_compare(self.app)}\n\n{tip}")
 
     async def _size(self, args: list[str]) -> None:
         chains = self.app.cfg.enabled_chains
@@ -384,8 +423,10 @@ class Telegram:
                 flag = " ⚠️无法卖出" if p["status"] == "stuck" else ""
                 tier = {"best": "🔥", "good": "👍"}.get(p.get("tier") or "", "")
                 held = (time.time() - float(p["opened_at"] or time.time())) / 3600
+                hp = f" 健康{p['health']}" if p.get("health") is not None else ""
                 lines.append(f"#{p['id']} {tier}{self.tok_link(c, p['token'], p['symbol'] or '?')} {CHAINS[c].name} "
-                             f"成本{fmt_usd(p['cost_usd'])} 现{g:+.1f}% 已拿{held:.1f}h{flag}")
+                             f"成本{fmt_usd(p['cost_usd'])} 现{g:+.1f}% 已拿{held:.1f}h{hp}{flag}")
+        lines.append("发 /why 编号 查看详情")
         return "\n".join(lines)
 
     async def _wallets(self, chain: Any) -> str:

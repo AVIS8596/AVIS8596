@@ -19,7 +19,7 @@ from pathlib import Path
 from bot.app import App
 from bot.chains import CHAINS
 from bot.config import ConfigError, load_config
-from bot.utils import fmt_usd, run_forever, setup_logging
+from bot.utils import run_forever, setup_logging
 
 BASE = Path(__file__).resolve().parent
 log = logging.getLogger("memebot")
@@ -40,16 +40,11 @@ async def daily_report(app: App) -> None:
         if nxt <= now:
             nxt += timedelta(days=1)
         await asyncio.sleep((nxt - now).total_seconds())
-        db = app.db
-        start = app.day_start()
-        closed = await db.fetchall("SELECT * FROM positions WHERE status!='open' AND closed_at>=?", (start,))
-        pnl = sum(float(p["realized_usd"] or 0) - float(p["cost_usd"] or 0) for p in closed)
-        wins = sum(1 for p in closed if float(p["realized_usd"] or 0) > float(p["cost_usd"] or 0))
-        sig = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>=?", (start,))
-        neww = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE created_at>=? AND status='active'", (start,))
-        await app.tg.send(
-            f"📅 <b>今日总结</b> {app.tg.mode()}\n平仓 {len(closed)} 笔，盈利 {wins} 笔，已实现 {fmt_usd(pnl)}\n"
-            f"聪明钱信号 {sig['n']} 条，新增聪明钱 {neww['n']} 个\n{app.data.usage_text()}")
+        from bot.trade.review import daily_review
+        try:
+            await app.tg.send(await daily_review(app, app.day_start()))
+        except Exception as e:  # noqa: BLE001
+            log.exception("每日复盘失败: %s", e)
 
 
 async def run_bot(cfg) -> None:

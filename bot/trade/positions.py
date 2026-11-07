@@ -1,26 +1,30 @@
-"""持仓管理：止盈、止损、移动止损、超时、跟随聪明钱卖出。"""
+"""持仓管理：止盈、止损、移动止损、超时、跟随聪明钱卖出，以及动态管理（健康分复查 + 观察模式对比）。"""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
 
 from .executors import Fill
+from .health import dyn_cfg, score_health, smart_stats, snapshot
 
 if TYPE_CHECKING:
     from ..app import App
 
 log = logging.getLogger("memebot.positions")
 
+URGENT = "🚨紧急卖出："
+
 # 按买入档位区分的卖出规则（config.yaml 的 exit.tiers 可以覆盖其中任意一项）。
-# 好标的拿得更久、止盈卖得更少；但到了"观察期"还涨不上去就卖掉，不干耗。
+# 好标的拿得更久；但到了"观察期"还涨不上去就卖掉，不干耗。所有档位翻倍时都先卖一半收回本金。
 DEFAULT_EXIT_TIERS: dict[str, dict] = {
     "normal": {"max_hold_hours": 6, "stall_hours": 1, "stall_min_gain_pct": 15},
     "good": {"max_hold_hours": 24, "stall_hours": 4, "stall_min_gain_pct": 20},
     "best": {"max_hold_hours": 72, "stall_hours": 12, "stall_min_gain_pct": 30,
              "trailing_start_pct": 80, "trailing_drop_pct": 35, "follow_smart_sell_pct": 50,
-             "take_profit": [{"gain_pct": 100, "sell_pct": 30}, {"gain_pct": 300, "sell_pct": 30},
+             "take_profit": [{"gain_pct": 100, "sell_pct": 50}, {"gain_pct": 300, "sell_pct": 30},
                              {"gain_pct": 1000, "sell_pct": 50}]},
 }
 
@@ -28,16 +32,19 @@ DEFAULT_EXIT_TIERS: dict[str, dict] = {
 def exit_rules(cfg: dict, tier: str | None) -> dict:
     """某个档位实际生效的卖出规则 = 全局 exit 配置 + 档位默认 + config 里的档位覆盖。
     tier 为空（分档功能上线前买的老持仓）时只用全局配置，行为和以前一样。"""
-    base = {k: v for k, v in (cfg or {}).items() if k != "tiers"}
+    base = {k: v for k, v in (cfg or {}).items() if k not in ("tiers", "dynamic")}
     if not tier:
         return base
     return {**base, **DEFAULT_EXIT_TIERS.get(tier, {}), **(((cfg or {}).get("tiers") or {}).get(tier) or {})}
 
 
-def decide_exit(pos: dict, price: float, cfg: dict, now: float) -> tuple[float, str]:
+def decide_exit(pos: dict, price: float, cfg: dict, now: float, dyn: dict | None = None) -> tuple[float, str]:
     """返回 (卖出比例 0~100, 原因)。0 表示不动。cfg 为全局 exit 配置，按持仓的 tier 自动套用档位规则。
 
-    价格 <= 0（取价失败）时绝不触发止损，避免把"没取到价格"当成"归零"误卖。
+    dyn 为动态管理状态（None = 只用固定规则）：
+      {"cfg": 动态配置, "health": 健康分或 None, "streak": 连续偏低次数, "emergency": 紧急原因,
+       "reduced": 是否已因健康分卖过一半, "why": 扣分说明}
+    价格 <= 0（取价失败）时绝不触发任何卖出，避免把"没取到价格"当成"归零"误卖。
     """
     cfg = exit_rules(cfg, pos.get("tier"))
     entry = float(pos.get("entry_price") or 0)
@@ -46,25 +53,58 @@ def decide_exit(pos: dict, price: float, cfg: dict, now: float) -> tuple[float, 
     gain = (price / entry - 1) * 100
     high = max(float(pos.get("high_price") or entry), price)
     high_gain = (high / entry - 1) * 100
+    stage = int(pos.get("tp_stage") or 0)
+    d = dyn or {}
+    dc = d.get("cfg") or {}
+    health = d.get("health")
 
+    if dyn and d.get("emergency"):
+        return 100, URGENT + str(d["emergency"])
     if gain <= float(cfg.get("stop_loss_pct", -35)):
         return 100, f"止损（{gain:.1f}%）"
+    if dyn and high_gain >= float(dc.get("breakeven_after_pct", 50)) \
+            and gain <= float(dc.get("breakeven_floor_pct", 3)):
+        return 100, f"保本止损（最高 +{high_gain:.0f}%，回落到 {gain:+.1f}%）"
+    if dyn and health is not None and int(d.get("streak") or 0) >= int(dc.get("confirm_checks", 2)):
+        why = f"（{d['why']}）" if d.get("why") else ""
+        if health < float(dc.get("exit_below", 25)):
+            return 100, f"健康分 {health}，数据变差全部卖出{why}"
+        if health < float(dc.get("reduce_below", 40)) and not d.get("reduced"):
+            return 50, f"健康分 {health}，数据变差先卖一半{why}"
+    strong = bool(dyn) and health is not None and health >= float(dc.get("strong_above", 80))
+
     tps = cfg.get("take_profit") or []
-    stage = int(pos.get("tp_stage") or 0)
-    if stage < len(tps) and gain >= float(tps[stage]["gain_pct"]):
-        return float(tps[stage]["sell_pct"]), f"止盈第{stage + 1}档（+{gain:.0f}%）"
+    if stage < len(tps) and gain >= float(tps[stage]["gain_pct"]) and not (strong and stage >= 1):
+        t = tps[stage]
+        if stage == 0 and float(t["gain_pct"]) >= 100 and float(t["sell_pct"]) >= 50:
+            return float(t["sell_pct"]), f"止盈·翻倍出本（+{gain:.0f}%，卖出 {float(t['sell_pct']):.0f}% 收回本金）"
+        return float(t["sell_pct"]), f"止盈第{stage + 1}档（+{gain:.0f}%）"
     if high_gain >= float(cfg.get("trailing_start_pct", 60)):
         drop = (1 - price / high) * 100
-        if drop >= float(cfg.get("trailing_drop_pct", 30)):
+        if drop >= float(cfg.get("trailing_drop_pct", 30)) + (10 if strong else 0):
             return 100, f"移动止损（最高 +{high_gain:.0f}%，回撤 {drop:.0f}%）"
     held_h = (now - float(pos.get("opened_at") or now)) / 3600
-    stall_h = float(cfg.get("stall_hours") or 0)
+    stall_h = float(cfg.get("stall_hours") or 0) * (2 if strong else 1)
     stall_gain = float(cfg.get("stall_min_gain_pct") or 0)
     if stall_h and stage == 0 and held_h >= stall_h and gain < stall_gain:
         return 100, f"涨不上去（持有 {held_h:.1f} 小时，当前 {gain:+.1f}%，没到 +{stall_gain:.0f}%）"
-    if held_h > float(cfg.get("max_hold_hours", 24)):
+    if held_h > float(cfg.get("max_hold_hours", 24)) * (1.5 if strong else 1):
         return 100, f"持仓超时（当前 {gain:+.1f}%）"
     return 0, ""
+
+
+def dyn_state(p: dict, dc: dict, now: float, reduced: int | None = None) -> dict:
+    """从持仓记录取出动态管理状态。复查数据太旧（超过 3 个复查周期）时不用健康分和紧急信号。"""
+    fresh = now - float(p.get("health_at") or 0) <= float(dc.get("check_sec", 120)) * 3 + 30
+    has = fresh and p.get("health") is not None and p.get("entry_snap")
+    notes = json.loads(p.get("health_note") or "[]") if has else []
+    return {
+        "cfg": dc, "health": int(p["health"]) if has else None,
+        "streak": int(p.get("health_streak") or 0) if has else 0,
+        "emergency": (p.get("health_emergency") or "") if has else "",
+        "reduced": int(p.get("health_reduced") or 0) if reduced is None else reduced,
+        "why": "；".join(n.split(" ", 1)[1] for n in notes if n.startswith("-"))[:120],
+    }
 
 
 class PositionManager:
@@ -75,6 +115,25 @@ class PositionManager:
         self._tasks: set[asyncio.Task] = set()
         self._next_try: dict[int, float] = {}   # 卖出失败后的退避时间
         self._last_reconcile = 0.0
+        self._checking: set[int] = set()
+        self._check_sem = asyncio.Semaphore(2)
+
+    @property
+    def exit_cfg(self) -> dict:
+        return self.cfg.get("exit", {}) or {}
+
+    @property
+    def dcfg(self) -> dict:
+        return dyn_cfg(self.exit_cfg)
+
+    async def mode(self) -> str:
+        m = await self.app.db.kv_get("dyn_mode", None) or self.dcfg.get("mode", "shadow")
+        return m if m in ("off", "shadow", "live") else "shadow"
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
 
     async def run(self) -> None:
         interval = float(self.cfg.get("exit.check_interval_sec", 10))
@@ -107,30 +166,186 @@ class PositionManager:
                                        f"如果之前收到过它的「卖出失败」，说明那笔卖出其实已经成交，可以到 GMGN 钱包确认收益。")
 
     async def tick(self) -> None:
-        pos = await self.app.db.open_positions()
-        if not pos:
+        db = self.app.db
+        pos = await db.open_positions()
+        mode = await self.mode()
+        shadows: list[dict] = []
+        if mode != "off":
+            await self._ensure_shadows(pos)
+            shadows = await db.fetchall(
+                "SELECT s.*, p.chain, p.token, p.symbol, p.entry_price, p.opened_at, p.tier, p.cost_usd, "
+                "p.health, p.health_streak, p.health_emergency, p.health_note, p.health_at, p.entry_snap, "
+                "p.status AS pstatus FROM shadow s JOIN positions p ON p.id=s.pid WHERE s.closed=0")
+        if not pos and not shadows:
             return
-        await self.reconcile(pos)
-        by_chain: dict[str, list[dict]] = {}
-        for p in pos:
-            by_chain.setdefault(p["chain"], []).append(p)
-        exit_cfg = self.cfg.get("exit", {}) or {}
-        for chain, lst in by_chain.items():
-            prices = await self.app.data.prices(chain, [p["token"] for p in lst])
-            for p in lst:
-                px = prices.get(p["token"]) or prices.get(p["token"].lower()) or 0.0
-                if px <= 0:
-                    continue
-                if px > float(p["high_price"] or 0):
-                    await self.app.db.execute("UPDATE positions SET high_price=? WHERE id=?", (px, p["id"]))
-                    p["high_price"] = px
-                pct, why = decide_exit(p, px, exit_cfg, time.time())
-                if pct > 0 and p["id"] not in self._selling and time.time() >= self._next_try.get(p["id"], 0):
-                    t = asyncio.create_task(self.sell(p, pct, why, px))
-                    self._tasks.add(t)
-                    t.add_done_callback(self._tasks.discard)
+        if pos:
+            await self.reconcile(pos)
+        now = time.time()
+        dc = self.dcfg
 
-    async def sell(self, p: dict, pct: float, reason: str, price_hint: float = 0.0) -> None:
+        # ---- 健康分复查（持仓 + 观察中的虚拟持仓）----
+        if mode != "off":
+            targets = {p["id"]: p for p in pos}
+            for s in shadows:
+                if s["variant"] == "v2" and s["pid"] not in targets:
+                    targets[s["pid"]] = await db.fetchone("SELECT * FROM positions WHERE id=?", (s["pid"],))
+            for pid, p in targets.items():
+                if p and pid not in self._checking and now - float(p.get("health_at") or 0) >= float(dc["check_sec"]):
+                    self._checking.add(pid)
+                    self._spawn(self._check_health(p, mode))
+
+        # ---- 取价 ----
+        need: dict[str, set[str]] = {}
+        for p in pos:
+            need.setdefault(p["chain"], set()).add(p["token"])
+        for s in shadows:
+            need.setdefault(s["chain"], set()).add(s["token"])
+        prices: dict[tuple[str, str], float] = {}
+        for chain, toks in need.items():
+            got = await self.app.data.prices(chain, list(toks))
+            for t in toks:
+                prices[(chain, t)] = got.get(t) or got.get(t.lower()) or 0.0
+
+        # ---- 真实持仓 ----
+        for p in pos:
+            px = prices.get((p["chain"], p["token"]), 0.0)
+            if px <= 0:
+                continue
+            if px > float(p["high_price"] or 0):
+                await db.execute("UPDATE positions SET high_price=? WHERE id=?", (px, p["id"]))
+                p["high_price"] = px
+            dyn = dyn_state(p, dc, now) if mode == "live" else None
+            pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
+            if pct > 0 and p["id"] not in self._selling and now >= self._next_try.get(p["id"], 0):
+                self._spawn(self.sell(p, pct, why, px, urgent=why.startswith(URGENT)))
+
+        # ---- 观察模式：旧规则 / 新规则各自虚拟卖出 ----
+        for s in shadows:
+            await self._sim(s, prices.get((s["chain"], s["token"]), 0.0), now, mode)
+        if mode == "shadow":
+            await self._shadow_report()
+
+    # ================================================================ 健康分复查
+    async def _check_health(self, p: dict, mode: str) -> None:
+        db = self.app.db
+        pid = p["id"]
+        try:
+            async with self._check_sem:
+                rep = await self.app.analyzer.analyze(p["chain"], p["token"], source="position", force=True)
+                now = time.time()
+                if not rep or float(rep.get("price") or 0) <= 0:
+                    await db.execute("UPDATE positions SET health_at=? WHERE id=?", (now, pid))
+                    return
+                cur = snapshot(rep)
+                entry = json.loads(p.get("entry_snap") or "null") or cur   # 老持仓：首次复查的数据作为基准
+                prev = json.loads(p.get("prev_snap") or "null")
+                smart = await smart_stats(db, p)
+                held_h = (now - float(p.get("opened_at") or now)) / 3600
+                dc = self.dcfg
+                h, notes, emerg = score_health(entry, prev, cur, smart, held_h, dc)
+                low = h < float(dc["reduce_below"])
+                streak = int(p.get("health_streak") or 0) + 1 if low else 0
+                await db.execute(
+                    "UPDATE positions SET entry_snap=?, prev_snap=?, health=?, health_note=?, health_streak=?, "
+                    "health_emergency=?, health_at=? WHERE id=?",
+                    (json.dumps(entry), json.dumps(cur), h, json.dumps(notes, ensure_ascii=False), streak,
+                     emerg, now, pid))
+                if mode == "live" and p.get("status") == "open":
+                    if emerg and not p.get("health_emergency"):
+                        await self.app.tg.send(f"🚨 #{pid} {p['symbol']} {emerg}，立即全部卖出")
+                    elif low and streak == 1:
+                        await self.app.tg.send(
+                            f"⚠️ #{pid} {p['symbol']} 健康分降到 {h}：{'；'.join(notes) or '数据变差'}\n"
+                            f"下次复查（约 {int(dc['check_sec']) // 60} 分钟后）仍偏低就卖出")
+        except Exception as e:  # noqa: BLE001
+            log.warning("复查 #%s 失败: %s", pid, e)
+        finally:
+            self._checking.discard(pid)
+
+    # ================================================================ 观察模式
+    async def _ensure_shadows(self, pos: list[dict]) -> None:
+        """给还没有虚拟记录的持仓建两份：v1 = 旧规则，v2 = 新规则。从持仓当前状态开始模拟。"""
+        db = self.app.db
+        have = {r["pid"] for r in await db.fetchall("SELECT DISTINCT pid FROM shadow")}
+        for p in pos:
+            if p["id"] in have or float(p.get("entry_price") or 0) <= 0:
+                continue
+            amt = int(p["amount_raw"] or 0)
+            frac = int(p["remaining_raw"] or 0) / amt if amt else 1.0
+            realized = float(p["realized_usd"] or 0) / float(p["cost_usd"]) if float(p["cost_usd"] or 0) else 0.0
+            for v in ("v1", "v2"):
+                await db.execute(
+                    "INSERT OR IGNORE INTO shadow(pid,variant,frac,tp_stage,realized,high,reduced,last_price,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (p["id"], v, frac, int(p["tp_stage"] or 0), realized, float(p["high_price"] or p["entry_price"]),
+                     int(p.get("health_reduced") or 0), float(p["entry_price"]), time.time()))
+        if await db.kv_get("dyn_since", None) is None:
+            await db.kv_set("dyn_since", time.time())
+
+    async def _shadow_apply(self, s: dict, pct: float, why: str, px: float, now: float) -> None:
+        entry = float(s["entry_price"] or 0)
+        if px <= 0 or entry <= 0 or pct <= 0:
+            return
+        frac = float(s["frac"])
+        sell = frac if pct >= 100 or frac * (1 - pct / 100) < 0.02 else frac * pct / 100
+        frac -= sell
+        realized = float(s["realized"]) + sell * px / entry
+        stage = int(s["tp_stage"]) + (1 if why.startswith("止盈") else 0)
+        reduced = 1 if (why.startswith("健康分") and pct < 100) or s["reduced"] else 0
+        lg = json.loads(s["log"] or "[]")
+        lg.append([round(now), round(pct), why, round((px / entry - 1) * 100, 1)])
+        closed = 1 if frac <= 0.001 else 0
+        await self.app.db.execute(
+            "UPDATE shadow SET frac=?, realized=?, tp_stage=?, reduced=?, log=?, closed=?, closed_at=?, last_price=? "
+            "WHERE pid=? AND variant=?",
+            (max(frac, 0.0), realized, stage, reduced, json.dumps(lg[-30:], ensure_ascii=False), closed,
+             now if closed else None, px, s["pid"], s["variant"]))
+        s.update(frac=max(frac, 0.0), realized=realized, tp_stage=stage, reduced=reduced, log=json.dumps(lg))
+
+    async def _sim(self, s: dict, px: float, now: float, mode: str) -> None:
+        db = self.app.db
+        if px <= 0:
+            if now - float(s["opened_at"] or now) > 96 * 3600:   # 长期取不到价：按最后价格结束模拟
+                await self._shadow_apply(s, 100, "取不到价格，结束模拟", float(s["last_price"] or 0), now)
+            return
+        if px > float(s["high"] or 0):
+            s["high"] = px
+            await db.execute("UPDATE shadow SET high=?, last_price=? WHERE pid=? AND variant=?",
+                             (px, px, s["pid"], s["variant"]))
+        v = {"entry_price": s["entry_price"], "high_price": s["high"], "tp_stage": s["tp_stage"],
+             "opened_at": s["opened_at"], "tier": s["tier"]}
+        dyn = dyn_state(s, self.dcfg, now, reduced=int(s["reduced"] or 0)) if s["variant"] == "v2" else None
+        pct, why = decide_exit(v, px, self.exit_cfg, now, dyn)
+        if pct <= 0 and now - float(s["opened_at"] or now) > 96 * 3600:
+            pct, why = 100, "模拟超过 4 天，按当前价结束"
+        if pct > 0:
+            await self._shadow_apply(s, pct, why, px, now)
+            # 只提示新规则独有的卖点（止损、止盈这些两套规则一样，真实持仓本来就会卖）
+            if s["variant"] == "v2" and mode == "shadow" and s["pstatus"] == "open" \
+                    and why.startswith((URGENT, "保本", "健康分")):
+                await self.app.tg.send(f"👀 观察模式：新规则会在这里卖出 #{s['pid']} {s['symbol']} {pct:.0f}%"
+                                       f"（{why}）。现在只记录，不执行。")
+
+    async def shadow_on_manual(self, pid: int, pct: float, why: str, px: float) -> None:
+        """手动卖出、跟卖聪明钱这类不属于规则的卖出，两套虚拟持仓同步执行，保证对比公平。"""
+        for s in await self.app.db.fetchall(
+                "SELECT s.*, p.entry_price FROM shadow s JOIN positions p ON p.id=s.pid "
+                "WHERE s.pid=? AND s.closed=0", (pid,)):
+            await self._shadow_apply(s, pct, why, px or float(s["last_price"] or 0), time.time())
+
+    async def _shadow_report(self) -> None:
+        db = self.app.db
+        since = float(await db.kv_get("dyn_since", 0) or 0)
+        hours = float(self.dcfg.get("shadow_report_hours", 24))
+        if not since or time.time() - since < hours * 3600 or await db.kv_get("dyn_reported", False):
+            return
+        await db.kv_set("dyn_reported", True)
+        from .review import shadow_compare
+        await self.app.tg.send(f"📊 <b>动态管理观察满 {hours:.0f} 小时</b>\n{await shadow_compare(self.app)}\n\n"
+                               f"想让新规则接管卖出，发 /dynamic on；继续观察不用操作。")
+
+    # ================================================================ 卖出
+    async def sell(self, p: dict, pct: float, reason: str, price_hint: float = 0.0, urgent: bool = False) -> None:
         pid = p["id"]
         if pid in self._selling:
             return
@@ -148,11 +363,13 @@ class PositionManager:
                 return
             chain = p["chain"]
             slip = int(self.cfg.per_chain("trading.slippage_bps", chain, 1000))
+            if urgent:
+                slip = max(slip, int(self.dcfg.get("urgent_slippage_bps", 3000)))
             ex = self.app.trader.exec.get(chain)
             if not ex:
                 return
             try:
-                fill: Fill = await ex.sell(p["token"], amt, int(p["decimals"] or 0), slip)
+                fill: Fill = await ex.sell(p["token"], amt, int(p["decimals"] or 0), slip, urgent=urgent)
             except Exception as e:  # noqa: BLE001
                 fill = Fill(False, error=str(e)[:200])
             npx = await self.app.native_price(chain)
@@ -174,16 +391,19 @@ class PositionManager:
                     await self.app.tg.send(f"🚨 #{pid} {p['symbol']} 连续 {attempts} 次卖出失败，已标记为无法卖出，"
                                            f"请手动处理。最后错误：{fill.error}")
                 else:
-                    self._next_try[pid] = time.time() + 20 * attempts
+                    self._next_try[pid] = time.time() + (5 if urgent else 20 * attempts)
                     await self.app.db.execute("UPDATE positions SET sell_attempts=? WHERE id=?", (attempts, pid))
                     await self.app.tg.trade_failed(chain, {"symbol": p["symbol"], "address": p["token"]}, "卖出", fill)
                 return
             new_remaining = max(remaining - fill.token_raw, 0)
             realized = float(p["realized_usd"] or 0) + usd
             stage = int(p["tp_stage"] or 0) + (1 if reason.startswith("止盈") else 0)
+            reduced = 1 if (reason.startswith("健康分") and pct < 100) or p.get("health_reduced") else 0
             await self.app.db.execute(
-                "UPDATE positions SET remaining_raw=?, realized_usd=?, tp_stage=?, sell_attempts=0 WHERE id=?",
-                (str(new_remaining), realized, stage, pid))
+                "UPDATE positions SET remaining_raw=?, realized_usd=?, tp_stage=?, sell_attempts=0, health_reduced=? "
+                "WHERE id=?", (str(new_remaining), realized, stage, reduced, pid))
+            if reason.startswith(("手动", "带单聪明钱")):
+                await self.shadow_on_manual(pid, pct, reason, price_hint)
             closed = new_remaining <= original * 0.02
             if closed:
                 await self._close(p, realized, reason)
@@ -196,7 +416,6 @@ class PositionManager:
             "UPDATE positions SET status='closed', closed_at=?, close_reason=?, realized_usd=? WHERE id=?",
             (time.time(), reason, realized, p["id"]))
         # 更新带单钱包的跟单战绩（用于修正钱包评分）
-        import json
         win = realized > float(p["cost_usd"] or 0)
         for w in json.loads(p["source_wallets"] or "[]"):
             col = "follow_wins" if win else "follow_losses"

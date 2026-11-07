@@ -143,7 +143,7 @@ exit:
       max_hold_hours: 24
       stall_hours: 4
       stall_min_gain_pct: 20
-    best:                         # 🔥 优质：拿得久、止盈卖得少，让利润多跑一会
+    best:                         # 🔥 优质：拿得久、翻倍先出本，剩下的让利润多跑一会
       max_hold_hours: 72
       stall_hours: 12
       stall_min_gain_pct: 30
@@ -151,9 +151,22 @@ exit:
       trailing_drop_pct: 35
       follow_smart_sell_pct: 50
       take_profit:
-        - { gain_pct: 100, sell_pct: 30 }
+        - { gain_pct: 100, sell_pct: 50 }    # 翻倍出本
         - { gain_pct: 300, sell_pct: 30 }
         - { gain_pct: 1000, sell_pct: 50 }
+  # 动态管理：每隔几分钟复查持仓数据（聪明钱、捆绑/埋伏/dev、流动性、持有人、成交量），算 0~100 健康分
+  dynamic:
+    mode: shadow                  # off 关闭 / shadow 只记录不执行（先观察）/ live 接管卖出。TG 发 /dynamic 随时切换
+    check_sec: 120                # 每个持仓多久复查一次
+    confirm_checks: 2             # 健康分偏低要连续几次复查才动手（撤池子、dev 清仓这类紧急情况立刻卖）
+    reduce_below: 40              # 健康分 < 40 卖一半
+    exit_below: 25                # 健康分 < 25 全卖
+    strong_above: 80              # 健康分 > 80 视为强势：推迟第 2 档以后的止盈、移动止损多容忍 10%、观察期和最长持有延长
+    breakeven_after_pct: 50       # 保本止损：涨过 +50% 后，跌回成本附近（+3%，覆盖手续费）就卖
+    breakeven_floor_pct: 3
+    urgent_slippage_bps: 3000     # 紧急卖出时的滑点（30%）
+    urgent_priority_fee_sol: "0.002"   # 紧急卖出时的优先费和小费（SOL）
+    urgent_tip_fee: "0.002"
 
 # ---------------- 其他接口限速（Birdeye / Jupiter / 0x 只在对应模式下用到） ----------------
 budget:

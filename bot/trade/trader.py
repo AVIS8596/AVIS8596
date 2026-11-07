@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .executors import DryRunExecutor, EvmExecutor, Fill, GmgnExecutor, SolanaExecutor
+from .health import snapshot
 from .positions import exit_rules
 
 if TYPE_CHECKING:
@@ -166,11 +167,11 @@ class Trader:
             return
         pid = await self.app.db.execute(
             """INSERT INTO positions(chain,token,symbol,status,dry_run,reason,source_wallets,entry_price,cost_native,
-                 cost_usd,amount_raw,decimals,remaining_raw,high_price,opened_at,tier)
-               VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 cost_usd,amount_raw,decimals,remaining_raw,high_price,opened_at,tier,entry_snap,health_at)
+               VALUES(?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (chain, token, rep.get("symbol", ""), int(self.cfg.dry_run), reason, json.dumps(wallets[:20]),
              entry, fill.native, cost_usd, str(fill.token_raw), fill.decimals, str(fill.token_raw), entry, time.time(),
-             tier))
+             tier, json.dumps(snapshot(rep), ensure_ascii=False), time.time()))
         await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason,
                                     exit_rules(self.cfg.get("exit", {}) or {}, tier))
 

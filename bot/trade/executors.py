@@ -58,7 +58,7 @@ class DryRunExecutor:
         ui = amount * npx / px * (1 - slippage_bps / 10000 / 3)   # 模拟一点滑点损耗
         return Fill(True, "DRYRUN", int(ui * 10 ** dec), dec, amount)
 
-    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int) -> Fill:
+    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         px = await self.app.data.price(self.chain, token)
         npx = await self.app.native_price(self.chain)
         if px <= 0 or npx <= 0:
@@ -158,7 +158,7 @@ class SolanaExecutor:
             return Fill(True, r.get("sig", ""), got, dec2 or dec, amount)
         return Fill(False, r.get("sig", ""), error=f"PumpPortal: {r.get('error')}", unknown=bool(r.get("unknown")))
 
-    async def sell(self, mint: str, raw: int, decimals: int, slippage_bps: int) -> Fill:
+    async def sell(self, mint: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         rpc = self.app.sol
         have, dec = await rpc.token_balance(self.pub, mint)
         raw = min(raw, have)
@@ -260,7 +260,7 @@ class EvmExecutor:
             return Fill(got > 0, h, max(got, 0), dec, amount, error="" if got > 0 else "确认超时", unknown=got <= 0)
         return Fill(False, h, error="链上执行失败")
 
-    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int) -> Fill:
+    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         have = await self.rpc.erc20_balance(token, self.addr)
         raw = min(raw, have)
         if raw <= 0:
@@ -433,7 +433,7 @@ class GmgnExecutor:
             return Fill(True, h, got, dec2, spent)
         return Fill(False, h, error=f"GMGN: 订单状态 {self._st(r) or '未知'}，链上暂未看到到账", unknown=True)
 
-    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int) -> Fill:
+    async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         from ..sources.gmgn import GmgnError
         have, dec = await self._token_balance(token)
         if have <= 0:
@@ -444,6 +444,13 @@ class GmgnExecutor:
         raw = min(raw, have)
         native_before = await self.native_balance()
         params = self._base_params(token, self.native, slippage_bps)
+        if urgent:   # 紧急卖出（撤池子、dev 清仓）：加优先费和小费抢先成交
+            from .health import dyn_cfg
+            dc = dyn_cfg(self.app.cfg.get("exit", {}))
+            if self.chain == "solana" and dc.get("urgent_priority_fee_sol"):
+                params["priority_fee"] = str(dc["urgent_priority_fee_sol"])
+            if self.chain == "solana" and dc.get("urgent_tip_fee"):
+                params["tip_fee"] = str(dc["urgent_tip_fee"])
         if raw >= have * 0.999:     # 全部卖出用百分比，避免余额精度问题留下碎渣
             params["input_amount"] = "0"
             params["input_amount_bps"] = "10000"

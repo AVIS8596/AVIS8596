@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS positions (
   amount_raw TEXT, decimals INTEGER, remaining_raw TEXT,
   high_price REAL, tp_stage INTEGER DEFAULT 0, sell_attempts INTEGER DEFAULT 0,
   realized_usd REAL DEFAULT 0, opened_at REAL, closed_at REAL, close_reason TEXT,
-  tier TEXT            -- best / good / normal；空 = 分档上线前的老持仓
+  tier TEXT,           -- best / good / normal；空 = 分档上线前的老持仓
+  entry_snap TEXT, prev_snap TEXT, health INTEGER, health_note TEXT, health_streak INTEGER DEFAULT 0,
+  health_emergency TEXT, health_reduced INTEGER DEFAULT 0, health_at REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
 
@@ -72,7 +74,21 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+
+-- 观察模式：同一个持仓分别按旧规则(v1)和新规则(v2)虚拟卖出，用来对比谁卖得好
+CREATE TABLE IF NOT EXISTS shadow (
+  pid INTEGER, variant TEXT, frac REAL, tp_stage INTEGER DEFAULT 0, realized REAL DEFAULT 0,
+  high REAL, reduced INTEGER DEFAULT 0, closed INTEGER DEFAULT 0, closed_at REAL, last_price REAL,
+  log TEXT DEFAULT '[]', created_at REAL, PRIMARY KEY (pid, variant)
+);
 """
+
+# 老数据库需要补的列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）
+POSITION_COLUMNS = [
+    ("tier", "TEXT"), ("entry_snap", "TEXT"), ("prev_snap", "TEXT"), ("health", "INTEGER"),
+    ("health_note", "TEXT"), ("health_streak", "INTEGER DEFAULT 0"), ("health_emergency", "TEXT"),
+    ("health_reduced", "INTEGER DEFAULT 0"), ("health_at", "REAL DEFAULT 0"),
+]
 
 
 class DB:
@@ -86,10 +102,12 @@ class DB:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
-        # 老数据库补列（新增列只能 ALTER，CREATE TABLE IF NOT EXISTS 不会改已存在的表）
         cur = await self.conn.execute("PRAGMA table_info(positions)")
-        if "tier" not in {r[1] for r in await cur.fetchall()}:
-            await self.conn.execute("ALTER TABLE positions ADD COLUMN tier TEXT")
+        have = {r[1] for r in await cur.fetchall()}
+        for col, typ in POSITION_COLUMNS:
+            if col not in have:
+                await self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {typ}")
+        if "tier" not in have:
             # 分档买入上线后、本列加上之前买的持仓：从买入原因里认出档位
             await self.conn.execute(
                 "UPDATE positions SET tier = CASE WHEN reason LIKE '%| 🔥优质%' THEN 'best' "
