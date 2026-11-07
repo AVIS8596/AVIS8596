@@ -333,12 +333,12 @@ class GmgnExecutor:
 
     async def native_balance(self) -> float:
         if self.chain == "solana":
-            return await self.app.sol.balance_lamports(self.addr) / 1e9
+            return await self.app.sol.balance_lamports(self.addr, svc="helius_trade") / 1e9
         return await self.app.evm[self.chain].balance(self.addr) / 1e18
 
     async def _token_balance(self, token: str) -> tuple[int, int]:
         if self.chain == "solana":
-            return await self.app.sol.token_balance(self.addr, token)
+            return await self.app.sol.token_balance(self.addr, token, svc="helius_trade")
         rpc = self.app.evm[self.chain]
         return await rpc.erc20_balance(token, self.addr), await rpc.erc20_decimals(token)
 

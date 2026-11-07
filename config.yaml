@@ -136,7 +136,8 @@ exit:
 budget:
   birdeye_daily_cu: 300000        # Birdeye 每日计算单元上限（Premium 每月 1000 万 ≈ 每日 33 万）
   birdeye_rps: 40                 # Premium 50 rps，留余量
-  helius_rps: 40                  # Developer 50 rps
+  helius_rps: 6                   # Helius 免费版每秒 10 次：分析/监听用 6，交易留 3；升级 Developer（50）后可改成 35
+  helius_trade_rps: 3             # 交易专用额度（查余额、确认成交），保证随时能卖
   jupiter_rps: 8                  # Developer 档 10 rps；免费档请改成 1
   zerox_rps: 1                    # 0x 免费档 1 rps
   etherscan_rps: 4

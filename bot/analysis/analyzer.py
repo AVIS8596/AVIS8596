@@ -207,7 +207,11 @@ class Analyzer:
         n_early = int(self.cfg.get("discovery.max_early_buyers", 40))
         buys: list[bd.EarlyBuy] = []
         launch_slot, launch_ts = 0, created_ts
-        sigs = await _safe(rpc.oldest_signatures(mint, n_early * 2, max_pages=2), None)
+        # 逐笔还原开盘要几十次节点请求；Helius 免费版扛不住，默认关闭，改用 GMGN 的捆绑/老鼠仓标签
+        if self.cfg.get("discovery.rpc_reconstruct", False):
+            sigs = await _safe(rpc.oldest_signatures(mint, n_early * 2, max_pages=2), None)
+        else:
+            sigs = []
         if sigs:
             sem = asyncio.Semaphore(8)
 
@@ -289,7 +293,7 @@ class Analyzer:
         for w, info in ff.items():
             if info.get("funder"):
                 funding[w] = bd.Funding(info["funder"], info.get("ts", 0))
-        missing = [w for w in wallets if w not in funding][:15]
+        missing = [w for w in wallets if w not in funding][:15 if self.cfg.get("discovery.rpc_reconstruct", False) else 0]
         sem2 = asyncio.Semaphore(5)
 
         async def fund(w: str) -> None:

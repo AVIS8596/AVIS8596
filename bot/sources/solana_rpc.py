@@ -21,17 +21,19 @@ class RpcError(Exception):
 
 
 class SolanaRPC:
-    def __init__(self, http: Http, helius_key: str, rps: float):
+    def __init__(self, http: Http, helius_key: str, rps: float, trade_rps: float = 3):
         self.http = http
         self.url = f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
         self.wss = f"wss://mainnet.helius-rpc.com/?api-key={helius_key}"
+        # 两份额度：交易相关（查余额、确认）单独留一份，不会被分析、监听抢光，保证随时能卖
         http.set_rate("helius", rps)
+        http.set_rate("helius_trade", trade_rps)
         self._id = 0
 
-    async def call(self, method: str, params: list | None = None, retries: int = 3) -> Any:
+    async def call(self, method: str, params: list | None = None, retries: int = 3, svc: str = "helius") -> Any:
         self._id += 1
         body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or []}
-        r = await self.http.post("helius", self.url, json_body=body, retries=retries)
+        r = await self.http.post(svc, self.url, json_body=body, retries=retries)
         if isinstance(r, dict) and r.get("error"):
             raise RpcError(f"{method}: {r['error']}")
         return r.get("result") if isinstance(r, dict) else None
@@ -70,14 +72,15 @@ class SolanaRPC:
             before = page[-1]["signature"]
         return None if last_page else []
 
-    async def balance_lamports(self, address: str) -> int:
-        r = await self.call("getBalance", [address, {"commitment": "confirmed"}])
+    async def balance_lamports(self, address: str, svc: str = "helius") -> int:
+        r = await self.call("getBalance", [address, {"commitment": "confirmed"}], svc=svc)
         return int(r.get("value", 0)) if isinstance(r, dict) else 0
 
-    async def token_balance(self, owner: str, mint: str) -> tuple[int, int]:
+    async def token_balance(self, owner: str, mint: str, svc: str = "helius") -> tuple[int, int]:
         """返回 (原始数量, 精度)。用 mint 过滤，Token 和 Token-2022 都能查到。"""
         r = await self.call("getTokenAccountsByOwner",
-                            [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}])
+                            [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+                            retries=6, svc=svc)
         total, dec = 0, 0
         for acc in (r or {}).get("value", []):
             info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})

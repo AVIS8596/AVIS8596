@@ -26,6 +26,7 @@ class SolanaWalletMonitor:
         self.app = app
         self.seen = TTLSet(3600)
         self._tasks: set[asyncio.Task] = set()
+        self.dropped = 0
 
     async def run(self) -> None:
         ev = self.app.wallets_changed["solana"]
@@ -79,6 +80,12 @@ class SolanaWalletMonitor:
                         if not wallet or not sig or val.get("err") is not None:
                             continue
                         if not self.seen.add_if_new(f"{sig}:{wallet}"):
+                            continue
+                        if len(self._tasks) >= 15:
+                            # 节点额度跟不上时丢弃，GMGN 交易流那一路还能补上；排队等下去信号也过时了
+                            self.dropped += 1
+                            if self.dropped % 100 == 1:
+                                log.warning("Solana 监听积压，已丢弃 %d 条通知（Helius 额度不够，考虑升级）", self.dropped)
                             continue
                         t = asyncio.create_task(self._handle(sig, wallet))
                         self._tasks.add(t)

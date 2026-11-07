@@ -37,7 +37,8 @@ class App:
         self.etherscan = Etherscan(self.http, s.etherscan_key, float(b.get("etherscan_rps", 4)))
         self.sol: SolanaRPC | None = None
         if "solana" in cfg.enabled_chains:
-            self.sol = SolanaRPC(self.http, s.helius_key, float(b.get("helius_rps", 40)))
+            self.sol = SolanaRPC(self.http, s.helius_key, float(b.get("helius_rps", 6)),
+                                 float(b.get("helius_trade_rps", 3)))
         self.evm: dict[str, EvmRPC] = {c: EvmRPC(self.http, c, s.rpc_http[c]) for c in cfg.evm_chains}
         self.wallets_changed: dict[str, asyncio.Event] = {c: asyncio.Event() for c in cfg.enabled_chains}
         self._native_px: dict[str, tuple[float, float]] = {}
