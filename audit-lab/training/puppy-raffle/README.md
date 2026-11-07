@@ -65,8 +65,35 @@ forge test --match-path test/ReentrancyPoC.t.sol -vv
 slither .
 ```
 
-## 下一个训练目标(建议)
+## 另外两个 PoC(已跑通,见 `WeaknessesPoC.t.sol`)
 
-- **弱随机数 PoC**:演示 validator/调用者如何预测并操纵 `selectWinner` 选中自己。
-- **溢出 PoC**:灌入足够多玩家让 `totalFees` 溢出,演示费用会计被破坏。
-- 做完 Puppy Raffle 再上 **CodeHawks First Flights** 的下一题,逐步进阶到正式竞赛。
+**PoC #2 弱随机数** `test_weakRandomness_attackerAlwaysWins`:
+攻击者用和合约一模一样的公式 `keccak(msg.sender, timestamp, difficulty) % n`,
+grind 一个让自己中奖的时间戳,只在对自己有利的区块调用 `selectWinner` →
+**保证中奖**。三个输入在调用时全部已知/可控,所谓"随机"形同虚设。
+
+**PoC #3 totalFees uint64 溢出** `test_overflow_totalFeesTruncatedAndFeesLocked`:
+```
+true fee (wei)     : 20000000000000000000   (应得 20 ETH)
+recorded totalFees :  1553255926290448384   (实记 ≈1.553 ETH = 20e18 mod 2^64)
+```
+100 个玩家时 20% 费用 = 20 ETH > uint64.max,`uint64(fee)` 被截断,费用严重低计;
+且合约实际持有 20 ETH 费用而 `totalFees` 对不上 → `withdrawFees` 的
+`require(balance == totalFees)` 永久失败,**费用被锁死无法取出**。
+
+> 修复:`totalFees` 用 `uint256`;或升级到 solc ≥0.8 并去掉不安全的 `uint64` 转换;
+> `withdrawFees` 不要用严格相等做余额校验。
+
+## 小结:Puppy Raffle 三个 High 全部有可跑通 PoC
+
+| PoC | 文件 | 结果 |
+|-----|------|------|
+| 重入抽干全池 | `ReentrancyPoC.t.sol` | 本金 1 ETH,净赚 4 ETH |
+| 弱随机数保证中奖 | `WeaknessesPoC.t.sol` | 攻击者必中 |
+| uint64 溢出 + 锁死费用 | `WeaknessesPoC.t.sol` | 20 ETH 记成 1.55 ETH,费用取不出 |
+
+## 进阶路线(1→2→3)
+
+- ✅ **步骤 1**:把 Puppy Raffle 挖透(本目录,三个 PoC 完成)。
+- ⏭ **步骤 2**:换下一个 CodeHawks First Flight 靶场,练不同漏洞类型。
+- ⏭ **步骤 3**:找一个带已知报告的靶场,**不预看答案**独立出报告再对照,逼近真实竞赛手感。
