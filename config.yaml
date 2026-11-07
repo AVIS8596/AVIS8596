@@ -199,6 +199,7 @@ budget:
 # 两类都用一般档金额（早期建仓有 2 个以上聪明钱或 KOL 时用较好档），每天限量。
 strategies:
   poll_sec: 30
+  max_per_hour: 2                 # 两类合计每小时最多交给确认期 2 笔，避免集中下单
   early:                          # 早期建仓：快毕业、结构干净、持有人快速增长
     enabled: true
     max_age_min: 180              # 发币 3 小时内
@@ -212,6 +213,8 @@ strategies:
     max_insider_rate: 0.15
     max_creator_rate: 0.05
     max_per_day: 6
+    persist_sec: 60               # 论证：达标后隔 1 分钟再看一次，仍达标、持有人没减少才继续
+    min_token_score: 50           # 论证：完整分析的代币评分要 ≥ 50
   narrative:                      # 强叙事：KOL / 聪明钱 / 引用大号新推文 / 项目粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分
     enabled: true
     min_score: 60
@@ -224,3 +227,5 @@ strategies:
     max_insider_rate: 0.2
     max_creator_rate: 0.1
     max_per_day: 6
+    persist_sec: 180              # 论证：达标后观察 3 分钟，热度没退（持有人不减、叙事分不明显下降）才继续
+    min_token_score: 55           # 论证：完整分析的代币评分要 ≥ 55

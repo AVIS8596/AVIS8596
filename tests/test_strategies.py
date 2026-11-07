@@ -75,17 +75,61 @@ def test_poll_triggers_once_and_skips_copycats():
         t0 = time.time()
         it = dict(CLEAN, created_timestamp=t0 - 600)
         st.hist[("solana", "TOK1")] = deque([(t0 - 180, 200)])
-        out = await st.poll("solana", [it])
-        assert out and out[0][1].startswith("早期建仓") and out[0][2] == "normal"
-        assert await st.poll("solana", [it]) == []            # 同一个币只触发一次
-        # 强叙事：同名 3 个，只有成交量最大的领头者会被选中
+        # 第一次达标只进观察名单，不买
+        assert await st.poll("solana", [it], now=t0) == []
+        # 1 分钟后仍达标、持有人没减少 → 交给下一步论证
+        out = await st.poll("solana", [dict(it, holder_count=275)], now=t0 + 65)
+        assert out and out[0][1].startswith("早期建仓") and "论证：持续" in out[0][1] and out[0][2] == "normal"
+        assert await st.poll("solana", [dict(it, holder_count=290)], now=t0 + 95) == []   # 同一个币只触发一次
+        # 持有人在减少 → 热度退了，不买
+        it2 = dict(CLEAN, address="TOK2", created_timestamp=t0 - 600)
+        st.hist[("solana", "TOK2")] = deque([(t0 - 180, 200)])
+        assert await st.poll("solana", [it2], now=t0) == []
+        assert await st.poll("solana", [dict(it2, holder_count=240)], now=t0 + 65) == []
+        # 强叙事：同名 3 个，只有成交量最大的领头者会被选中，观察 3 分钟
         base = {**CLEAN, "_stage": "已毕业", "symbol": "DOGEX", "created_timestamp": t0 - 3600, "renowned_count": 3,
                 "smart_degen_count": 2, "twitter": "x", "x_user_follower": 20000, "holder_count": 800}
         items = [dict(base, address="A", volume_1h=200000), dict(base, address="B", volume_1h=50000),
                  dict(base, address="C", volume_1h=40000)]
-        out = await st.poll("solana", items)
+        assert await st.poll("solana", items, now=t0) == []
+        assert await st.poll("solana", items, now=t0 + 100) == []
+        out = await st.poll("solana", items, now=t0 + 190)
         assert [o[0] for o in out] == ["A"] and out[0][1].startswith("强叙事")
         await asyncio.sleep(0)
 
     asyncio.run(go())
     assert NARRATIVE_DEFAULTS["min_score"] == 60
+
+
+def test_fire_requires_token_score_and_hourly_cap(tmp_path):
+    from bot.db import DB
+
+    async def go():
+        db = DB(tmp_path / "s.db")
+        await db.open()
+        calls = {"skip": [], "buy": []}
+        reps = {"LOW": {"symbol": "LOW", "score": 35}, "OK1": {"symbol": "OK1", "score": 70},
+                "OK2": {"symbol": "OK2", "score": 70}, "OK3": {"symbol": "OK3", "score": 70}}
+
+        async def analyze(chain, token, source=""):
+            return reps[token]
+
+        async def skip(chain, token, rep, trig, why):
+            calls["skip"].append(why)
+
+        async def confirm_and_buy(chain, token, rep, reason, wallets=None, tier=None):
+            calls["buy"].append((token, reason))
+
+        app = SimpleNamespace(cfg=SimpleNamespace(get=lambda k, d=None: d), db=db, day_start=lambda: 0,
+                              analyzer=SimpleNamespace(analyze=analyze), trader=SimpleNamespace(skip=skip),
+                              hub=SimpleNamespace(confirm_and_buy=confirm_and_buy, _tasks=set()))
+        st = Strategies(app)
+        await st.fire("solana", "LOW", "强叙事（90 分）", "normal")
+        assert "代币评分 35" in calls["skip"][-1] and not calls["buy"]
+        for t in ("OK1", "OK2", "OK3"):
+            await st.fire("solana", t, "强叙事（80 分）", "normal")
+        assert [b[0] for b in calls["buy"]] == ["OK1", "OK2"]        # 每小时最多 2 笔
+        assert "代币评分 70" in calls["buy"][0][1]
+        await db.close()
+
+    asyncio.run(go())

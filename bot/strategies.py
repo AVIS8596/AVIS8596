@@ -34,11 +34,13 @@ EARLY_DEFAULTS = {
     "enabled": True, "max_age_min": 180, "min_holders": 100, "growth_window_min": 3,
     "min_holder_growth_pct": 15, "min_volume": 15000, "max_rug_ratio": 0.2, "max_top10_rate": 0.3,
     "max_bundler_rate": 0.15, "max_insider_rate": 0.15, "max_creator_rate": 0.05, "max_per_day": 6,
+    "persist_sec": 60, "min_token_score": 50,
 }
 NARRATIVE_DEFAULTS = {
     "enabled": True, "min_score": 60, "max_age_hours": 24, "min_holders": 150, "min_volume": 30000,
     "max_rug_ratio": 0.3, "max_top10_rate": 0.4, "max_bundler_rate": 0.3, "max_insider_rate": 0.2,
     "max_creator_rate": 0.1, "max_per_day": 6,
+    "persist_sec": 180, "min_token_score": 55,
 }
 
 
@@ -175,6 +177,8 @@ class Strategies:
         self.hist: dict[tuple[str, str], deque] = {}
         self.fired: dict[str, float] = {}   # 已触发的币（12 小时内不重复）
         self.stats: dict[str, dict] = {}    # 每条链最近一轮扫描的概况（/status 里显示）
+        self.pending: dict[str, dict] = {}  # 达标但还在观察是否持续的币
+        self.attempts: deque = deque(maxlen=50)   # 最近交给确认期的时间（每小时限量）
 
     def conf(self, name: str) -> dict:
         base = EARLY_DEFAULTS if name == "early" else NARRATIVE_DEFAULTS
@@ -190,14 +194,18 @@ class Strategies:
                 self.stats.setdefault(chain, {})["error"] = str(e)[:80]
             await asyncio.sleep(poll)
 
-    async def poll(self, chain: str, items: list[dict] | None = None) -> list[tuple[str, str, str]]:
-        """扫一轮。返回本轮触发的 [(地址, 理由, 档位)]（测试用）。"""
+    async def poll(self, chain: str, items: list[dict] | None = None,
+                   now: float | None = None) -> list[tuple[str, str, str]]:
+        """扫一轮。返回本轮触发的 [(地址, 理由, 档位)]（测试用）。
+
+        论证第一步：达标的币先进"观察名单"，隔几分钟后的扫描里仍然达标、持有人没减少、叙事分没明显下降，
+        才交给下一步（完整分析 + 代币评分 + 风控 + 30 秒确认期）。"""
         ec, nc = self.conf("early"), self.conf("narrative")
         if not (ec["enabled"] or nc["enabled"]):
             return []
         if items is None:
             items = await self.app.gmgn.trenches(chain, ["near_completion", "completed"], 80)
-        now = time.time()
+        now = now or time.time()
         names = Counter(norm_name(it) for it in items if norm_name(it))
         leader: dict[str, tuple[float, str]] = {}
         for it in items:
@@ -217,7 +225,7 @@ class Strategies:
             dq.append((now, int(f(it.get("holder_count")))))
             if now - self.fired.get(f"{chain}:{addr}", 0) < 12 * 3600:
                 continue
-            reason, tier = "", "normal"
+            reason, tier, sc = "", "normal", None
             if it.get("_stage") == "即将毕业":
                 st["near"] += 1
                 if not structure_problem(it, ec):
@@ -248,7 +256,24 @@ class Strategies:
                     if sc >= int(nc["min_score"]):
                         reason = f"{NARRATIVE}（{sc} 分：{'、'.join(notes[:4])}）"
             if reason:
-                self.fired[f"{chain}:{addr}"] = now
+                pk = f"{chain}:{addr}"
+                holders = int(f(it.get("holder_count")))
+                name = "early" if reason.startswith(EARLY) else "narrative"
+                persist = float((ec if name == "early" else nc)["persist_sec"])
+                pend = self.pending.get(pk)
+                if not pend or now - pend["last"] > max(persist, 120) + 120:
+                    self.pending[pk] = {"first": now, "last": now, "holders": holders, "score": sc}
+                    continue
+                pend["last"] = now
+                if holders < pend["holders"] or (sc is not None and pend["score"] is not None
+                                                 and sc < pend["score"] - 15):
+                    self.pending.pop(pk, None)   # 热度在退，不买
+                    continue
+                if now - pend["first"] < persist:
+                    continue
+                self.pending.pop(pk, None)
+                reason += f"｜论证：持续 {(now - pend['first']) / 60:.0f} 分钟仍达标"
+                self.fired[pk] = now
                 fired.append((addr, reason, tier))
                 t = asyncio.create_task(self.fire(chain, addr, reason, tier))
                 self.app.hub._tasks.add(t)
@@ -259,6 +284,8 @@ class Strategies:
             self.hist.pop(k, None)
         for k in [k for k, t in self.fired.items() if now - t > 12 * 3600]:
             self.fired.pop(k, None)
+        for k in [k for k, v in self.pending.items() if now - v["last"] > 900]:
+            self.pending.pop(k, None)
         return fired
 
     def status_text(self, chain: str) -> str:
@@ -279,18 +306,30 @@ class Strategies:
         return "\n".join(parts)
 
     async def fire(self, chain: str, token: str, reason: str, tier: str) -> None:
+        """论证第二步：限量 → 完整分析 → 代币评分达标 → 交给风控和 30 秒确认期。没通过的记入"被过滤的信号"。"""
         name = "early" if reason.startswith(EARLY) else "narrative"
         prefix = EARLY if name == "early" else NARRATIVE
-        cap = int(self.conf(name)["max_per_day"])
+        c = self.conf(name)
+        now = time.time()
+        per_hour = int(self.cfg.get("strategies.max_per_hour", 2))
+        if sum(1 for t in self.attempts if now - t < 3600) >= per_hour:
+            log.info("主动建仓这 1 小时已经 %d 笔，跳过 %s", per_hour, token)
+            return
         n = await self.app.db.fetchone(
             "SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
             (prefix + "%", self.app.day_start()))
-        if n and n["n"] >= cap:
+        if n and n["n"] >= int(c["max_per_day"]):
             log.info("%s 今天已买 %d 笔，达到上限，跳过 %s", prefix, n["n"], token)
             return
         rep = await self.app.analyzer.analyze(chain, token, source=prefix)
         if not rep:
             return
+        if float(rep.get("score") or 0) < float(c["min_token_score"]):
+            await self.app.trader.skip(chain, token, rep, prefix,
+                                       f"论证：代币评分 {rep.get('score')} 低于 {c['min_token_score']}")
+            return
+        reason += f"、代币评分 {rep.get('score')}"
+        self.attempts.append(now)
         log.info("触发%s %s：%s", prefix, rep.get("symbol"), reason)
         await self.app.hub.confirm_and_buy(chain, token, rep, reason, wallets=rep.get("smart_buyers") or [],
                                            tier=tier)
