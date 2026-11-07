@@ -44,6 +44,7 @@ class SpotExchange(Protocol):
     def order_info(self, order_id: str) -> dict: ...  # {status, filled, cost, fee_quote}
     def amount_precision(self, amount: float) -> float: ...
     def min_notional(self) -> float: ...
+    def stop_floor(self, price: float) -> float: ...  # 交易所允许的最低卖出挂单价 (没有限制时返回 0)
 
 
 class CcxtSpot:
@@ -103,6 +104,17 @@ class CcxtSpot:
         cost = (self.market.get("limits") or {}).get("cost") or {}
         return float(cost.get("min") or 5.0)
 
+    def stop_floor(self, price: float) -> float:
+        """币安价格保护 (PERCENT_PRICE_BY_SIDE / PERCENT_PRICE): 卖单价格不得低于 均价 × 下限倍数。
+        用当前价近似均价, 并留 2% 余量。测试网的限制通常比实盘严。"""
+        floor = 0.0
+        for f in (self.market.get("info") or {}).get("filters") or []:
+            if f.get("filterType") == "PERCENT_PRICE_BY_SIDE":
+                floor = max(floor, float(f.get("askMultiplierDown") or 0))
+            elif f.get("filterType") == "PERCENT_PRICE":
+                floor = max(floor, float(f.get("multiplierDown") or 0))
+        return price * floor * 1.02 if floor > 0 else 0.0
+
 
 # --------------------------------------------------------------------------- 状态
 @dataclass
@@ -114,6 +126,7 @@ class LiveState:
     qty: float = 0.0
     last_bar: str | None = None
     stop_order_id: str | None = None
+    stop_error: str | None = None  # 最近一次挂止损失败的原因 (相同原因不重复通知)
     stop_price: float | None = None
     halted: str | None = None
     halt_notified_at: str | None = None  # 停机通知最多每 6 小时一次
@@ -223,10 +236,28 @@ class LiveTrader:
         if stop_price >= price * 0.995:
             self.notes.append("⚠️ 当前价格已接近或低于止损价, 本次未挂止损单")
             return
+        floor = self.ex.stop_floor(price)
+        if stop_price < floor:
+            self.notes.append(f"ℹ️ 交易所限制挂单价不能低于 {floor:,.2f}, 止损价由 {stop_price:,.2f} 上调至该价")
+            stop_price = floor
+            if stop_price >= price * 0.995:
+                self.notes.append("⚠️ 交易所价格限制过紧, 本次未挂止损单")
+                return
         amount = self.ex.amount_precision(st.qty)
         if amount * stop_price < self.ex.min_notional():
             return
-        st.stop_order_id = self.ex.place_stop(amount, stop_price)
+        try:
+            st.stop_order_id = self.ex.place_stop(amount, stop_price)
+        except Exception as exc:  # 挂止损失败不影响已完成的交易和通知, 下次运行重试
+            reason = str(exc)[:200]
+            if reason != st.stop_error:
+                self.notes.append(f"⚠️ 止损单挂单失败, 下次运行重试: {reason}")
+            st.stop_error = reason
+            _save(self.path, st)
+            return
+        if st.stop_error:
+            self.notes.append("🛡 止损单已补挂成功")
+        st.stop_error = None
         st.stop_price = stop_price
         _save(self.path, st)
 
@@ -327,7 +358,7 @@ class LiveTrader:
         equity = st.cash + st.qty * price
         st.peak_equity = max(st.peak_equity, equity)
         _save(self.path, st)
-        if decision is None and not events:
+        if decision is None and not events and not self.notes:
             return None
         return self._message(st, decision, events, price=price)
 

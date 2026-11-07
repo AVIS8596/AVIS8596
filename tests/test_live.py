@@ -32,6 +32,12 @@ class FakeExchange:
     def min_notional(self):
         return 5.0
 
+    floor_mult = 0.0
+    fail_stops = 0
+
+    def stop_floor(self, price):
+        return price * self.floor_mult * 1.02 if self.floor_mult else 0.0
+
     def market_order(self, side, amount):
         locked = sum(s["amount"] for s in self.stops.values() if s["status"] == "open")
         if side == "buy":
@@ -47,6 +53,9 @@ class FakeExchange:
         return {"id": str(len(self.orders))}
 
     def place_stop(self, amount, stop_price):
+        if self.fail_stops > 0:
+            self.fail_stops -= 1
+            raise RuntimeError("binance Filter failure: PERCENT_PRICE_BY_SIDE")
         self._n += 1
         oid = f"s{self._n}"
         self.stops[oid] = {"amount": amount, "stop": stop_price, "status": "open", "filled": 0.0, "cost": 0.0}
@@ -196,3 +205,28 @@ def test_halt_notification_is_rate_limited(tmp_path):
     later = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None,
                      now=t0 + timedelta(hours=7))
     assert "已停机" in first and again is None and "已停机" in later
+
+
+def test_stop_is_clamped_to_exchange_price_band(tmp_path):
+    df, i = _bars_with_target()
+    px = float(df["close"].iloc[i])
+    ex = FakeExchange(price=px)
+    ex.floor_mult = 0.85  # 测试网: 卖单价不得低于 85% 均价
+    text = run_live(_cfg(tmp_path), ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    st = _load(str(tmp_path / "live.json"))
+    assert st.stop_price == pytest.approx(px * 0.85 * 1.02)
+    assert "上调" in text
+
+
+def test_stop_failure_still_notifies_and_retries_next_run(tmp_path):
+    df, i = _bars_with_target()
+    ex = FakeExchange(price=float(df["close"].iloc[i]))
+    ex.fail_stops = 1
+    cfg = _cfg(tmp_path)
+    text = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    st = _load(cfg.state_path)
+    assert "已市价买入" in text and "止损单挂单失败" in text
+    assert st.qty > 0 and st.stop_order_id is None
+    text2 = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    st2 = _load(cfg.state_path)
+    assert st2.stop_order_id is not None and "补挂成功" in text2
