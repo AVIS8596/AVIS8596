@@ -1,0 +1,143 @@
+# =====================================================================
+#  扫链机器人配置。金额单位说明：
+#    *_native  = 该链原生币（SOL / BNB / ETH）
+#    *_usd     = 美元
+#  改完配置后重启机器人生效：sudo systemctl restart memebot
+# =====================================================================
+
+general:
+  # 模拟交易开关。true = 只模拟不花钱（强烈建议先跑 3~7 天看效果）
+  dry_run: true
+  timezone: "Asia/Phnom_Penh"     # TG 消息里显示的时区
+  db_path: "data/memebot.db"
+  log_dir: "logs"
+  log_level: "INFO"
+
+# ---------------- 数据源与 GMGN ----------------
+data:
+  provider: gmgn                  # gmgn（默认）或 birdeye
+
+gmgn:
+  plan: free                      # 你的 GMGN API 套餐：free / plus / pro（决定限流速度），升级后改这里
+  rate_usage: 0.8                 # 只用套餐额度的 80%，避免触发 5 分钟封禁
+  feed_poll_sec: 3                # 聪明钱交易流轮询间隔（秒）
+  candidate_eval_min: 10          # 交易流里的新钱包，每隔多少分钟批量核实一次胜率
+  anti_mev: true                  # 防夹（Solana/BSC/ETH 支持，Base 不支持会自动关闭）
+  priority_fee_sol: ""            # Solana 优先费（单位 SOL，如 "0.0005"），留空用 GMGN 默认
+  tip_fee: {}                     # 小费，如 { solana: "0.001", bsc: "0.0001" }，留空用默认
+
+chains:
+  solana:   { enabled: true }
+  bsc:      { enabled: true }
+  ethereum: { enabled: true }
+  base:     { enabled: true }
+
+# ---------------- 聪明钱筛选 ----------------
+smart_money:
+  refresh_hours: 6                # 每隔多少小时找一次新的聪明钱
+  reevaluate_hours: 24            # 已入库地址多久复查一次（不达标就停用）
+  pnl_duration: "30d"             # 统计周期
+  min_realized_profit_sol: 100    # 近30天已实现利润 ≥ 100 SOL（EVM 链按美元等值换算）
+  min_win_rate: 0.60              # 胜率 ≥ 60%（GMGN 按"交易过的代币"计算：赚钱的币 / 全部币）
+  min_trades: 10                  # 30天交易过的代币数太少的不算（运气成分大）
+  max_trades: 1500                # 30天交易超过 1500 个币（每天 50 个），基本是扫盘机器人，排除
+  min_avg_hold_sec: 60            # 平均持仓不到 60 秒的是高频机器人，排除
+  max_wallets_per_chain: 300      # 每条链最多监听多少个地址
+  # 种子来源：盈利排行榜 + 热门代币的顶级交易者
+  gainers_types: ["1W", "yesterday", "today"]
+  trending_tokens_per_chain: 20
+  top_traders_per_token: 10
+  # 手动添加的地址（格式 链:地址），也可以在 TG 里发 /addwallet 链 地址
+  manual_wallets: []
+
+# ---------------- 新币发现与分析 ----------------
+discovery:
+  pumpportal_new_tokens: true     # 监听 pump.fun 新币和毕业（免费）
+  new_token_poll_sec: 60          # 新币轮询间隔（GMGN trenches）
+  gmgn_trench_types: ["completed", "near_completion"]   # 只看已毕业 / 即将毕业的 launchpad 币
+  min_liquidity_usd: 5000         # 流动性低于这个的新币不分析
+  analyze_delay_sec: 45           # 新币出现后等多少秒再分析（让早期交易先发生）
+  analysis_cache_min: 10          # 同一个币分析结果缓存多久
+  early_slots: 3                  # Solana：开盘后前几个 slot 内买入算"早期"
+  early_blocks: 3                 # EVM：开盘后前几个区块内买入算"早期"
+  max_early_buyers: 40            # 最多分析多少个早期买家
+  fresh_wallet_hours: 72          # 开盘前多少小时内才首次充值的钱包算"新钱包"
+  similar_amount_cv: 0.15         # 买入金额变异系数低于此值视为"金额相近"
+
+# ---------------- 告警 ----------------
+alerts:
+  smart_buy: true                 # 聪明钱买入就推送
+  smart_buy_min_score: 55         # 只推送评分 ≥ 此值的钱包（钱包多了会刷屏，可调高）
+  cluster_wallets: 2              # N 个以上聪明钱在窗口期内买同一个币，推送"共振"
+  cluster_window_min: 30
+  min_token_score_alert: 60       # 新币评分 ≥ 此值推送
+
+# ---------------- 交易（跟单 + 自动交易）----------------
+trading:
+  enabled: true                   # 总开关（dry_run=true 时只模拟）
+  executor: gmgn                  # gmgn = 用 GMGN 钱包下单；self = 自托管私钥（Jupiter / 0x）
+  copy_trade: true                # 聪明钱买入 → 跟单
+  copy_min_wallet_score: 55       # 只跟评分 ≥ 此值的聪明钱（刚达标的钱包约 55~60 分）
+  copy_min_cluster: 1             # 至少几个聪明钱买了才跟（1 = 一个就跟）
+  auto_trade: true                # 新币评分高 + 聪明钱共振 → 自动买
+  auto_min_score: 75
+  auto_min_cluster: 2
+  # 过滤条件（任一不满足就不买）
+  max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
+  max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
+  max_top10_pct: 45               # 前10持仓占比上限（%，已排除池子）
+  max_sell_tax_pct: 10            # EVM 卖出税上限
+  min_liquidity_usd: 8000
+  max_token_age_hours: 72         # 只买上线 72 小时内的币
+  token_cooldown_min: 120         # 同一个币卖出后多久内不再买
+  notify_skips: false             # 被风控拦下的交易是否推送 TG（调试时可以打开）
+  # 每笔金额（原生币）
+  buy_amount_native:
+    solana: 0.2
+    bsc: 0.05
+    ethereum: 0.01
+    base: 0.005
+  # 钱包里至少保留这么多原生币做手续费
+  reserve_native:
+    solana: 0.05
+    bsc: 0.01
+    ethereum: 0.01
+    base: 0.002
+  slippage_bps:                   # 滑点（100 = 1%）
+    solana: 1500
+    bsc: 1200
+    ethereum: 800
+    base: 1200
+  max_price_impact_pct: 15
+  max_gas_gwei:                   # Gas 价格上限，超过就不交易
+    bsc: 5
+    ethereum: 40
+    base: 1
+  max_open_positions: 10
+  max_daily_loss_usd: 200         # 当天累计亏损超过就自动暂停买入
+  # 仅 executor=self 时使用：ETH 主网私密交易防夹
+  private_rpc:
+    ethereum: "https://rpc.flashbots.net"
+
+# ---------------- 止盈止损 ----------------
+exit:
+  check_interval_sec: 10
+  stop_loss_pct: -35              # 亏 35% 止损
+  take_profit:                    # 分批止盈：涨到 x% 卖出持仓的 y%
+    - { gain_pct: 100, sell_pct: 50 }
+    - { gain_pct: 300, sell_pct: 50 }
+  trailing_start_pct: 60          # 涨超 60% 后启动移动止损
+  trailing_drop_pct: 30           # 从最高点回撤 30% 全部卖出
+  max_hold_hours: 24              # 最长持仓时间
+  follow_smart_sell: true         # 带单的聪明钱卖出时跟着卖
+  max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
+
+# ---------------- 其他接口限速（Birdeye / Jupiter / 0x 只在对应模式下用到） ----------------
+budget:
+  birdeye_daily_cu: 300000        # Birdeye 每日计算单元上限（Premium 每月 1000 万 ≈ 每日 33 万）
+  birdeye_rps: 40                 # Premium 50 rps，留余量
+  helius_rps: 40                  # Developer 50 rps
+  jupiter_rps: 8                  # Developer 档 10 rps；免费档请改成 1
+  zerox_rps: 1                    # 0x 免费档 1 rps
+  etherscan_rps: 4
+  goplus_rps: 2

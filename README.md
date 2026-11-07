@@ -1,0 +1,204 @@
+# Meme 扫链机器人 · 部署与使用指南（GMGN 版）
+
+支持 Solana、BSC、Ethereum、Base 四条链。**数据和下单都走 GMGN 官方 API**（openapi.gmgn.ai）。
+
+- **聪明钱发现**：数据来自 GMGN 的聪明钱/KOL 交易流和热门币顶级交易者，再逐个用 GMGN 钱包统计核实。核实标准是近 30 天已实现利润 ≥ 100 SOL（EVM 链按美元等值换算）、胜率 ≥ 60%，并排除高频机器人。
+- **实时监听**：同时用两路，互为备份，同一笔交易自动去重。
+  - 链上 WebSocket：Helius / QuickNode，延迟最低
+  - GMGN 交易流：每 3 秒轮询一次
+- **新币发现**：GMGN trenches，覆盖 pump.fun、four.meme、clanker、zora 等几十个平台的毕业币和即将毕业币；另外用 PumpPortal 监听 pump.fun 迁移。
+- **筹码分析**：两套结果交叉验证，持仓比例取较大值。
+  - 自己还原开盘：同区块买入、同一出资人、金额相近、新钱包
+  - GMGN 的持币人标签：bundler 捆绑、rat_trader 老鼠仓、sniper 狙击
+- **安全检测**：铸币和冻结权限、貔貅盘、无法卖出、买卖税。GMGN 和 GoPlus 双重检查。
+- **下单**：通过 GMGN 下单（`/v1/trade/swap`），默认开启防夹（Base 不支持）。
+- **交易功能**：跟单、自动交易、分批止盈、止损、移动止损、超时卖出、跟随带单钱包卖出。
+- **风控**：每日亏损上限、持仓数上限、单币冷却期、Gas 上限、余额预留。
+
+> ⚠️ 默认是**模拟盘**（`dry_run: true`）。建议先跑 3~7 天，再切实盘。
+> ⚠️ 用 GMGN 下单时，资金放在绑定到 API Key 的 GMGN 钱包里，相当于把资金安全交给了 GMGN。只放你能承受全部亏光的金额。
+
+---
+
+## 一、服务器要求
+
+| 项目 | 要求 |
+|---|---|
+| 配置 | 最低 2 核 4G，**推荐 4 核 8G**，硬盘 40G 以上 SSD |
+| 系统 | Ubuntu 24.04（或 22.04） |
+| 地区 | 德国法兰克福 或 美国东部。不要选中国大陆或香港 |
+| 网络 | **必须有固定的 IPv4 地址**（GMGN 交易要做 IP 白名单，而且只支持 IPv4） |
+| 服务商 | Vultr、DigitalOcean、AWS Lightsail，月费约 $20~50 |
+
+---
+
+## 二、需要申请的 Key
+
+| # | 服务 | 用途 | 推荐套餐 | 月费 |
+|---|---|---|---|---|
+| 1 | Telegram 机器人 | 推送、命令控制 | 免费 | $0 |
+| 2 | **GMGN API** | 数据 + 下单（核心） | Plus（免费档每秒 5 次，不够用） | 以 GMGN 页面为准 |
+| 3 | Helius | Solana 实时监听、开盘还原 | Developer | $49 |
+| 4 | QuickNode | ETH / BSC / Base 实时监听 | Build | $49 |
+| 5 | Etherscan（可选） | EVM 链捆绑出资人溯源 | Lite | $49 |
+
+不再需要 Birdeye、Jupiter、0x。只有在 `config.yaml` 里切回 `data.provider: birdeye` 或 `trading.executor: self` 时才需要它们。
+
+### 1. Telegram
+1. 在 Telegram 搜索 **@BotFather**，发送 `/newbot`，按提示起名字，拿到 token，填入 `TELEGRAM_BOT_TOKEN`。
+2. 找到你刚建的机器人，**点 Start**。
+3. 搜索 **@userinfobot**，点 Start，它会回复你的数字 ID，填入 `TELEGRAM_CHAT_ID`。
+
+### 2. GMGN API（最关键，按顺序做）
+1. **准备交易钱包**：登录 gmgn.ai，确认你的 GMGN 交易钱包，并往里充值准备用来交易的资金。Solana 钱包放 SOL，EVM 钱包放 BNB 或 ETH。
+2. **在服务器上生成签名密钥**（先按第三节第 2 步装好机器人）：
+   ```bash
+   cd ~/memebot
+   openssl genpkey -algorithm ed25519 -out gmgn_private.pem
+   chmod 600 gmgn_private.pem
+   openssl pkey -in gmgn_private.pem -pubout      # 输出的就是公钥，复制下来
+   ```
+   这个私钥只用来给 API 请求签名，不是钱包私钥，不要发给任何人。
+3. **申请 API**：打开 **gmgn.ai/ai**，提交申请，把上一步的公钥填进去。官方审核后会把你加入白名单（每天处理一次），批下来后复制 API Key，填入 `GMGN_API_KEY`。
+4. **设置 IP 白名单**（交易必须做）：在服务器上执行 `curl -4 ip.me`，把得到的 IPv4 地址填到 GMGN API 后台的白名单里。
+5. **关闭服务器的 IPv6**（GMGN 只支持 IPv4，不关会出现 401/403 错误）：
+   ```bash
+   echo -e "net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1" | sudo tee /etc/sysctl.d/99-no-ipv6.conf
+   sudo sysctl --system
+   ```
+6. **填写钱包地址**：把绑定在 API Key 上的钱包地址填入 `GMGN_WALLET_SOL` 和 `GMGN_WALLET_EVM`。不确定地址的话，跑一次 `main.py check`，它会打印 GMGN 返回的绑定信息。
+7. 在 `config.yaml` 里把 `gmgn.plan` 改成你买的套餐（free / plus / pro），机器人会按对应速度限流。
+
+### 3. Helius（Solana 节点）
+官网 helius.dev 注册 → API Keys，复制后填入 `HELIUS_API_KEY`。然后升级到 Developer 套餐。
+
+### 4. QuickNode（ETH / BSC / Base 节点）
+注册后分别创建 Ethereum、BNB Smart Chain、Base 三个主网节点。把每个节点的 HTTP 和 WSS 地址填入 `.env` 里对应的 `*_RPC_HTTP` 和 `*_RPC_WSS`。
+
+---
+
+## 三、部署步骤
+
+```bash
+# 1. 登录服务器，下载代码到 ~/memebot（已有 gmgn_private.pem 也没关系，不会被覆盖）
+mkdir -p ~/memebot && cd ~/memebot
+git init -q
+git remote add origin https://github.com/AVIS8596/avis8596
+git fetch -q origin claude/memebot
+git checkout -q -b claude/memebot FETCH_HEAD
+
+# 2. 安装
+bash deploy/install.sh
+
+# 3. 按第二节生成 GMGN 密钥、申请 API、加白名单（代码已强制走 IPv4，关 IPv6 可跳过）
+
+# 4. 填写 key
+nano .env
+
+# 5. 检查所有 key（会给你的 TG 发一条测试消息）
+.venv/bin/python main.py check
+
+# 6. 启动（默认模拟盘）
+sudo systemctl start memebot
+tail -f logs/memebot.log
+```
+
+### 切换实盘
+1. 编辑 `config.yaml`，把 `dry_run: true` 改成 `false`。
+2. 再跑一次 `main.py check`。会多检查三项：GMGN 交易签名、IP 白名单、各链交易钱包余额。
+3. 执行 `sudo systemctl restart memebot`。
+
+### 常用命令
+| 操作 | 命令 |
+|---|---|
+| 看日志 | `tail -f logs/memebot.log` |
+| 改配置后重启 | `sudo systemctl restart memebot` |
+| 停止 | `sudo systemctl stop memebot` |
+| 回测近 7 天信号 | `.venv/bin/python main.py backtest --days 7` |
+| 回测并淘汰差钱包 | `.venv/bin/python main.py backtest --days 7 --apply` |
+| 手动跑一轮聪明钱发现 | `.venv/bin/python main.py discover` |
+| 更新到最新代码 | `cd ~/memebot && git pull origin claude/memebot && sudo systemctl restart memebot` |
+
+---
+
+## 四、Telegram 命令
+
+| 命令 | 作用 |
+|---|---|
+| `/status` | 运行状态、监听数量、今日盈亏、GMGN 用量和限流状态 |
+| `/positions` | 当前持仓 |
+| `/sell 3 50` | 卖出 3 号持仓的 50%（不写百分比就全卖） |
+| `/pause` / `/resume` | 暂停或恢复买入（止盈止损照常） |
+| `/wallets solana` | 查看评分最高的聪明钱 |
+| `/addwallet solana 地址` | 手动添加监听地址 |
+| `/delwallet bsc 地址` | 拉黑地址 |
+| `/check base 代币地址` | 立即分析一个币，并列出捆绑和埋伏地址 |
+| `/tag solana 地址` | 查这个地址以前被标记过几次捆绑、埋伏或 dev |
+
+---
+
+## 五、识别逻辑
+
+**聪明钱**：必须同时满足以下条件。每 24 小时复查一次，跟单的实际盈亏会修正钱包评分。
+- 近 30 天已实现利润 ≥ 100 SOL 等值
+- 胜率 ≥ 60%（GMGN 按"交易过的代币"计算：赚钱的币 ÷ 全部币）
+- 30 天内交易过 10~1500 个币
+- 平均持仓时间 ≥ 60 秒（排除高频机器人）
+
+**捆绑地址**（dev 控制的小号），有以下任一类证据：
+- 和代币创建交易在同一个 slot 或区块买入
+- 同一笔交易里有多个钱包一起买入
+- 出资人就是 dev，或和 dev 是同一个出资人
+- 和其他早期钱包共用同一个出资人（出资人数据来自 GMGN 的首笔入金记录）
+- 开盘后直接从 dev 那里收到代币
+- GMGN 标记为 bundler
+
+**埋伏地址**：开盘前不久才首次入金、并在开盘最早几个区块买入的新钱包；或被 GMGN 标记为 rat_trader（老鼠仓）。
+
+**狙击地址**：开盘最早几个区块买入，但找不到和 dev 的关联；或被 GMGN 标记为 sniper。
+
+---
+
+## 六、已提前处理的问题
+
+**GMGN 相关**
+| 问题 | 处理方式 |
+|---|---|
+| 签名格式不对导致 401 | 按官方 gmgn-cli 源码实现，已用官方 Node 代码交叉验证，签名完全一致 |
+| 时间戳偏差超过 5 秒被拒 | 安装脚本开启 chrony 自动校时 |
+| 触发限流后被封 5 分钟，继续请求会延长封禁 | 按套餐权重主动限流（只用 80% 额度）；一旦被限流，所有 GMGN 请求统一暂停到解封时间 |
+| 套餐不支持某接口 | 自动识别并停用，不会反复请求 |
+| 同一错误反复触发被临时封禁 | 卖出失败后按次数递增等待时间再重试 |
+| 只支持 IPv4 | 强制用 IPv4 连接，部署指南里有关闭 IPv6 的步骤 |
+| 全部卖出时余额精度问题留下碎渣 | 全部卖出用百分比（10000 bps）下单 |
+| 下单请求超时后重复下单 | 下单接口绝不自动重发；状态未知时先查余额确认 |
+| 钱包统计接口批量查询只返回第一个 | 实测发现后改为逐个查询 |
+| 交易笔数被拆单放大，误伤真聪明钱 | 改用"交易过的代币数"过滤，和 GMGN 胜率口径一致 |
+
+**通用**
+| 问题 | 处理方式 |
+|---|---|
+| WebSocket 断线 | 自动重连、心跳保活、重新订阅 |
+| 同一笔交易重复推送 | 按交易哈希去重（链上监听和 GMGN 交易流之间也去重） |
+| 空投被误判为买入 | 只认钱包自己发起、并且花了 SOL/ETH/稳定币的交易 |
+| 池子地址混进聪明钱 | Solana 用"是否在曲线上"排除池子，EVM 排除合约地址 |
+| 取价失败被当成归零而误止损 | 价格取不到时跳过本轮判断 |
+| 节点或接口临时故障 | 单个数据源失败不影响整体分析，自动用 GMGN 数据兜底 |
+| 同一个币重复买 | 每个币单独加锁，有持仓或在冷却期内都不买 |
+| 同一个新币被多个来源重复推送 | 6 小时内只处理一次 |
+| 卖不出的币无限重试 | 失败 5 次标记为"无法卖出"并通知你 |
+| 模块崩溃拖垮整个程序 | 每个模块独立运行、出错自动重启 |
+| 服务器重启 | systemd 开机自启 |
+| 私钥和 key 泄露到日志 | 日志自动替换成 *** |
+| TG 消息格式错误或刷屏被限流 | 自动转义，发送间隔 1.1 秒 |
+
+---
+
+## 七、已知限制
+
+1. **资金托管在 GMGN**：用 GMGN 下单，资金不在你自己手里。如果想改回自托管，在 `config.yaml` 里设置 `trading.executor: self`，然后填 Jupiter / 0x 的 key 和钱包私钥。
+2. **跟单延迟约 3~10 秒**：主要花在安全检测和筹码分析上。另外 GMGN 交易流是轮询（3 秒一次），链上 WebSocket 那一路更快。
+3. **捆绑和埋伏识别是概率判断**：推送里列出了每个地址的具体证据，供你自己判断。
+4. **GMGN 免费档太慢**：分析一个币要调用好几次接口，聪明钱核实每个钱包也要单独请求。免费档每秒 5 次，跑起来会明显排队，建议至少 Plus。
+5. **EVM 卖出信号偏敏感**：聪明钱把币转到自己另一个钱包，也会被当成卖出。
+6. **模拟盘按实时价格成交**，比真实成交乐观一些。

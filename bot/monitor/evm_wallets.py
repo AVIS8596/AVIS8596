@@ -1,0 +1,135 @@
+"""EVM 聪明钱实时监听：订阅 ERC20 Transfer 事件（钱包收币=买入，转出=卖出）。"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from typing import TYPE_CHECKING
+
+import websockets
+
+from ..chains import CHAINS, TRANSFER_TOPIC, is_quote_token
+from ..signals import Signal
+from ..sources.evm_rpc import pad_addr, topic_to_addr
+from ..utils import TTLSet
+
+if TYPE_CHECKING:
+    from ..app import App
+
+log = logging.getLogger("memebot.evmmon")
+PER_SUB = 100
+
+
+class EvmWalletMonitor:
+    def __init__(self, app: "App", chain: str):
+        self.app = app
+        self.chain = chain
+        self.rpc = app.evm[chain]
+        self.wss = app.cfg.secrets.rpc_wss[chain]
+        self.seen = TTLSet(3600)
+        self._tasks: set[asyncio.Task] = set()
+
+    async def run(self) -> None:
+        ev = self.app.wallets_changed[self.chain]
+        n = int(self.app.cfg.get("smart_money.max_wallets_per_chain", 300))
+        while True:
+            ev.clear()
+            wallets = [w["address"].lower() for w in await self.app.db.active_wallets(self.chain, n)]
+            if not wallets:
+                log.info("%s 暂无聪明钱地址，等待发现……", self.chain)
+                await ev.wait()
+                continue
+            log.info("%s 开始监听 %d 个钱包", self.chain, len(wallets))
+            conn = asyncio.create_task(self._conn(wallets))
+            waiter = asyncio.create_task(ev.wait())
+            done, _ = await asyncio.wait([conn, waiter], return_when=asyncio.FIRST_COMPLETED)
+            for t in (conn, waiter):
+                t.cancel()
+            await asyncio.gather(conn, waiter, return_exceptions=True)
+            if waiter not in done:
+                await asyncio.sleep(3)
+
+    async def _conn(self, wallets: list[str]) -> None:
+        wset = set(wallets)
+        backoff = 2
+        while True:
+            try:
+                async with websockets.connect(self.wss, ping_interval=20, ping_timeout=30,
+                                              max_size=10_000_000, open_timeout=15) as ws:
+                    rid = 0
+                    for i in range(0, len(wallets), PER_SUB):
+                        padded = ["0x" + pad_addr(w) for w in wallets[i:i + PER_SUB]]
+                        for topics in ([TRANSFER_TOPIC, None, padded], [TRANSFER_TOPIC, padded]):
+                            rid += 1
+                            await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "eth_subscribe",
+                                                      "params": ["logs", {"topics": topics}]}))
+                    backoff = 2
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if "error" in msg:
+                            log.warning("%s 订阅错误: %s", self.chain, msg["error"])
+                            continue
+                        if msg.get("method") != "eth_subscription":
+                            continue
+                        lg = msg["params"]["result"]
+                        if lg.get("removed") or len(lg.get("topics", [])) < 3:
+                            continue   # 区块重组撤销的日志 / 非标准 Transfer（如 ERC721）
+                        h = lg.get("transactionHash")
+                        frm, to = topic_to_addr(lg["topics"][1]), topic_to_addr(lg["topics"][2])
+                        wallet = to if to in wset else frm if frm in wset else None
+                        if not wallet or not h or not self.seen.add_if_new(f"{h}:{wallet}"):
+                            continue
+                        t = asyncio.create_task(self._handle(h, wallet))
+                        self._tasks.add(t)
+                        t.add_done_callback(self._tasks.discard)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s WS 断开（%s），%ds 后重连", self.chain, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    async def _handle(self, h: str, wallet: str) -> None:
+        try:
+            tx = await self.rpc.tx(h)
+            if not tx or (tx.get("from") or "").lower() != wallet:
+                return   # 不是钱包自己发起的（空投、别人转入），忽略
+            rc = await self.rpc.receipt(h)
+            if not rc or rc.get("status") != "0x1":
+                return
+            for s in parse_receipt(self.chain, wallet, tx, rc):
+                await self.app.hub.on_signal(s)
+        except Exception as e:  # noqa: BLE001
+            log.warning("处理 %s 交易 %s 失败: %s", self.chain, h, e)
+
+
+def parse_receipt(chain: str, wallet: str, tx: dict, rc: dict) -> list[Signal]:
+    wrapped = CHAINS[chain].wrapped.lower()
+    delta: dict[str, int] = {}
+    wrapped_out = 0
+    for lg in rc.get("logs", []):
+        tp = lg.get("topics", [])
+        if len(tp) < 3 or tp[0] != TRANSFER_TOPIC:
+            continue
+        token = lg["address"].lower()
+        frm, to = topic_to_addr(tp[1]), topic_to_addr(tp[2])
+        amt = int(lg.get("data") or "0x0", 16) if lg.get("data") not in (None, "0x") else 0
+        if to == wallet:
+            delta[token] = delta.get(token, 0) + amt
+        if frm == wallet:
+            delta[token] = delta.get(token, 0) - amt
+            if token == wrapped:
+                wrapped_out += amt
+    native_in = int(tx.get("value", "0x0"), 16) + wrapped_out
+    quote_out = native_in > 0 or any(is_quote_token(chain, t) and d < 0 for t, d in delta.items())
+    ts = time.time()
+    out = []
+    for token, d in delta.items():
+        if d == 0 or is_quote_token(chain, token):
+            continue
+        if d > 0 and quote_out:
+            out.append(Signal(chain, wallet, token, "buy", native_in / 1e18, float(d), tx["hash"], ts))
+        elif d < 0:
+            out.append(Signal(chain, wallet, token, "sell", 0.0, float(-d), tx["hash"], ts))
+    return out

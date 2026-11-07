@@ -1,0 +1,10 @@
+aiohttp>=3.9,<4
+websockets>=12,<16
+PyYAML>=6.0
+python-dotenv>=1.0
+aiosqlite>=0.20
+solders>=0.21
+eth-account>=0.13
+base58>=2.1
+cryptography>=42
+pytest>=8
