@@ -23,6 +23,9 @@ HELP = """<b>命令列表</b>
 /status 运行状态
 /positions 当前持仓
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
+/size 查看每笔买入金额（一般 / 较好 / 优质 三档）
+/size 0.05 0.1 0.2 修改 Solana 三档金额（单位 SOL）
+/size bsc 0.01 0.02 0.04 修改其他链
 /pause 暂停买入（止盈止损照常）
 /resume 恢复买入
 /wallets [链] 查看监听的聪明钱
@@ -235,6 +238,8 @@ class Telegram:
             await self.send(await self._status())
         elif cmd == "/positions":
             await self.send(await self._positions())
+        elif cmd == "/size":
+            await self._size(args)
         elif cmd == "/pause":
             await db.kv_set("paused", True)
             await self.send("⏸ 已暂停买入（持仓止盈止损继续运行）")
@@ -295,6 +300,36 @@ class Telegram:
                 await self.send("地址标记记录：" + "，".join(f"{names.get(k, k)} {v} 次" for k, v in cnt.items()))
         else:
             await self.send("看不懂这个命令。\n" + HELP)
+
+    async def _size(self, args: list[str]) -> None:
+        chains = self.app.cfg.enabled_chains
+        chain = "solana" if "solana" in chains else chains[0]
+        if args and not args[0].replace(".", "", 1).isdigit():
+            chain = args[0].lower()
+            args = args[1:]
+            if chain not in chains:
+                await self.send("链名不对或未启用")
+                return
+        if args:
+            try:
+                vals = [float(x) for x in args]
+            except ValueError:
+                vals = []
+            if len(vals) != 3 or any(v <= 0 for v in vals) or not (vals[0] <= vals[1] <= vals[2]):
+                await self.send("格式：/size 一般 较好 优质，例如 /size 0.05 0.1 0.2（三个数从小到大）")
+                return
+            saved = await self.app.db.kv_get("sizes", {}) or {}
+            saved[chain] = vals
+            await self.app.db.kv_set("sizes", saved)
+        sym = CHAINS[chain].native_symbol
+        n, g, b = await self.app.trader.sizes(chain)
+        t = self.app.cfg.get("trading.tiers", {}) or {}
+        await self.send(
+            f"<b>{CHAINS[chain].name} 每笔买入金额</b>{'（已更新）' if args else ''}\n"
+            f"🔥 优质：{b:g} {sym}（评分 ≥ {t.get('best_min_score', 85)} 或 ≥ {t.get('best_min_smart', 3)} 个聪明钱，"
+            f"且捆绑 < {t.get('best_max_bundle_pct', 10)}%）\n"
+            f"👍 较好：{g:g} {sym}（评分 ≥ {t.get('good_min_score', 70)} 或 ≥ {t.get('good_min_smart', 2)} 个聪明钱）\n"
+            f"一般：{n:g} {sym}\n修改：/size {n:g} {g:g} {b:g}")
 
     async def _send_tagged(self, rep: dict) -> None:
         c = rep["chain"]

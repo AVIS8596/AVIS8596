@@ -221,3 +221,29 @@ def test_solana_partial_sign():
     signed = VersionedTransaction.from_bytes(ex._sign(bytes(unsigned)))
     assert signed.signatures[0] != Signature.default()
     assert signed.verify_with_results() == [True]
+
+
+def test_position_tiers_and_sizes(tmp_path):
+    from types import SimpleNamespace
+    from bot.db import DB
+    from bot.trade.trader import Trader
+
+    cfg = SimpleNamespace(get=lambda k, d=None: d,
+                          per_chain=lambda k, c, d=None: {"trading.buy_amount_native": 0.05}.get(k, d))
+
+    async def go():
+        db = DB(tmp_path / "s.db")
+        await db.open()
+        t = Trader.__new__(Trader)
+        t.cfg, t.app = cfg, SimpleNamespace(db=db)
+        assert t.tier({"score": 90, "bundle_held_pct": 5}, []) == "best"
+        assert t.tier({"score": 90, "bundle_held_pct": 25}, []) == "good"      # 捆绑太多不给优质
+        assert t.tier({"score": 60, "bundle_held_pct": 2}, ["a", "b", "c"]) == "best"
+        assert t.tier({"score": 60, "bundle_held_pct": 2}, ["a", "b"]) == "good"
+        assert t.tier({"score": 60, "bundle_held_pct": 2}, ["a"]) == "normal"
+        assert await t.sizes("solana") == [0.05, 0.1, 0.2]
+        await db.kv_set("sizes", {"solana": [0.1, 0.3, 0.5]})
+        assert await t.sizes("solana") == [0.1, 0.3, 0.5]
+        await db.close()
+
+    asyncio.run(go())

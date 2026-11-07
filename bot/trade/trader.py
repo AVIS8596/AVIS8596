@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..signals import Signal
 
 log = logging.getLogger("memebot.trader")
+TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
 
 
 class Trader:
@@ -108,10 +109,34 @@ class Trader:
                 if len(self._locks) > 5000:
                     self._locks = {k: v for k, v in self._locks.items() if v.locked()}
 
+    def tier(self, rep: dict, wallets: list[str]) -> str:
+        """按标的质量分档：best 优质 / good 较好 / normal 一般。"""
+        t = self.cfg.get("trading.tiers", {}) or {}
+        score = float(rep.get("score", 0))
+        n = len(set(wallets or []) | set(rep.get("smart_buyers") or []))
+        bundle = float(rep.get("bundle_held_pct", 0))
+        if (score >= float(t.get("best_min_score", 85)) or n >= int(t.get("best_min_smart", 3))) \
+                and bundle < float(t.get("best_max_bundle_pct", 10)):
+            return "best"
+        if score >= float(t.get("good_min_score", 70)) or n >= int(t.get("good_min_smart", 2)):
+            return "good"
+        return "normal"
+
+    async def sizes(self, chain: str) -> list[float]:
+        """三档金额 [一般, 较好, 优质]。TG 里 /size 设置过就用设置的，否则按配置（一般档 × 2 × 4）。"""
+        saved = (await self.app.db.kv_get("sizes", {}) or {}).get(chain)
+        if saved and len(saved) == 3:
+            return [float(x) for x in saved]
+        base = float(self.cfg.per_chain("trading.buy_amount_native", chain, 0))
+        m = self.cfg.get("trading.size_multiplier", {}) or {}
+        return [base, base * float(m.get("good", 2)), base * float(m.get("best", 4))]
+
     async def _buy(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str]) -> None:
-        amount = float(self.cfg.per_chain("trading.buy_amount_native", chain, 0))
+        tier = self.tier(rep, wallets)
+        amount = (await self.sizes(chain))[{"normal": 0, "good": 1, "best": 2}[tier]]
         if amount <= 0:
             return
+        reason = f"{reason} | {TIER_NAME[tier]}"
         ex = self.exec[chain]
         if not self.cfg.dry_run:
             reserve = float(self.cfg.per_chain("trading.reserve_native", chain, 0))
