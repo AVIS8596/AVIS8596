@@ -1,0 +1,13 @@
+# Python venv（体积大、平台相关，用 setup.sh 重建）
+.venv/
+
+# Foundry 编译产物
+**/out/
+**/cache/
+**/broadcast/
+
+# forge 依赖（submodule / git 安装，用 forge install 重建）
+**/lib/
+
+# 下载缓存
+dl/
