@@ -517,7 +517,7 @@ class PositionManager:
         limit = float(self.cfg.get("trading.max_daily_loss_usd", 0) or 0)
         if limit <= 0:
             return
-        pnl = await self.app.db.realized_today_usd(self.app.day_start())
+        pnl = await self.app.db.realized_today_usd(self.app.day_start(), self.app.cfg.dry_run)
         if pnl <= -limit and float(await self.app.db.kv_get("pause_until", 0) or 0) < time.time():
             until = self.app.day_start() + 86400
             await self.app.db.kv_set("pause_until", until)

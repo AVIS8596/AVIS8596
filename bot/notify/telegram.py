@@ -456,7 +456,7 @@ class Telegram:
             n = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE chain=? AND status IN ('active','manual')", (c,))
             lines.append(f"{CHAINS[c].name}：监听 {n['n']} 个聪明钱 | 交易地址 {short(self.app.trader.address(c))}")
         pos = await db.open_positions()
-        pnl = await db.realized_today_usd(self.app.day_start())
+        pnl = await db.realized_today_usd(self.app.day_start(), self.app.cfg.dry_run)
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
         r = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>?", (time.time() - 3600,))
         lines.append(f"近1小时信号 {r['n']} 条")

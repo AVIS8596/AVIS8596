@@ -46,8 +46,14 @@ def _group(rows: list[dict], key) -> list[str]:
 
 async def daily_review(app: "App", start: float) -> str:
     db = app.db
-    closed = await db.fetchall("SELECT * FROM positions WHERE status!='open' AND closed_at>=?", (start,))
-    lines = [f"📅 <b>今日复盘</b> {app.tg.mode()}"]
+    dry = int(app.cfg.dry_run)
+    closed = await db.fetchall("SELECT * FROM positions WHERE status!='open' AND closed_at>=? AND dry_run=?",
+                               (start, dry))
+    lines = [f"📅 <b>今日复盘</b> {app.tg.mode()}（只统计{'模拟盘' if dry else '实盘'}的单子）"]
+    other = await db.fetchone("SELECT COUNT(*) n, COALESCE(SUM(realized_usd-cost_usd),0) s FROM positions "
+                              "WHERE status!='open' AND closed_at>=? AND dry_run!=?", (start, dry))
+    if other and other["n"]:
+        lines.append(f"（今天另有{'实盘' if dry else '模拟盘'} {other['n']} 笔，合计 {fmt_usd(other['s'])}，不计入下面的统计）")
     if closed:
         pnl = sum(_pnl(p) for p in closed)
         wins = sum(1 for p in closed if _pnl(p) > 0)

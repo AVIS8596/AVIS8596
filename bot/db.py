@@ -220,8 +220,12 @@ class DB:
         r = await self.fetchone("SELECT MAX(closed_at) m FROM positions WHERE chain=? AND token=?", (chain, token))
         return float(r["m"]) if r and r["m"] else 0.0
 
-    async def realized_today_usd(self, day_start: float) -> float:
-        r = await self.fetchone(
-            "SELECT COALESCE(SUM(realized_usd - cost_usd),0) s FROM positions "
-            "WHERE status!='open' AND closed_at>=?", (day_start,))
+    async def realized_today_usd(self, day_start: float, dry_run: bool | None = None) -> float:
+        """当天已实现盈亏。dry_run 给定时只算实盘或只算模拟盘（两种不混在一起）。"""
+        sql = "SELECT COALESCE(SUM(realized_usd - cost_usd),0) s FROM positions WHERE status!='open' AND closed_at>=?"
+        args: list = [day_start]
+        if dry_run is not None:
+            sql += " AND dry_run=?"
+            args.append(int(dry_run))
+        r = await self.fetchone(sql, args)
         return float(r["s"]) if r else 0.0
