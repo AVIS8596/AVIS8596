@@ -55,7 +55,7 @@ class CcxtSpot:
 
         self.symbol = symbol
         self.ex = ccxt.binance({"apiKey": api_key, "secret": secret, "enableRateLimit": True,
-                                "options": {"defaultType": "spot"}})
+                                "options": {"defaultType": "spot", "adjustForTimeDifference": True}})
         if testnet:
             self.ex.set_sandbox_mode(True)
         self.market = self.ex.load_markets()[symbol]
@@ -127,6 +127,8 @@ class LiveState:
     last_bar: str | None = None
     stop_order_id: str | None = None
     stop_error: str | None = None  # 最近一次挂止损失败的原因 (相同原因不重复通知)
+    trade_error: str | None = None  # 最近一次下单失败的原因 (相同原因不重复通知)
+    base_baseline: float | None = None  # 不属于机器人的基础币数量 (首次运行时记录), 用于双向对账
     stop_price: float | None = None
     halted: str | None = None
     halt_notified_at: str | None = None  # 停机通知最多每 6 小时一次
@@ -226,6 +228,12 @@ class LiveTrader:
     def _cancel_stop(self, st: LiveState) -> None:
         if st.stop_order_id and not self.cfg.dry_run:
             self.ex.cancel(st.stop_order_id)
+            # 撤单前的一瞬间止损单可能已经全部或部分成交, 必须按实际成交记账
+            info = self.ex.order_info(st.stop_order_id)
+            if info["filled"] > 0:
+                sold = min(info["filled"], st.qty)
+                self._record_stop_fill(st, sold, info["cost"] - info["fee_quote"])
+                self.notes.append(f"🛑 止损单在撤单前已成交 {sold:.6f}, 已记账")
         st.stop_order_id, st.stop_price = None, None
         _save(self.path, st)
 
@@ -289,13 +297,25 @@ class LiveTrader:
                 _save(self.path, st)
                 free_quote, base_total = self.ex.balances()
             elif status in ("canceled", "cancelled", "expired", "rejected"):
+                if info["filled"] > 0:  # 部分成交后被撤
+                    sold = min(info["filled"], st.qty)
+                    self._record_stop_fill(st, sold, info["cost"] - info["fee_quote"])
+                    events.append(f"🛑 止损单部分成交 {sold:.6f}")
                 st.stop_order_id, st.stop_price = None, None
                 _save(self.path, st)
                 events.append("⚠️ 止损单被撤销, 将重新挂单")
 
-        # 2. 持仓一致性: 交易所上的币少于机器人记录 -> 有人手动卖出或出错, 停机
-        if base_total + 1e-9 < st.qty * 0.995 and not cfg.dry_run:
-            st.halted = f"交易所余额 {base_total:.6f} 少于机器人持仓 {st.qty:.6f}"
+        # 2. 持仓一致性 (双向): 交易所余额应等于 "不属于机器人的部分 + 机器人持仓"。
+        #    少了: 有人手动卖出/转走、测试网重置; 多了: 成交记录丢失 (如网络中断) 或手动买入。
+        #    任何一种都可能让机器人重复下单或卖错, 所以停机等人工确认。
+        if st.base_baseline is None:
+            st.base_baseline = max(0.0, base_total - st.qty)
+            _save(self.path, st)
+        ref_price = self.ex.price()
+        diff = base_total - (st.base_baseline + st.qty)
+        if abs(diff) * ref_price > 2.0 and not cfg.dry_run and not st.halted:
+            st.halted = (f"交易所 {cfg.symbol.split('/')[0]} 余额 {base_total:.6f}, 应为 "
+                         f"{st.base_baseline + st.qty:.6f} (相差 {diff:+.6f}, 约 {diff * ref_price:+.2f} USDT)")
             _save(self.path, st)
         if st.halted:
             last = pd.Timestamp(st.halt_notified_at) if st.halt_notified_at else None
@@ -314,6 +334,7 @@ class LiveTrader:
         price = self.ex.price()
         new_bar = st.last_bar is None or bar > pd.Timestamp(st.last_bar)
         decision = None
+        trade_failed = False
         if new_bar:
             strat = TrendVolTarget()
             comps = strat.components(df)
@@ -331,21 +352,31 @@ class LiveTrader:
                 events.append("⏸ 紧急停止开关已打开, 本次不下单")
             elif action != "hold":
                 self._cancel_stop(st)  # 先撤止损单, 释放被冻结的币
-                if action == "exit":
-                    fill = self._trade(st, "sell", st.qty, "trend_exit", price)
-                else:
-                    delta_value = target * equity - st.qty * price
-                    if delta_value > 0:
-                        fq, _ = self.ex.balances()
-                        delta_value = min(delta_value, cfg.max_order_usdt, fq * 0.995, st.cash * 0.998)
-                        fill = self._trade(st, "buy", delta_value / price, "trend_buy", price)
+                fill = None
+                try:
+                    if action == "exit":
+                        fill = self._trade(st, "sell", st.qty, "trend_exit", price)
                     else:
-                        amount = min(-delta_value, cfg.max_order_usdt) / price
-                        fill = self._trade(st, "sell", min(amount, st.qty), "trend_sell", price)
+                        delta_value = target * equity - st.qty * price
+                        if delta_value > 0:
+                            fq, _ = self.ex.balances()
+                            delta_value = min(delta_value, cfg.max_order_usdt, fq * 0.995, st.cash * 0.998)
+                            fill = self._trade(st, "buy", delta_value / price, "trend_buy", price)
+                        else:
+                            amount = min(-delta_value, cfg.max_order_usdt) / price
+                            fill = self._trade(st, "sell", min(amount, st.qty), "trend_sell", price)
+                    st.trade_error = None
+                except Exception as exc:  # 不退出: 照常通知, 补挂止损单, 下个小时重试
+                    reason = str(exc)[:200]
+                    if reason != st.trade_error:
+                        events.append(f"⚠️ 下单失败, 下个小时重试: {reason}")
+                    st.trade_error = reason
+                    trade_failed = True
                 if fill:
                     side = "买入" if fill["base"] > 0 else "卖出"
                     events.append(f"✅ 已市价{side} {abs(fill['base']):.6f} @ 约 {fill['avg_price']:,.2f}")
-            st.last_bar = str(bar.date())
+            if not trade_failed:  # 下单失败时不标记已处理, 下次运行重新计算并重试
+                st.last_bar = str(bar.date())
             _save(self.path, st)
 
         # 4. 止损单: 有持仓就保证有一张 (新日线时按新收盘价重挂)

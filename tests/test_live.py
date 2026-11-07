@@ -38,7 +38,12 @@ class FakeExchange:
     def stop_floor(self, price):
         return price * self.floor_mult * 1.02 if self.floor_mult else 0.0
 
+    fail_orders = 0
+
     def market_order(self, side, amount):
+        if self.fail_orders > 0:
+            self.fail_orders -= 1
+            raise RuntimeError("binance Account has insufficient balance")
         locked = sum(s["amount"] for s in self.stops.values() if s["status"] == "open")
         if side == "buy":
             cost = amount * self.px
@@ -61,9 +66,17 @@ class FakeExchange:
         self.stops[oid] = {"amount": amount, "stop": stop_price, "status": "open", "filled": 0.0, "cost": 0.0}
         return oid
 
+    fill_on_cancel = False
+
     def cancel(self, oid):
-        if self.stops[oid]["status"] == "open":
-            self.stops[oid]["status"] = "canceled"
+        s = self.stops[oid]
+        if s["status"] == "open" and self.fill_on_cancel:  # 撤单前一瞬间已成交
+            s["status"], s["filled"], s["cost"] = "closed", s["amount"], s["amount"] * s["stop"]
+            self.base -= s["amount"]
+            self.usdt += s["cost"] * (1 - self.fee)
+            return
+        if s["status"] == "open":
+            s["status"] = "canceled"
 
     def order_info(self, oid):
         s = self.stops[oid]
@@ -230,3 +243,64 @@ def test_stop_failure_still_notifies_and_retries_next_run(tmp_path):
     text2 = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
     st2 = _load(cfg.state_path)
     assert st2.stop_order_id is not None and "补挂成功" in text2
+
+
+def _first_bar_where(pred, start=200):
+    df = generate_synthetic(n=600, seed=21)
+    t = TrendVolTarget().generate_signals(df)
+    return df, t, next(k for k in range(start, 599) if pred(t, k))
+
+
+def test_stop_filled_just_before_cancel_is_booked(tmp_path):
+    df, t, i = _first_bar_where(lambda t, k: t.iloc[k] > 0.3)
+    j = next(k for k in range(i + 1, 599) if t.iloc[k] <= 0 or abs(t.iloc[k] - t.iloc[i]) > 0.15)
+    ex = FakeExchange(price=float(df["close"].iloc[i]))
+    cfg = _cfg(tmp_path)
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    for k in range(i + 1, j):
+        run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: k + 1]), sender=lambda *a: None)
+    ex.fill_on_cancel = True
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: j + 1]), sender=lambda *a: None)
+    st = _load(cfg.state_path)
+    assert st.halted is None  # 记账正确, 不会误判为对不上
+    assert ex.base == pytest.approx(st.base_baseline + st.qty, abs=1e-6)
+
+
+def test_extra_coins_appearing_also_halts(tmp_path):
+    df, i = _bars_with_target()
+    ex = FakeExchange(price=float(df["close"].iloc[i]))
+    cfg = _cfg(tmp_path, stop_loss=None)
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    ex.base += 0.5  # 成交记录丢失 / 手动买入
+    n = len(ex.orders)
+    text = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 2]), sender=lambda *a: None)
+    assert "已停机" in text and "相差 +0.5" in text and len(ex.orders) == n
+
+
+def test_order_failure_notifies_keeps_stop_and_retries(tmp_path):
+    df, i = _bars_with_target()
+    ex = FakeExchange(price=float(df["close"].iloc[i]))
+    ex.fail_orders = 1
+    cfg = _cfg(tmp_path)
+    text = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    st = _load(cfg.state_path)
+    assert "下单失败" in text and st.last_bar is None and ex.orders == []
+    text2 = run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    st2 = _load(cfg.state_path)
+    assert "已市价买入" in text2 and st2.last_bar is not None and st2.stop_order_id
+
+
+def test_old_state_without_baseline_is_upgraded(tmp_path):
+    import json
+
+    df, i = _bars_with_target()
+    ex = FakeExchange(base=1.0, price=float(df["close"].iloc[i]))
+    cfg = _cfg(tmp_path, stop_loss=None)
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 1]), sender=lambda *a: None)
+    data = json.loads(open(cfg.state_path).read())
+    data.pop("base_baseline")
+    data.pop("trade_error")
+    open(cfg.state_path, "w").write(json.dumps(data))
+    run_live(cfg, ex, None, fetcher=_fetcher(df.iloc[: i + 2]), sender=lambda *a: None)
+    st = _load(cfg.state_path)
+    assert st.halted is None and st.base_baseline == pytest.approx(1.0, abs=1e-6)
