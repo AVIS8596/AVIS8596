@@ -116,6 +116,27 @@ Arbitrum 有官方漏洞赏金，**不要在主网拿真实资金做实验**：
 - 官方安全联系：见 nitro-contracts 仓库 `SECURITY` / README 指引
 - 披露前在本地分叉或测试网完成 PoC，走平台授权流程提交
 
+## 7. 补充验证：ERC20Bridge 余额守卫不变量测试（已完成）
+
+针对第 4 节 [2] 的 `reentrancy-balance`，对**真实 `ERC20Bridge`** 写了 Foundry
+不变量 + PoC（见 `audit-lab/pocs/`）验证性质：
+
+> 经由 outbox 的一次 `executeCall`，Bridge 释放的 native token 不得超过声明的 `value`。
+
+```
+[PASS] test_guardBlocks_reentrantOutboxExtraWithdraw   // 恶意 outbox 重入多抽 -> CallNotAllowed
+[PASS] test_accessControl_nonOutboxCannotReenter        // 非 outbox 重入 -> NotOutbox
+[PASS] test_cannotCallNativeToken                       // to==nativeToken -> CallTargetNotAllowed
+[PASS] invariant_outflowNeverExceedsDeclared  (runs: 256, calls: 16384, reverts: 0)
+```
+
+- **结论**：256×64 的对抗性 fuzz 序列下，重入**无法**绕过守卫额外抽走托管资产，
+  与人工分诊一致——守卫有意为之且有效。
+- **负控制**：把守卫改成 `if (false)` 后不变量立即失败，最小反例
+  `execute(value=81, extra=60)`（重入 outbox 多抽 60），证明测试非空洞、守卫是关键。
+
+> 复现步骤见 `audit-lab/pocs/README.md`。
+
 ---
 *本报告由自动化工具 + 人工分诊生成，结论基于上述 commit 的源码静态分析，不构成
 对合约安全性的完整保证。*
