@@ -341,8 +341,8 @@ class Telegram:
                "off": "想重新开启观察，发 /dynamic shadow"}[mode]
         await self.send(
             f"<b>动态管理：{MODE_TEXT[mode]}</b>{'（已切换）' if args else ''}\n"
-            f"每 {int(dc['check_sec']) // 60} 分钟复查一次持仓，健康分 < {dc['reduce_below']} 卖一半、"
-            f"< {dc['exit_below']} 全卖（连续 {dc['confirm_checks']} 次才动手），> {dc['strong_above']} 放宽止盈；"
+            f"每 {int(dc['check_sec']) // 60} 分钟复查一次持仓，健康分低于 {dc['reduce_below']} 卖一半、"
+            f"低于 {dc['exit_below']} 全卖（连续 {dc['confirm_checks']} 次才动手），高于 {dc['strong_above']} 放宽止盈；"
             f"涨过 +{dc['breakeven_after_pct']}% 后保本；撤池子/dev 清仓立刻卖\n\n"
             f"{await shadow_compare(self.app)}\n\n{tip}")
 
@@ -372,7 +372,7 @@ class Telegram:
         await self.send(
             f"<b>{CHAINS[chain].name} 每笔买入金额</b>{'（已更新）' if args else ''}\n"
             f"🔥 优质：{b:g} {sym}（评分 ≥ {t.get('best_min_score', 85)} 或 ≥ {t.get('best_min_smart', 3)} 个聪明钱，"
-            f"且捆绑 < {t.get('best_max_bundle_pct', 10)}%）\n"
+            f"且捆绑 &lt; {t.get('best_max_bundle_pct', 10)}%）\n"
             f"👍 较好：{g:g} {sym}（评分 ≥ {t.get('good_min_score', 70)} 或 ≥ {t.get('good_min_smart', 2)} 个聪明钱）\n"
             f"一般：{n:g} {sym}\n修改：/size {n:g} {g:g} {b:g}")
 
