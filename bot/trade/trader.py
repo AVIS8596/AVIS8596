@@ -108,8 +108,10 @@ class Trader:
             return f"代币上线 {age:.0f} 小时，超过上限"
         n_smart = len(set(wallets or []) | set(rep.get("smart_buyers") or []))
         chg = float(rep.get("change_1h") or 0)
-        early = reason.startswith(("早期建仓", "强叙事"))   # 刚发的币 1h 涨幅天然很大，靠确认期防追高
-        if not early and chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
+        # 发币不到 1 小时的币，"1h 涨幅"其实是从发币价算起，天然很大，这种只靠确认期防追高；
+        # 早期建仓都是刚发的币；强叙事的币发出来超过 1 小时就照常检查追高
+        young = reason.startswith("早期建仓") or (reason.startswith("强叙事") and age < 1)
+        if not young and chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
             return f"1 小时已涨 {chg:.0f}%，不追高（3 个以上聪明钱一起买才追）"
         fake = looks_fake(rep, t)
         if fake:
