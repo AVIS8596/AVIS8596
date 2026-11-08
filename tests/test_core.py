@@ -111,7 +111,14 @@ def pos(**kw):
 def test_exit_rules():
     assert decide_exit(pos(), 0.6, EXIT, 1001)[0] == 100                      # 止损
     assert decide_exit(pos(), 0.0, EXIT, 1001)[0] == 0                        # 取价失败绝不卖
-    assert decide_exit(pos(), 2.1, EXIT, 1001) == (50, "止盈·翻倍出本（+110%，卖出 50% 收回本金）")
+    assert decide_exit(pos(), 2.1, EXIT, 1001) == (50.0, "止盈·翻倍出本（+110%，卖 50% 刚好收回本金，剩下的都是利润）")
+    # 一下涨到 5 倍才第一次看到：只卖约 1/5 就回本（多卖 5% 覆盖成本）
+    assert decide_exit(pos(), 5.0, EXIT, 1001)[0] == 21.0
+    # 按实际成本和剩余数量算：花 $100，已经卖回 $40，剩 1000 个 × $0.3 = $300 → 卖 (60 × 1.05) / 300 = 21%
+    assert decide_exit(pos(entry_price=0.1, cost_usd=100, realized_usd=40, remaining_raw="1000000", decimals=3),
+                       0.3, EXIT, 1001)[0] == 21.0
+    # 关掉后回到固定比例
+    assert decide_exit(pos(), 5.0, {**EXIT, "recover_cost_only": False}, 1001)[0] == 50
     assert decide_exit(pos(tp_stage=1, high_price=2.1), 2.1, EXIT, 1001)[0] == 0
     assert decide_exit(pos(tp_stage=1, high_price=2.0), 1.3, EXIT, 1001)[0] == 100   # 移动止损
     assert decide_exit(pos(), 1.1, EXIT, 1000 + 25 * 3600)[0] == 100          # 超时

@@ -56,6 +56,20 @@ def exit_rules(cfg: dict, tier: str | None) -> dict:
     return {**base, **DEFAULT_EXIT_TIERS.get(tier, {}), **(((cfg or {}).get("tiers") or {}).get(tier) or {})}
 
 
+def recover_pct(pos: dict, price: float, entry: float, buffer_pct: float = 5) -> float:
+    """卖出多少比例刚好收回本金（多卖 buffer_pct% 覆盖卖出成本），限制在 10%~100%。
+    有成本 / 已回收金额 / 剩余数量时按实际算（之前部分卖出过也算进去），否则按 1 / 当前倍数。"""
+    buf = 1 + buffer_pct / 100
+    cost, got = float(pos.get("cost_usd") or 0), float(pos.get("realized_usd") or 0)
+    rem, dec = int(pos.get("remaining_raw") or 0), pos.get("decimals")
+    if cost > 0 and rem > 0 and dec is not None and price > 0:
+        value = rem / 10 ** int(dec) * price
+        frac = max(cost - got, 0.0) * buf / value if value > 0 else 1.0
+    else:
+        frac = entry / price * buf if price > 0 else 1.0
+    return round(min(100.0, max(10.0, frac * 100)), 1)
+
+
 def decide_exit(pos: dict, price: float, cfg: dict, now: float, dyn: dict | None = None) -> tuple[float, str]:
     """返回 (卖出比例 0~100, 原因)。0 表示不动。cfg 为全局 exit 配置，按持仓的 tier 自动套用档位规则。
 
@@ -112,6 +126,10 @@ def decide_exit(pos: dict, price: float, cfg: dict, now: float, dyn: dict | None
     if stage < len(tps) and gain >= float(tps[stage]["gain_pct"]) and not (strong and stage >= 1):
         t = tps[stage]
         if stage == 0 and float(t["gain_pct"]) >= 100 and float(t["sell_pct"]) >= 50:
+            if cfg.get("recover_cost_only", True):
+                # 出本只卖"刚好收回本金"的那部分：翻倍卖约一半，涨 4 倍只卖约 1/4、涨 5 倍约 1/5，剩下的都是利润
+                pct = recover_pct(pos, price, entry, float(cfg.get("recover_cost_buffer_pct", 5)))
+                return pct, f"止盈·翻倍出本（+{gain:.0f}%，卖 {pct:.0f}% 刚好收回本金，剩下的都是利润）"
             return float(t["sell_pct"]), f"止盈·翻倍出本（+{gain:.0f}%，卖出 {float(t['sell_pct']):.0f}% 收回本金）"
         return float(t["sell_pct"]), f"止盈第{stage + 1}档（+{gain:.0f}%）"
     if pos.get("trail_half") and gain <= 0:

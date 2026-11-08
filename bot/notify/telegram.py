@@ -214,8 +214,14 @@ class Telegram:
             plan += f" | 最长拿 {float(rules.get('max_hold_hours', 24)):g} 小时\n"
             tps = rules.get("take_profit") or []
             if tps:
-                plan += "止盈：" + "，".join(f"+{float(t['gain_pct']):g}% 卖{float(t['sell_pct']):g}%" for t in tps)
                 rn = rules.get("runner") or {}
+                t0 = tps[0]
+                if rn.get("enabled") and rules.get("recover_cost_only", True) and float(t0["gain_pct"]) >= 100:
+                    # 强势长拿开着时，出本之后的固定止盈档位不会用到，不再列出来免得误会
+                    plan += (f"止盈：涨到 +{float(t0['gain_pct']):g}% 只卖刚好回本的部分（翻倍卖约一半，"
+                             f"涨得越高卖得越少：4 倍约 1/4、5 倍约 1/5）")
+                else:
+                    plan += "止盈：" + "，".join(f"+{float(t['gain_pct']):g}% 卖{float(t['sell_pct']):g}%" for t in tps)
                 if rn.get("enabled"):
                     lad = rn.get("ladder") or []
                     plan += (" | 翻倍出本后强势长拿：从最高点回撤 "

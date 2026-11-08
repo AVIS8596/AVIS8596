@@ -58,7 +58,7 @@ def test_dynamic_decisions():
     assert decide_exit(pos(), 1.1, EXIT, 1000 + 5 * H, dyn(health=85))[0] == 0                     # 较好档 4h→8h
     assert decide_exit(pos(), 1.1, EXIT, 1000 + 5 * H, dyn(health=70))[0] == 100
     # 翻倍出本在强势时照常执行
-    assert decide_exit(pos(), 2.05, EXIT, t, dyn(health=90))[0] == 50
+    assert decide_exit(pos(), 2.05, EXIT, t, dyn(health=90))[1].startswith("止盈·翻倍出本")
     # 取价失败什么都不做，紧急也不例外（拿不到价格时无法判断）
     assert decide_exit(pos(), 0.0, EXIT, t, dyn(emergency="x"))[0] == 0
 
