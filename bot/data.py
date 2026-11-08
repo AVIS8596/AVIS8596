@@ -201,18 +201,29 @@ class DataHub:
                             out.setdefault(norm_addr(chain, t["maker"]), name)
                 except GmgnError as e:
                     log.warning("GMGN %s %s: %s", name, chain, e)
-            try:
-                n_tok = int(self.app.cfg.get("smart_money.trending_tokens_per_chain", 20))
-                for tok in (await self.gm.rank(chain, "1h", n_tok))[:n_tok]:
-                    ta = tok.get("address")
-                    if not ta:
-                        continue
+            n_feed = len(out)
+            n_tok = int(self.app.cfg.get("smart_money.trending_tokens_per_chain", 20))
+            toks: list[dict] = []
+            for period in ("1h", "6h", "24h"):      # 冷门链 1 小时热门榜太少，就看 6 小时 / 24 小时
+                try:
+                    toks = (await self.gm.rank(chain, period, n_tok))[:n_tok]
+                except GmgnError as e:
+                    log.warning("GMGN 热门榜 %s %s: %s", chain, period, e)
+                    toks = []
+                if len(toks) >= 5:
+                    break
+            for tok in toks:
+                ta = tok.get("address")
+                if not ta:
+                    continue
+                try:          # 单个币出错不影响其他币
                     for tr in await self.gm.top_traders(chain, ta, 20, order_by="profit"):
                         a = tr.get("address")
                         if a and int(f(tr.get("addr_type"))) != 2:
                             out.setdefault(norm_addr(chain, a), f"top_trader:{tok.get('symbol', '?')}")
-            except GmgnError as e:
-                log.warning("GMGN 热门币交易者 %s: %s", chain, e)
+                except GmgnError as e:
+                    log.debug("GMGN 盈利前排 %s %s: %s", chain, ta, e)
+            log.info("%s 候选来源：交易流 %d 个，热门币 %d 个的盈利前排 %d 个", chain, n_feed, len(toks), len(out) - n_feed)
             return out
         return await self.app.smart.birdeye_candidates(chain)
 

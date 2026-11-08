@@ -210,9 +210,17 @@ class WalletExpander:
                                     ("k", 6 * 3600, self.refresh_kols)):
                 if now - last[name] >= every:
                     last[name] = now
-                    # Solana + 没有 GMGN 聪明钱交易流的链（罗宾汉链）：钱包只能靠挖大涨币
-                    chains = ["solana"] + ([] if name == "k" else
-                                           [c for c in self.app.cfg.enabled_chains if c in NO_FEED_CHAINS])
+                    # Solana + 没有 GMGN 聪明钱交易流的链（罗宾汉链）+ 聪明钱太少的链（不到 20 个）：靠挖大涨币补
+                    thin = []
+                    if name != "k":
+                        for c in self.app.cfg.enabled_chains:
+                            if c == "solana":
+                                continue
+                            n = await self.app.db.fetchone("SELECT COUNT(*) n FROM wallets WHERE chain=? AND "
+                                                           "status IN ('active','manual')", (c,))
+                            if c in NO_FEED_CHAINS or (n and n["n"] < 20):
+                                thin.append(c)
+                    chains = ["solana"] + thin
                     for c in chains:
                         if c != "solana" or "solana" in self.app.cfg.enabled_chains:
                             try:
