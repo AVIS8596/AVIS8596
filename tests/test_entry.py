@@ -202,7 +202,8 @@ def test_loss_streak_and_skipped_review(tmp_path):
             await db.execute("INSERT INTO skipped(ts,chain,token,cat,reason,price,px_1h) VALUES(?,?,?,?,?,?,?)",
                              (now - 7200, "solana", "X", cat, "", p0, p1))
         txt = await skipped_review(app, now - 3 * 3600)
-        assert "捆绑多：2 个，平均 -45%" in txt and "已经涨太多：1 个，平均 +50%" in txt
+        assert "捆绑多：2 个，中位 -40%，平均 -45%" in txt and "已经涨太多：1 个，中位 +50%，平均 +50%" in txt
+        assert "假如都买了约 -39%/笔" in txt
         await db.close()
 
     asyncio.run(go())
