@@ -45,6 +45,36 @@ async def daily_report(app: App) -> None:
             await app.tg.send(await daily_review(app, app.day_start()))
         except Exception as e:  # noqa: BLE001
             log.exception("每日复盘失败: %s", e)
+        try:
+            await maintenance(app)
+        except Exception as e:  # noqa: BLE001
+            log.exception("每日维护失败: %s", e)
+
+
+async def maintenance(app: App) -> None:
+    """每天一次：清理 30 天前的流水数据（结果档案和交易记录不删，那是机器人的记忆），备份数据库（保留最近 3 份）。"""
+    import glob
+    import os
+    db = app.db
+    cut = time.time() - 30 * 86400
+    for table, col in (("signals", "ts"), ("skipped", "ts"), ("wallet_hits", "ts"),
+                       ("candidates", "checked_at")):
+        try:
+            await db.execute(f"DELETE FROM {table} WHERE {col}<?", (cut,))
+        except Exception as e:  # noqa: BLE001
+            log.debug("清理 %s: %s", table, e)
+    bdir = Path(cfg_path_dir(app)) / "backup"
+    bdir.mkdir(parents=True, exist_ok=True)
+    target = bdir / f"memebot-{datetime.now(app.tz):%Y%m%d}.db"
+    if not target.exists():
+        await db.execute(f"VACUUM INTO '{target}'")
+    for old_f in sorted(glob.glob(str(bdir / "memebot-*.db")))[:-3]:
+        os.remove(old_f)
+    log.info("每日维护完成，备份到 %s", target)
+
+
+def cfg_path_dir(app: App) -> str:
+    return str(Path(app.cfg.get("general.db_path", "data/memebot.db")).parent)
 
 
 async def run_bot(cfg) -> None:

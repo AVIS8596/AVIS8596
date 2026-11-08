@@ -33,6 +33,7 @@ HELP = """<b>命令列表</b>
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
+/alerts off | on 关闭 / 打开聪明钱和新币提醒（交易、风控、复盘照常推送）
 /size 查看每笔买入金额（一般 / 较好 / 优质 三档）
 /size 0.05 0.1 0.2 修改 Solana 三档金额（单位 SOL）
 /size bsc 0.01 0.02 0.04 修改其他链
@@ -52,23 +53,34 @@ class Telegram:
         self.token = app.cfg.secrets.telegram_token
         self.chat = str(app.cfg.secrets.telegram_chat_id)
         self.base = f"https://api.telegram.org/bot{self.token}"
-        self.q: asyncio.Queue[str] = asyncio.Queue(maxsize=500)
+        # 优先级队列：交易、风控、命令回复（0）永远排在聪明钱/新币提醒（1）前面
+        self.q: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=500)
+        self._seq = 0
+        self._low_pending = 0
+        self.muted = False   # /alerts off 后只推交易和重要消息
         self._err_sent: dict[str, float] = {}
         self._cmd_tasks: set[asyncio.Task] = set()
 
     # ================================================================ 发送
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, low: bool = False) -> None:
+        """low=True 是聪明钱 / 新币这类提醒：静音时不发，积压超过 30 条时丢弃，保证交易消息不被堵住。"""
         if len(text) > 4000:
             text = text[:3990] + "…"
+        if low and (self.muted or self._low_pending >= 30):
+            return
+        self._seq += 1
         try:
-            self.q.put_nowait(text)
+            self.q.put_nowait((1 if low else 0, self._seq, text))
+            self._low_pending += int(low)
         except asyncio.QueueFull:
             log.warning("TG 消息队列已满，丢弃一条")
 
     async def sender(self) -> None:
         """串行发送，每条间隔 1.1 秒，避免触发 Telegram 限流。"""
         while True:
-            text = await self.q.get()
+            prio, _, text = await self.q.get()
+            if prio:
+                self._low_pending = max(0, self._low_pending - 1)
             for _ in range(5):
                 try:
                     r = await self.app.http.post("tg", f"{self.base}/sendMessage", retries=2, json_body={
@@ -152,11 +164,11 @@ class Telegram:
             L.append(f"🔗 同一出资人 {self.addr_link(c, cl['funder'])} 控制 {len(cl['wallets'])} 个早期钱包{tag}")
         return L
 
-    async def token_report(self, rep: dict, title: str = "📊 代币分析") -> None:
+    async def token_report(self, rep: dict, title: str = "📊 代币分析", low: bool = False) -> None:
         lines = [f"<b>{e(title)}</b>"] + self._report_lines(rep)
         if rep.get("reasons"):
             lines.append("<i>" + e(" / ".join(rep["reasons"][:6])) + "</i>")
-        await self.send("\n".join(lines))
+        await self.send("\n".join(lines), low=low)
 
     async def smart_trade(self, s: "Signal", w: dict, rep: dict | None) -> None:
         c = s.chain
@@ -170,7 +182,7 @@ class Telegram:
                 f"30天{fmt_usd(w['realized_usd'])} | {self.tx_link(c, s.tx)}")
         if rep and s.side == "buy":
             head += "\n" + "\n".join(self._report_lines(rep)[1:])
-        await self.send(head)
+        await self.send(head, low=True)
 
     async def cluster(self, chain: str, token: str, wallets: list[str], rep: dict | None) -> None:
         sym = (rep or {}).get("symbol") or short(token)
@@ -178,7 +190,7 @@ class Telegram:
                  " ".join(self.addr_link(chain, w) for w in wallets[:8])]
         if rep:
             lines += self._report_lines(rep)[1:]
-        await self.send("\n".join(lines))
+        await self.send("\n".join(lines), low=True)
 
     async def trade_buy(self, pid: int, chain: str, rep: dict, fill: "Fill", entry: float, cost_usd: float,
                         reason: str, rules: dict | None = None) -> None:
@@ -225,6 +237,7 @@ class Telegram:
 
     # ================================================================ 命令
     async def poller(self) -> None:
+        self.muted = bool(await self.app.db.kv_get("alerts_muted", False))
         offset = int(await self.app.db.kv_get("tg_offset", 0) or 0)
         while True:
             try:
@@ -276,6 +289,12 @@ class Telegram:
             await self.send(await why_text(self.app, int(args[0])))
         elif cmd == "/learn":
             await self._learn(args)
+        elif cmd == "/alerts":
+            if args and args[0].lower() in ("off", "on"):
+                self.muted = args[0].lower() == "off"
+                await self.app.db.kv_set("alerts_muted", self.muted)
+            await self.send("🔕 已关闭聪明钱/新币提醒，只推交易、风控和复盘" if self.muted
+                            else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
         elif cmd == "/review":

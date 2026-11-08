@@ -49,6 +49,7 @@ class Trader:
         self.exec: dict = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._buying: set[str] = set()
+        self._bal_warned: dict[str, float] = {}
 
     def setup(self) -> list[str]:
         """创建执行器。返回不可用的链（缺 key 等）。"""
@@ -138,6 +139,12 @@ class Trader:
         cd = float(t.get("token_cooldown_min", 120)) * 60
         if time.time() - await db.last_closed_at(chain, token) < cd:
             return "冷却期内"
+        # 止损 / 紧急卖出过的币 24 小时内不再买
+        last = await db.fetchone("SELECT close_reason, closed_at FROM positions WHERE chain=? AND token=? "
+                                 "AND status='closed' ORDER BY closed_at DESC LIMIT 1", (chain, token))
+        if last and str(last["close_reason"] or "").startswith(("止损", "🚨", "取不到价格")) and \
+                time.time() - float(last["closed_at"] or 0) < float(t.get("stoploss_cooldown_hours", 24)) * 3600:
+            return "冷却期内（这个币止损过，24 小时内不再买）"
         return ""
 
     def explain(self, rep: dict, reason: str = "强叙事") -> list[str]:
@@ -241,12 +248,26 @@ class Trader:
             return
         reason = f"{reason} | {TIER_NAME[tier]}"
         ex = self.exec[chain]
+        # 单笔不超过池子流动性的 3%：池子太小时自动减少买入量（大额模拟盘、以后加大实盘金额时有用）
+        liq_pct = float(self.cfg.get("trading.max_liquidity_pct", 3))
+        npx0 = await self.app.native_price(chain)
+        liq = float(rep.get("liquidity") or 0)
+        if liq_pct and liq > 0 and npx0 > 0 and amount * npx0 > liq * liq_pct / 100:
+            new_amt = round(liq * liq_pct / 100 / npx0, 4)
+            if new_amt < float(self.cfg.get("trading.min_buy_native", 0.01)):
+                log.info("池子太小（$%.0f），%s 不买", liq, rep.get("symbol"))
+                return
+            reason += f" | 池子小，减到 {new_amt:g}"
+            amount = new_amt
         if not self.cfg.dry_run:
             reserve = float(self.cfg.per_chain("trading.reserve_native", chain, 0))
             bal = await ex.native_balance()
             if bal - amount < reserve:
                 log.warning("%s 余额不足：%.4f（需 %.4f + 预留 %.4f）", chain, bal, amount, reserve)
-                await self.app.tg.send(f"⚠️ {chain} 钱包余额不足（{bal:.4f}），无法买入 {rep.get('symbol')}")
+                if time.time() - self._bal_warned.get(chain, 0) > 3600:   # 一小时只提醒一次，不刷屏
+                    self._bal_warned[chain] = time.time()
+                    await self.app.tg.send(f"⚠️ {chain} 钱包余额不足（{bal:.4f}，每笔需要 {amount:g} + 预留 {reserve:g}），"
+                                           f"买不了。充值后会自动恢复；这一小时内不再重复提醒")
                 return
         slip = int(self.cfg.per_chain("trading.slippage_bps", chain, 1000))
         try:

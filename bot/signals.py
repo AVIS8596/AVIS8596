@@ -125,6 +125,9 @@ class SignalHub:
         if not (alert_buy or copy_ok or is_cluster):
             return
         solo_why = ""
+        min_native = float(self.cfg.get("trading.copy_min_native", 0.2))
+        if copy_ok and s.native_amount and s.native_amount < min_native and len(cluster) < 2:
+            copy_ok = False   # 试探性的小额买入（< 0.2 SOL）不单独跟
         if copy_ok and len(cluster) < 2:
             ok, solo_why = await self.solo_ok(s.chain, w)
             copy_ok = ok
@@ -217,7 +220,7 @@ class SignalHub:
             if looks_fake(rep, self.cfg.get("trading", {}) or {}):
                 return   # 市值虚高（成交量和市值严重不匹配），不推送也不买
             if rep["score"] >= float(self.cfg.get("alerts.min_token_score_alert", 60)):
-                await self.app.tg.token_report(rep, title=f"🆕 新币（{source}）")
+                await self.app.tg.token_report(rep, title=f"🆕 新币（{source}）", low=True)
             if self.cfg.get("trading.auto_trade", False) and \
                     rep["score"] >= float(self.cfg.get("trading.auto_min_score", 75)) and \
                     len(rep.get("smart_buyers", [])) >= int(self.cfg.get("trading.auto_min_cluster", 2)):

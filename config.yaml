@@ -98,6 +98,9 @@ trading:
   loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟
   loss_streak_pause_min: 60
   max_drawdown_pct: 60            # 不接飞刀：从 2 小时内高点跌了 60% 以上不买（3 个以上聪明钱一起买除外）
+  copy_min_native: 0.2            # 聪明钱买入不到 0.2 SOL（试探性小单）不单独跟
+  stoploss_cooldown_hours: 24     # 止损过的币 24 小时内不再买
+  max_liquidity_pct: 3            # 单笔不超过池子流动性的 3%，超过自动减少买入量
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）

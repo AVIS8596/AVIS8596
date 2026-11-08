@@ -139,6 +139,8 @@ class PositionManager:
         self._last_reconcile = 0.0
         self._checking: set[int] = set()
         self._breach: dict = {}   # 止损/移动止损连续触发次数（防插针）
+        self._shadow_px_at: dict = {}   # 已平仓持仓的虚拟持仓上次取价时间
+        self._px_ok_at: dict[int, float] = {}   # 每个持仓上次取到价格的时间
         self._check_sem = asyncio.Semaphore(2)
 
     def _confirmed(self, key, why: str, px: float, entry: float) -> bool:
@@ -220,7 +222,8 @@ class PositionManager:
             shadows = await db.fetchall(
                 "SELECT s.*, p.chain, p.token, p.symbol, p.entry_price, p.opened_at, p.tier, p.cost_usd, "
                 "p.health, p.health_streak, p.health_emergency, p.health_note, p.health_at, p.entry_snap, "
-                "p.status AS pstatus FROM shadow s JOIN positions p ON p.id=s.pid WHERE s.closed=0")
+                "p.status AS pstatus, p.closed_at AS pclosed FROM shadow s JOIN positions p ON p.id=s.pid "
+                "WHERE s.closed=0")
         if not pos and not shadows:
             return
         if pos:
@@ -228,14 +231,33 @@ class PositionManager:
         now = time.time()
         dc = self.dcfg
 
-        # ---- 健康分复查（持仓 + 观察中的虚拟持仓）----
+        # 真实持仓已平仓的虚拟持仓：平仓 24 小时后结束模拟；取价和复查降频，省接口额度
+        live_shadows = []
+        for s in shadows:
+            closed_for = now - float(s["pclosed"] or now) if s["pstatus"] != "open" else 0
+            if closed_for > 24 * 3600:
+                if float(s["last_price"] or 0) > 0:
+                    await self._shadow_apply(s, 100, "真实持仓平仓已 24 小时，按最后价格结束模拟",
+                                             float(s["last_price"]), now)
+                else:
+                    await db.execute("UPDATE shadow SET closed=1, closed_at=? WHERE pid=? AND variant=?",
+                                     (now, s["pid"], s["variant"]))
+                continue
+            if closed_for and now - self._shadow_px_at.get((s["pid"], s["variant"]), 0) < 60:
+                continue
+            self._shadow_px_at[(s["pid"], s["variant"])] = now
+            live_shadows.append(s)
+        shadows = live_shadows
+
+        # ---- 健康分复查（持仓 + 平仓 6 小时内的动态管理虚拟持仓）----
         if mode != "off":
-            targets = {p["id"]: p for p in pos}
+            targets = {p["id"]: (p, float(dc["check_sec"])) for p in pos}
             for s in shadows:
-                if s["variant"] == "v2" and s["pid"] not in targets:
-                    targets[s["pid"]] = await db.fetchone("SELECT * FROM positions WHERE id=?", (s["pid"],))
-            for pid, p in targets.items():
-                if p and pid not in self._checking and now - float(p.get("health_at") or 0) >= float(dc["check_sec"]):
+                if s["variant"] == "v2" and s["pid"] not in targets and now - float(s["pclosed"] or now) < 6 * 3600:
+                    row = await db.fetchone("SELECT * FROM positions WHERE id=?", (s["pid"],))
+                    targets[s["pid"]] = (row, float(dc["check_sec"]) * 3)
+            for pid, (p, every) in targets.items():
+                if p and pid not in self._checking and now - float(p.get("health_at") or 0) >= every:
                     self._checking.add(pid)
                     self._spawn(self._check_health(p, mode))
 
@@ -255,7 +277,9 @@ class PositionManager:
         for p in pos:
             px = prices.get((p["chain"], p["token"]), 0.0)
             if px <= 0:
+                await self._no_price(p, now)
                 continue
+            self._px_ok_at[p["id"]] = now
             if px > float(p["high_price"] or 0):
                 await db.execute("UPDATE positions SET high_price=? WHERE id=?", (px, p["id"]))
                 p["high_price"] = px
@@ -271,6 +295,19 @@ class PositionManager:
             await self._sim(s, prices.get((s["chain"], s["token"]), 0.0), now, mode)
         if mode == "shadow":
             await self._shadow_report()
+
+    async def _no_price(self, p: dict, now: float) -> None:
+        """长时间取不到价格（多半已归零/下架）：持有满 1 小时且 30 分钟取不到价 → 实盘尝试清仓，模拟盘按归零平仓。
+        否则这种持仓永远占着持仓名额，最后会把买入名额占满。"""
+        last = self._px_ok_at.get(p["id"]) or float(p["opened_at"] or now)
+        if now - last < 1800 or now - float(p["opened_at"] or now) < 3600 or p["id"] in self._selling:
+            return
+        if p.get("dry_run"):
+            await self._close(p, float(p["realized_usd"] or 0), "取不到价格超过 30 分钟（大概率已归零），按归零平仓")
+            await self.app.tg.send(f"🪦 #{p['id']} {p['symbol']} 30 分钟取不到价格，模拟盘按归零平仓")
+        elif now >= self._next_try.get(p["id"], 0):
+            self._spawn(self.sell(p, 100, "取不到价格超过 30 分钟，尝试清仓", 0.0, urgent=True))
+        self._px_ok_at[p["id"]] = now   # 30 分钟后再试
 
     # ================================================================ 健康分复查
     async def _check_health(self, p: dict, mode: str) -> None:
