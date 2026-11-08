@@ -208,6 +208,16 @@ tail -f logs/memebot.log
 - 买入后交给动态持仓管理：数据变差提前卖、涨不上去就卖、止损照常。
 - "叙事"是用注意力数据近似，不理解新闻内容；要更早发现项目方/KOL 发的 CA，需要 X 推特监控。
 
+### 启用 BSC / ETH / Base
+
+```
+python3 deploy/enable_evm.py bsc base ethereum   # 用 PublicNode 免费公共节点（不用注册），已填过自己节点的链保留不动
+python3 deploy/enable_evm.py off                 # 全部关闭
+sudo systemctl restart memebot
+```
+公共节点有限速，模拟盘够用；实盘或监听钱包多时建议换成 Alchemy 免费账号的节点（重新运行 `deploy/setup_env.py` 填入）。
+注意：模拟盘没有计算 EVM 的 Gas 费，ETH 主网小额交易的 Gas 可能占好几个百分点，模拟结果会偏乐观。
+
 ### 运维
 
 - 每天 21:00 复盘后自动维护：清理 30 天前的信号流水，备份数据库到 `data/backup/`（保留最近 3 份）。结果档案、交易记录、钱包和画像不删——那是机器人的记忆，不要删除 `data/` 目录。
