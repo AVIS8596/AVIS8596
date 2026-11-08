@@ -54,12 +54,16 @@ def test_looks_fake_and_cats():
 def _app(db, msgs):
     async def send(t, *a, **k):
         msgs.append(t)
-    state = {"high": 0.0}
+    state = {"high": 0.0, "ago": 0.0}
 
     async def recent_high(chain, token, minutes=120):
         return state["high"]
+
+    async def recent_high_and_ago(chain, token, minutes=120, ago_min=5):
+        return state["high"], state["ago"]
     return SimpleNamespace(cfg=Cfg(RAW), db=db, tg=SimpleNamespace(send=send), fmt_time=lambda ts: "HH:MM",
-                           data=SimpleNamespace(recent_high=recent_high, price=recent_high), _state=state)
+                           data=SimpleNamespace(recent_high=recent_high, price=recent_high,
+                                                recent_high_and_ago=recent_high_and_ago), _state=state)
 
 
 def test_entry_filters(tmp_path):
@@ -81,6 +85,11 @@ def test_entry_filters(tmp_path):
         assert await tr.check("solana", "T", dict(GOOD), ["a", "b", "c"]) == ""   # 3 个聪明钱一起买除外
         app._state["high"] = 1.5                                                    # 只回撤 33%：正常
         assert await tr.check("solana", "T", dict(GOOD)) == ""
+        # 正在砸盘：5 分钟前 1.5，现在 1（跌了 33%），3 个聪明钱也不买
+        app._state.update(high=1.5, ago=1.5)
+        assert "正在砸盘" in await tr.check("solana", "T", dict(GOOD), ["a", "b", "c"])
+        assert skip_cat("最近 5 分钟跌了 33%，正在砸盘") == "正在砸盘"
+        app._state["ago"] = 0.0
         app._state["high"] = 0.0
         # 涨幅已兑现：发币价 0.08，现价 1（12.5 倍）
         async def kline(chain, token, res, a, b):

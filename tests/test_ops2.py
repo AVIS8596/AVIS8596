@@ -342,3 +342,23 @@ def test_smart_buyers_excludes_exited(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_fresh_reanalyzes_stale_report():
+    from bot.trade.trader import Trader
+    calls = []
+
+    async def analyze(chain, token, source="", force=False):
+        calls.append(force)
+        return {"price": 2.0, "analyzed_at": time.time(), "smart_buyers": []}
+    app = SimpleNamespace(cfg=Cfg({"trading": {"max_rep_age_sec": 20}}), analyzer=SimpleNamespace(analyze=analyze))
+    tr = Trader.__new__(Trader)
+    tr.app, tr.cfg = app, app.cfg
+
+    async def go():
+        fresh = {"price": 1.0, "analyzed_at": time.time() - 5, "smart_buyers": ["A"]}
+        assert await tr.fresh("solana", "T", fresh) is fresh and not calls        # 5 秒前的：直接用
+        old = {"price": 1.0, "analyzed_at": time.time() - 300, "smart_buyers": ["A"], "symbol": "X"}
+        new = await tr.fresh("solana", "T", old)
+        assert calls == [True] and new["price"] == 2.0 and new["smart_buyers"] == [] and new["symbol"] == "X"
+    asyncio.run(go())

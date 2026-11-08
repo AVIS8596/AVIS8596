@@ -24,7 +24,7 @@ SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱�
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
-             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现")]
+             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘")]
 
 
 def skip_cat(why: str) -> str:
@@ -133,11 +133,16 @@ class Trader:
         if await db.has_open_position(chain, token):
             return "已有持仓"
         # 不接飞刀：从 2 小时内的高点已经跌掉一大半的币，多半是被砸完的盘（放最后，要多查一次 K 线）
+        # 正在砸盘：最近 5 分钟跌超 20% 的不买（不管几个聪明钱）
         dd_max = float(t.get("max_drawdown_pct", 60))
-        if dd_max and n_smart < int(t.get("chase_ok_smart", 3)) and float(rep.get("price") or 0) > 0:
-            hi = await self.app.data.recent_high(chain, token, 120)
-            if hi > 0:
-                dd = (1 - float(rep["price"]) / hi) * 100
+        px = float(rep.get("price") or 0)
+        if px > 0:
+            hi, px5 = await self.app.data.recent_high_and_ago(chain, token, 120, 5)
+            drop5 = float(t.get("max_drop_5m_pct", 20))
+            if drop5 and px5 > 0 and (1 - px / px5) * 100 >= drop5:
+                return f"最近 5 分钟跌了 {(1 - px / px5) * 100:.0f}%，正在砸盘"
+            if dd_max and n_smart < int(t.get("chase_ok_smart", 3)) and hi > 0:
+                dd = (1 - px / hi) * 100
                 if dd >= dd_max:
                     return f"从 2 小时内高点已经跌了 {dd:.0f}%，不接飞刀"
         cap = int(t.get("max_open_positions", 10))
@@ -212,6 +217,9 @@ class Trader:
         async with lock:
             self._buying.add(key)
             try:
+                rep = await self.fresh(chain, token, rep)
+                if rep is None:
+                    return
                 why = await self.check(chain, token, rep, wallets, reason)
                 if why:
                     await self.skip(chain, token, rep, reason, why)
@@ -221,6 +229,25 @@ class Trader:
                 self._buying.discard(key)
                 if len(self._locks) > 5000:
                     self._locks = {k: v for k, v in self._locks.items() if v.locked()}
+
+    async def fresh(self, chain: str, token: str, rep: dict) -> dict | None:
+        """下单前复查：报告超过 20 秒就重新完整分析一次（价格、持有人、流动性、筹码、还拿着的聪明钱都是现在的），
+        所有过滤条件都用最新数据判断，不用几分钟前的旧数据下单。"""
+        age = time.time() - float(rep.get("analyzed_at") or 0)
+        if age <= float(self.cfg.get("trading.max_rep_age_sec", 20)):
+            return rep
+        an = getattr(self.app, "analyzer", None)
+        if not an:
+            return rep
+        try:
+            new = await an.analyze(chain, token, source="下单前复查", force=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("下单前复查失败 %s: %s", token, e)
+            new = None
+        if not new:
+            log.info("下单前复查拿不到数据，放弃 %s", rep.get("symbol"))
+            return None
+        return {**rep, **new}
 
     async def skip(self, chain: str, token: str, rep: dict, trigger: str, why: str) -> None:
         """记录一次被拦下的买入信号。和标的质量有关的会存下来，1 小时后回看价格，用于复盘过滤条件是否太严。"""

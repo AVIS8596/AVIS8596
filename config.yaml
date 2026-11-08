@@ -54,11 +54,11 @@ smart_money:
 # ---------------- 新币发现与分析 ----------------
 discovery:
   pumpportal_new_tokens: true     # 监听 pump.fun 新币和毕业（免费）
-  new_token_poll_sec: 60          # 新币轮询间隔（GMGN trenches）
+  new_token_poll_sec: 20          # 新币轮询间隔（GMGN trenches）
   gmgn_trench_types: ["completed", "near_completion"]   # 只看已毕业 / 即将毕业的 launchpad 币
   min_liquidity_usd: 5000         # 流动性低于这个的新币不分析
-  analyze_delay_sec: 45           # 新币出现后等多少秒再分析（让早期交易先发生）
-  analysis_cache_min: 10          # 同一个币分析结果缓存多久
+  analyze_delay_sec: 20           # 新币出现后等多少秒再分析（让早期交易先发生）
+  analysis_cache_min: 2           # 同一个币分析结果缓存多久（下单前不管缓存，超过 20 秒都会重新分析）
   early_slots: 3                  # Solana：开盘后前几个 slot 内买入算"早期"
   early_blocks: 3                 # EVM：开盘后前几个区块内买入算"早期"
   max_early_buyers: 40            # 最多分析多少个早期买家
@@ -87,7 +87,7 @@ trading:
   solo_min_hold_sec: 600          # 单个聪明钱买入就跟，要求它平均持仓 ≥ 10 分钟（快进快出的钱包要 2 个以上一起买才跟）
   solo_bad_follow_min: 8          # 跟某个钱包满 8 笔、胜率低于 40%，也不再单独跟它
   solo_bad_follow_wr: 0.4
-  confirm_sec: 30                 # 确认期：信号出现后等 30 秒，带单钱包没卖、价格没拉飞/没砸才买
+  confirm_sec: 20                 # 确认期：信号出现后等 20 秒，带单钱包没卖、价格没拉飞/没砸才买
   confirm_max_rise_pct: 25        # 确认期内涨超 25% 不追
   confirm_max_drop_pct: 15        # 确认期内跌超 15% 不买
   max_change_1h_pct: 300          # 1 小时已涨超 300% 不追（3 个以上聪明钱一起买除外）
@@ -106,6 +106,8 @@ trading:
   regime: { cold: 0.5, normal: 1, hot: 1, cold_pause: false }   # 市场冷热：冷时仓位 ×0.5；cold_pause: true 则冷时暂停买入
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
   max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
+  max_rep_age_sec: 20             # 下单前复查：分析报告超过 20 秒就重新完整分析，用最新数据过所有风控
+  max_drop_5m_pct: 20             # 最近 5 分钟跌超 20% 不买（正在砸盘，不管几个聪明钱）
   max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
   sim_fixed_fee_native: { solana: 0.0005, bsc: 0.0002, ethereum: 0.0005, base: 0.00003, robinhood: 0.00003 }   # 模拟盘每笔扣的固定优先费 / Gas（原生币）
   evidence_sizing: true           # 仓位按各买入来源 / 档位最近 7 天的真实期望值自动调（×0.25 ~ ×1.5，满 15 笔才调）
@@ -249,7 +251,7 @@ budget:
 # 数据来自 GMGN trenches 列表（快毕业 + 已毕业的币），触发后仍要过完整分析、风控和 30 秒确认期，买入后交给动态管理。
 # 两类都用一般档金额（早期建仓有 2 个以上聪明钱或 KOL 时用较好档），每天限量。
 strategies:
-  poll_sec: 30
+  poll_sec: 15                    # 主动建仓每 15 秒扫一次快毕业 / 已毕业列表
   max_per_hour: 2                 # 两类合计每小时最多交给确认期 2 笔，避免集中下单
   early:                          # 早期建仓：快毕业、结构干净、持有人快速增长
     enabled: true

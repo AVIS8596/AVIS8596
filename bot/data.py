@@ -312,6 +312,25 @@ class DataHub:
             return 0.0
         return max((f(r.get("high")) or f(r.get("close")) for r in rows), default=0.0)
 
+    async def recent_high_and_ago(self, chain: str, token: str, minutes: int = 120, ago_min: int = 5) -> tuple[float, float]:
+        """最近 N 分钟的最高价，以及 ago_min 分钟前的收盘价（1 分钟 K 线，一次请求）。取不到返回 0。"""
+        if not self.use_gmgn:
+            return 0.0, 0.0
+        now = int(time.time())
+        try:
+            rows = await self.gm.kline(chain, token, "1m", now - minutes * 60, now)
+        except GmgnError:
+            return 0.0, 0.0
+        hi = max((f(r.get("high")) or f(r.get("close")) for r in rows), default=0.0)
+        ago, best = 0.0, None
+        target = now - ago_min * 60
+        for r in rows:
+            t = f(r.get("time"))
+            t = t / 1000 if t > 1e12 else t
+            if t <= target and (best is None or t > best):
+                best, ago = t, f(r.get("close"))
+        return hi, ago
+
     async def recent_high(self, chain: str, token: str, minutes: int = 120) -> float:
         """最近 N 分钟的最高价（1 分钟 K 线），取不到返回 0。"""
         if not self.use_gmgn:
