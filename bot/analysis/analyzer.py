@@ -144,11 +144,15 @@ class Analyzer:
                     self._cache.pop(k, None)
 
     async def smart_buyers(self, chain: str, token: str, hours: float = 24) -> list[str]:
+        """24 小时内买过、而且现在还拿着的聪明钱（最后一笔是卖出的不算——已经跑了的钱包不能当买入理由）。"""
         rows = await self.app.db.fetchall(
-            "SELECT DISTINCT s.wallet FROM signals s JOIN wallets w ON w.chain=s.chain AND w.address=s.wallet "
-            "WHERE s.chain=? AND s.token=? AND s.side='buy' AND s.ts>=? AND w.status IN ('active','manual')",
+            "SELECT s.wallet, s.side FROM signals s JOIN wallets w ON w.chain=s.chain AND w.address=s.wallet "
+            "WHERE s.chain=? AND s.token=? AND s.ts>=? AND w.status IN ('active','manual') ORDER BY s.ts",
             (chain, token, time.time() - hours * 3600))
-        return [r["wallet"] for r in rows]
+        last: dict[str, str] = {}
+        for r in rows:
+            last[r["wallet"]] = r["side"]
+        return [w for w, side in last.items() if side == "buy"]
 
     # ================================================================== 主流程
     async def _analyze(self, chain: str, token: str, source: str) -> dict | None:

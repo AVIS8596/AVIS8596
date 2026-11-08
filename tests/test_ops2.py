@@ -320,3 +320,25 @@ def test_outage_does_not_zero_positions(tmp_path):
         finally:
             await db_holder[0].close()
     asyncio.run(main())
+
+
+def test_smart_buyers_excludes_exited(tmp_path):
+    from bot.analysis.analyzer import Analyzer
+
+    async def go():
+        db = DB(tmp_path / "sb.db")
+        await db.open()
+        try:
+            now = time.time()
+            for w in ("A", "B", "C"):
+                await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana',?,'active')", (w,))
+            for w, side, dt in (("A", "buy", 100), ("A", "sell", 70), ("B", "buy", 90), ("C", "buy", 80),
+                                ("C", "sell", 60), ("C", "buy", 50)):
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (now - dt, "solana", w, "T", side, f"{w}{dt}"))
+            an = Analyzer.__new__(Analyzer)
+            an.app = SimpleNamespace(db=db)
+            assert sorted(await an.smart_buyers("solana", "T")) == ["B", "C"]     # A 已经卖了，不算
+        finally:
+            await db.close()
+    asyncio.run(go())
