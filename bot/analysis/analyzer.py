@@ -315,7 +315,19 @@ class Analyzer:
                         similar_tol=float(self.cfg.get("discovery.similar_amount_cv", 0.15)))
         self._apply(res, facts, gsec)
         facts.age_hours = (time.time() - launch_ts) / 3600 if launch_ts else 0
-        return self._extra(res, creator, launch_ts)
+        ex = self._extra(res, creator, launch_ts)
+        # 已知"阴谋地址"/早期发现者现在的持仓（来自大涨币挖矿）：先只记录，让结果档案告诉我们它们在场时是涨是跌
+        if g_hold and supply:
+            ks = list(g_hold)
+            marks = ",".join("?" * len(ks))
+            rows = await self.app.db.fetchall(
+                f"SELECT address, kind FROM wallets WHERE chain='solana' AND status IN ('active','manual') "
+                f"AND kind IN ('insider','early','winner') AND address IN ({marks})", ks)
+            for kind, key in (("insider", "cabal_pct"), ("early", "early_finder_pct"), ("winner", "winner_pct")):
+                ws = [r["address"] for r in rows if r["kind"] == kind]
+                ex[key] = round(sum(g_hold.get(w, 0) for w in ws) / supply * 100, 2)
+                ex[key.replace("_pct", "_n")] = len(ws)
+        return ex
 
     async def _sol_holdings(self, mint: str, wallets: list[str]) -> dict[str, int]:
         rpc = self.app.sol
@@ -591,6 +603,8 @@ class Analyzer:
                                              "age_hours", "buys_1h", "sells_1h", "top10_pct", "bundle_held_pct",
                                              "insider_held_pct", "dev_held_pct")}
             feats["smart"] = len(rep.get("smart_buyers") or [])
+            for k in ("cabal_pct", "early_finder_pct", "winner_pct"):
+                feats[k] = rep.get(k, 0)
             feats["risks"] = len(rep.get("risks") or [])
             await db.execute(
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",

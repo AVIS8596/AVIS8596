@@ -77,6 +77,9 @@ async def run_bot(cfg) -> None:
         from bot.learn import Learner
         app.learner = Learner(app)
         jobs.append(("学习高手", app.learner.run))
+        from bot.discovery.expand import WalletExpander
+        app.expander = WalletExpander(app)
+        jobs.append(("扩充钱包池", app.expander.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
     for c in cfg.enabled_chains:

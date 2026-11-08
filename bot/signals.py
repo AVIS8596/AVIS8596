@@ -90,8 +90,18 @@ class SignalHub:
         """单个聪明钱买入就跟，要求这个钱包是"稳的"：不是快进快出，跟单战绩也不差。
         不满足的钱包照样监听，只是要等到 2 个以上聪明钱一起买才跟。"""
         t = self.cfg.get("trading", {}) or {}
+        # 信号质量优先：跟它买的币 1 小时后表现如何（样本 ≥ 8）
+        sn, sr = int(w.get("sig_n") or 0), w.get("sig_ret")
+        if sn >= 8 and sr is not None:
+            hit, dump = float(w.get("sig_hit") or 0), float(w.get("sig_dump") or 0)
+            if sr <= -0.1 and dump > hit:
+                return False, f"跟这个钱包买的 {sn} 个币，1 小时后中位 {sr * 100:+.0f}%，跟不赚"
+            if sr >= 0.05 and hit > dump:
+                return True, ""   # 跟它买确实赚：即使快进快出也允许单独跟（有确认期）
         min_hold = float(t.get("solo_min_hold_sec", 600))
         gm = float(w.get("avg_hold_sec") or 0)
+        if (w.get("kind") or "smart") == "kol":
+            return False, "KOL 单独买不跟（常在粉丝进场后出货），要和其他钱包一起买才跟"
         if gm and gm < min_hold:
             return False, f"这个钱包平均持仓 {gm / 60:.0f} 分钟，快进快出跟不上"
         med, n = await self.wallet_speed(chain, w["address"])

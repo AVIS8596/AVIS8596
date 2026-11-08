@@ -136,6 +136,11 @@ class Telegram:
             f"🕵️ 埋伏持有 {rep['insider_held_pct']}%（{len(rep.get('insider_wallets', []))} 个）"
             f" | 狙击 {rep.get('sniper_held_pct', 0)}% | dev {rep.get('dev_held_pct', 0)}% | 前10 {rep['top10_pct']}%",
         ]
+        marks = [f"{n} {rep.get(k + '_n')} 个持 {rep.get(k + '_pct')}%" for k, n in
+                 (("cabal", "🕵️阴谋地址"), ("early_finder", "🔭早期发现者"), ("winner", "🎯精准钱包"))
+                 if rep.get(k + "_n")]
+        if marks:
+            L.append("｜".join(marks))
         if c != "solana":
             L.append(f"税 买{rep.get('buy_tax', 0):.1f}% 卖{rep.get('sell_tax', 0):.1f}%")
         if rep.get("risks"):
@@ -158,7 +163,9 @@ class Telegram:
         act = "🟢 买入" if s.side == "buy" else "🔴 卖出"
         sym = (rep or {}).get("symbol") or short(s.token)
         amt = f" {s.native_amount:.3f} {CHAINS[c].native_symbol}" if s.native_amount else ""
-        head = (f"🧠 聪明钱{act}{amt} {self.tok_link(c, s.token, sym)}\n"
+        from ..discovery.expand import KIND_NAME
+        kind = KIND_NAME.get(w.get("kind") or "smart", "🧠聪明钱")
+        head = (f"{kind}{act}{amt} {self.tok_link(c, s.token, sym)}\n"
                 f"钱包 {self.addr_link(c, s.wallet)} 评分{w['score']:.0f} 胜率{w['win_rate'] * 100:.0f}% "
                 f"30天{fmt_usd(w['realized_usd'])} | {self.tx_link(c, s.tx)}")
         if rep and s.side == "buy":
@@ -504,10 +511,19 @@ class Telegram:
         chains = [chain] if chain in self.app.cfg.enabled_chains else self.app.cfg.enabled_chains
         lines = []
         for c in chains:
+            from ..discovery.expand import KIND_NAME
+            kinds = await self.app.db.fetchall(
+                "SELECT COALESCE(kind,'smart') k, COUNT(*) n FROM wallets WHERE chain=? AND status IN ('active','manual') "
+                "GROUP BY k", (c,))
+            lines.append(f"<b>{CHAINS[c].name} 监听中</b>：" + "、".join(f"{KIND_NAME.get(r['k'], r['k'])} {r['n']}" for r in kinds))
             rows = await self.app.db.fetchall(
-                "SELECT * FROM wallets WHERE chain=? AND status IN ('active','manual') ORDER BY score DESC LIMIT 15", (c,))
-            lines.append(f"<b>{CHAINS[c].name} 前 {len(rows)} 名</b>")
+                "SELECT * FROM wallets WHERE chain=? AND status IN ('active','manual') "
+                "ORDER BY (sig_n>=8) DESC, COALESCE(sig_ret,-9) DESC, score DESC LIMIT 15", (c,))
+            lines.append("按「跟它买 1 小时后的中位涨跌」排序（样本 ≥ 8 的在前）：")
             for r in rows:
-                lines.append(f"{self.addr_link(c, r['address'])} 分{r['score']:.0f} 胜率{r['win_rate'] * 100:.0f}% "
-                             f"{fmt_usd(r['realized_usd'])} 跟单{r['follow_wins']}胜{r['follow_losses']}负")
+                q = (f" | 跟买{r['sig_n']}次 中位{float(r['sig_ret']) * 100:+.0f}%" if r.get("sig_n") and r.get("sig_ret") is not None
+                     else "")
+                lines.append(f"{KIND_NAME.get(r.get('kind') or 'smart', '')[:2]}{self.addr_link(c, r['address'])} "
+                             f"分{r['score']:.0f} 胜率{(r['win_rate'] or 0) * 100:.0f}% {fmt_usd(r['realized_usd'] or 0)}"
+                             f" 跟单{r['follow_wins']}胜{r['follow_losses']}负{q}")
         return "\n".join(lines) or "暂无"

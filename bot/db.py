@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS token_outcomes (
 CREATE INDEX IF NOT EXISTS idx_outcomes_ts ON token_outcomes(ts);
 CREATE INDEX IF NOT EXISTS idx_outcomes_token ON token_outcomes(chain, token, ts);
 
+-- 挖矿：大涨币的盈利钱包，同一个钱包在多个大涨币里出现 → 精准钱包 / 阴谋地址 / KOL
+CREATE TABLE IF NOT EXISTS wallet_hits (
+  chain TEXT, wallet TEXT, token TEXT, ts REAL, profit REAL, early INTEGER, insider INTEGER, kol INTEGER,
+  PRIMARY KEY (chain, wallet, token)
+);
+
 -- 学习中的顶级交易者及其交易画像
 CREATE TABLE IF NOT EXISTS learn_wallets (
   chain TEXT, address TEXT, label TEXT, source TEXT, added_at REAL, profiled_at REAL, profile TEXT,
@@ -125,8 +131,11 @@ class DB:
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
         cur = await self.conn.execute("PRAGMA table_info(wallets)")
-        if "avg_hold_sec" not in {r[1] for r in await cur.fetchall()}:
-            await self.conn.execute("ALTER TABLE wallets ADD COLUMN avg_hold_sec REAL")
+        wcols = {r[1] for r in await cur.fetchall()}
+        for col, typ in (("avg_hold_sec", "REAL"), ("kind", "TEXT DEFAULT 'smart'"), ("sig_n", "INTEGER DEFAULT 0"),
+                         ("sig_ret", "REAL"), ("sig_hit", "REAL"), ("sig_dump", "REAL")):
+            if col not in wcols:
+                await self.conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         cur = await self.conn.execute("PRAGMA table_info(shadow)")
         if "trail_half" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE shadow ADD COLUMN trail_half INTEGER DEFAULT 0")
@@ -207,7 +216,9 @@ class DB:
             """INSERT INTO wallets(chain,address,status,source,realized_usd,win_rate,trades,score,evaluated_at,created_at,
                  avg_hold_sec) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(chain,address) DO UPDATE SET
-                 status=CASE WHEN wallets.status IN ('manual','blacklist') THEN wallets.status ELSE excluded.status END,
+                 status=CASE WHEN wallets.status IN ('manual','blacklist') THEN wallets.status
+                             WHEN COALESCE(wallets.kind,'smart')!='smart' AND excluded.status='inactive'
+                               THEN wallets.status ELSE excluded.status END,
                  realized_usd=excluded.realized_usd, win_rate=excluded.win_rate, trades=excluded.trades,
                  score=excluded.score, evaluated_at=excluded.evaluated_at, avg_hold_sec=excluded.avg_hold_sec""",
             (chain, address, status, source, realized_usd, win_rate, trades, score, t, t, avg_hold_sec))

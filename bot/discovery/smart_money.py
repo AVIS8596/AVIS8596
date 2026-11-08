@@ -181,7 +181,7 @@ class SmartMoney:
         hours = float(self.cfg.get("smart_money.reevaluate_hours", 24))
         # 到期复查的 + 还没有平均持仓时间数据的（升级后第一次启动会补齐）
         rows = await self.app.db.fetchall(
-            "SELECT chain,address,source,status FROM wallets WHERE status='active' "
+            "SELECT chain,address,source,status FROM wallets WHERE status='active' AND COALESCE(kind,'smart')='smart' "
             "AND (evaluated_at<? OR avg_hold_sec IS NULL) LIMIT 1000", (time.time() - hours * 3600,))
         by_chain: dict[str, dict[str, str]] = {}
         for r in rows:
