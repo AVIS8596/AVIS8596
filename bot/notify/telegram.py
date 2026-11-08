@@ -24,6 +24,7 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/history 代币地址 这个币的时间线：发币后多久被看到、当时涨了几倍、被哪条规则拦过、什么时候买卖
 /learn 学习中的高手列表 + 共同规律 + 参数建议
 /learn 钱包地址 [备注] 学习这个人（生成交易画像）
 /learn auto 立即自动找一轮高手 | /learn del 地址 不再学习
@@ -314,6 +315,13 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd in ("/history", "/timeline"):
+            chain, rest = await self._pick_chain(args)
+            if not rest:
+                await self.send("格式：/history 代币地址（可在地址前加链名）")
+                return
+            from ..trade.history import history
+            await self.send(await history(self.app, chain, norm_addr(chain, rest[0])))
         elif cmd == "/review":
             from ..trade.review import daily_review
             await self.send(await daily_review(self.app, self.app.day_start()))
