@@ -226,6 +226,17 @@ class DataHub:
         items = await self.app.birdeye.history_price(chain, token, t_from, t_to)
         return [(f(dig(i, "unixTime", "unix_time")), f(dig(i, "value", "price"))) for i in items]
 
+    async def recent_high(self, chain: str, token: str, minutes: int = 120) -> float:
+        """最近 N 分钟的最高价（1 分钟 K 线），取不到返回 0。"""
+        if not self.use_gmgn:
+            return 0.0
+        now = int(time.time())
+        try:
+            rows = await self.gm.kline(chain, token, "1m", now - minutes * 60, now)
+        except GmgnError:
+            return 0.0
+        return max((f(r.get("high")) or f(r.get("close")) for r in rows), default=0.0)
+
     def usage_text(self) -> str:
         parts = []
         if self.app.gmgn:

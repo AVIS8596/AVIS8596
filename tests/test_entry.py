@@ -54,7 +54,12 @@ def test_looks_fake_and_cats():
 def _app(db, msgs):
     async def send(t, *a, **k):
         msgs.append(t)
-    return SimpleNamespace(cfg=Cfg(RAW), db=db, tg=SimpleNamespace(send=send), fmt_time=lambda ts: "HH:MM")
+    state = {"high": 0.0}
+
+    async def recent_high(chain, token, minutes=120):
+        return state["high"]
+    return SimpleNamespace(cfg=Cfg(RAW), db=db, tg=SimpleNamespace(send=send), fmt_time=lambda ts: "HH:MM",
+                           data=SimpleNamespace(recent_high=recent_high, price=recent_high), _state=state)
 
 
 def test_entry_filters(tmp_path):
@@ -70,6 +75,13 @@ def test_entry_filters(tmp_path):
         assert "市值虚高" in await tr.check("solana", "T", {**GOOD, "mcap": 50_000_000, "volume_1h": 20_000})
         assert "卖盘" in await tr.check("solana", "T", {**GOOD, "buys_1h": 40, "sells_1h": 100})
         assert "持有人" in await tr.check("solana", "T", {**GOOD, "holders": 30})
+        # 不接飞刀：2 小时内高点 10，现价 1（跌了 90%）
+        app._state["high"] = 10.0
+        assert "不接飞刀" in await tr.check("solana", "T", dict(GOOD))
+        assert await tr.check("solana", "T", dict(GOOD), ["a", "b", "c"]) == ""   # 3 个聪明钱一起买除外
+        app._state["high"] = 1.5                                                    # 只回撤 33%：正常
+        assert await tr.check("solana", "T", dict(GOOD)) == ""
+        app._state["high"] = 0.0
         # 被拦下的信号记录下来，同一个币半小时只记一次；持仓满这类和质量无关的不记
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 30% 超限")
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 31% 超限")

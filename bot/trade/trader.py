@@ -22,7 +22,8 @@ NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日�
 SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
-             ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少")]
+             ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
+             ("从 2 小时内高点", "接飞刀")]
 
 
 def skip_cat(why: str) -> str:
@@ -124,6 +125,14 @@ class Trader:
         db = self.app.db
         if await db.has_open_position(chain, token):
             return "已有持仓"
+        # 不接飞刀：从 2 小时内的高点已经跌掉一大半的币，多半是被砸完的盘（放最后，要多查一次 K 线）
+        dd_max = float(t.get("max_drawdown_pct", 60))
+        if dd_max and n_smart < int(t.get("chase_ok_smart", 3)) and float(rep.get("price") or 0) > 0:
+            hi = await self.app.data.recent_high(chain, token, 120)
+            if hi > 0:
+                dd = (1 - float(rep["price"]) / hi) * 100
+                if dd >= dd_max:
+                    return f"从 2 小时内高点已经跌了 {dd:.0f}%，不接飞刀"
         if len(await db.open_positions()) >= int(t.get("max_open_positions", 10)):
             return "持仓数量已满"
         cd = float(t.get("token_cooldown_min", 120)) * 60
