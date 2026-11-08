@@ -103,6 +103,11 @@ def test_entry_filters(tmp_path):
         await tr.check("solana", "X", rep)
         assert any(x.startswith("❌ 从发币价涨了 12.5 倍") for x in tr.explain(rep))
         del app.gmgn
+        # 团伙盘 / 阴谋地址多
+        assert "团伙盘" in await tr.check("solana", "G1", {**GOOD, "gang_n": 3, "gang_tokens": 5})
+        assert await tr.check("solana", "G2", {**GOOD, "gang_n": 2}) == ""
+        assert "阴谋地址持有 25%" in await tr.check("solana", "G3", {**GOOD, "cabal_pct": 25})
+        assert skip_cat("团伙盘：早期买家里有同一个团伙的 3 个成员") == "团伙盘"
         # 被拦下的信号记录下来，同一个币半小时只记一次；持仓满这类和质量无关的不记
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 30% 超限")
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 31% 超限")

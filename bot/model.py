@@ -39,7 +39,7 @@ CHAIN_IDX = {"solana": 0, "bsc": 1, "ethereum": 2, "base": 3, "robinhood": 4}
 FEATS_A = ["评分", "流动性", "市值", "持有人", "1小时成交", "1小时涨幅", "上线小时", "1小时买单", "1小时卖单", "买卖比",
            "成交/市值", "流动性/市值", "每小时新增持有人", "前10持仓", "捆绑持仓", "埋伏持仓", "dev持仓", "聪明钱个数",
            "阴谋地址持仓", "早期发现者持仓", "精准钱包持仓", "风险项", "链", "来源", "项目方发币数", "项目方已卖光",
-           "LP已销毁"]
+           "LP已销毁", "团伙成员数"]
 FEATS_B = ["持有人", "成交额", "跑路风险", "前10", "捆绑", "老鼠仓", "dev", "刷量", "聪明钱", "KOL", "上线分钟",
            "持有人每分钟增长%", "成交每分钟增长%", "比第一次看到涨了%", "已观察分钟", "每分钟新增持有人", "链"]
 
@@ -68,7 +68,7 @@ def feats_a(ft: dict, chain: str, source: str) -> list[float | None]:
             liq / mcap if mcap else None, hold / max(age, 0.05) if hold else None,
             g("top10_pct"), g("bundle_held_pct"), g("insider_held_pct"), g("dev_held_pct"), g("smart"),
             g("cabal_pct"), g("early_finder_pct"), g("winner_pct"), g("risks"),
-            float(CHAIN_IDX.get(chain, 9)), float(src_cat(source)), g("dev_launches"), g("dev_sold"), g("lp_burned")]
+            float(CHAIN_IDX.get(chain, 9)), float(src_cat(source)), g("dev_launches"), g("dev_sold"), g("lp_burned"), g("gang_n")]
 
 
 def feats_b(s: dict, prev: dict | None, first: dict | None) -> list[float | None]:

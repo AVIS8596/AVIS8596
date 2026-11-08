@@ -180,6 +180,12 @@ class Analyzer:
             "risks": facts.risks, "warnings": facts.warnings, "score": sc, "reasons": reasons,
             "smart_buyers": smart, "analyzed_at": time.time(), **extra,
         }
+        try:      # 早期可疑买家里有没有已知团伙
+            from ..discovery.gangs import hits as gang_hits
+            rep["gang_n"], rep["gang_id"], rep["gang_tokens"] = await gang_hits(self.app, chain, rep)
+        except Exception as e:  # noqa: BLE001
+            log.debug("团伙查询失败: %s", e)
+            rep["gang_n"] = 0
         dev = ov.get("dev") or {}
         rep["dev_launches"] = int(f(dev.get("creator_open_count")))           # 项目方以前发过几个币
         rep["dev_sold"] = int(str(dev.get("creator_token_status") or "").lower() in ("sell", "creator_close"))
@@ -619,6 +625,7 @@ class Analyzer:
             feats["dev_launches"] = rep.get("dev_launches", 0)
             feats["dev_sold"] = rep.get("dev_sold", 0)
             feats["lp_burned"] = int(rep.get("lp_burn") == "burn")
+            feats["gang_n"] = rep.get("gang_n", 0)
             await db.execute(
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
                 (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),

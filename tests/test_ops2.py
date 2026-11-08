@@ -499,3 +499,62 @@ def test_audit_token_roles_and_creator_affinity(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_gangs_find_and_hits(tmp_path):
+    from bot.discovery.gangs import find_gangs, hits, rebuild
+    # A/B/C 一起出现在 T1~T4 的早期买家里；D 只出现 1 次；E/F 一起出现 3 次但只有 2 个人（不成团伙）
+    sets = {"T1": ["A", "B", "C", "D"], "T2": ["A", "B", "C", "E", "F"], "T3": ["A", "B", "C", "E", "F"],
+            "T4": ["A", "B", "C", "E", "F"], "T5": ["X"]}
+    g = find_gangs(sets)
+    assert set(g) == {"A", "B", "C", "E", "F"} or set(g) == {"A", "B", "C"}
+    assert g["A"][1] >= 3 and g["A"][2] >= 3 and "D" not in g
+
+    async def go():
+        db = DB(tmp_path / "g.db")
+        await db.open()
+        try:
+            now = time.time()
+            for tok, addrs in sets.items():
+                for a in addrs:
+                    await db.execute("INSERT INTO address_tags(chain,address,tag,token,detail,created_at) "
+                                     "VALUES('solana',?,'bundle',?,'',?)", (a, tok, now))
+            app = SimpleNamespace(db=db)
+            assert await rebuild(app) >= 1
+            rep = {"bundle_wallets": [{"wallet": "A"}, {"wallet": "B"}], "sniper_wallets": [{"wallet": "C"}]}
+            n, gid, toks = await hits(app, "solana", rep)
+            assert n == 3 and gid > 0 and toks >= 4
+            assert (await hits(app, "solana", {"bundle_wallets": [{"wallet": "Z"}]}))[0] == 0
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_skip_shadow_sim(tmp_path, monkeypatch):
+    from bot.trade import skipsim
+    from tests.test_replay import _candles
+
+    async def fake_candles(app, chain, token, t0):
+        pxs = [1, 0.9, 0.7, 0.6, 0.5, 0.5, 0.5, 0.5] if token == "DUMP" else [1, 1.5, 2.2, 3.0, 3.0, 2.0, 1.5, 1.4]
+        return [dict(c, time=(t0 + i * 300) * 1000) for i, c in enumerate(_candles(pxs))]
+    monkeypatch.setattr(skipsim, "candles", fake_candles)
+
+    async def go():
+        db = DB(tmp_path / "s.db")
+        await db.open()
+        try:
+            now = time.time()
+            for tok, cat in (("DUMP", "团伙盘"), ("PUMP", "团伙盘"), ("DUMP", "团伙盘")):
+                await db.execute("INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) VALUES(?,?,?,?,?,?,?,?)",
+                                 (now - 5 * 3600, "solana", tok, tok, "跟单", cat, "x", 1.0))
+            exit_cfg = {"stop_loss_pct": -35, "take_profit": [{"gain_pct": 100, "sell_pct": 50}], "max_hold_hours": 24,
+                        "trailing_start_pct": 10000, "follow_smart_sell": False}
+            app = SimpleNamespace(db=db, cfg=Cfg({"exit": exit_cfg}))
+            assert await skipsim.run_batch(app) == 3
+            rows = {r["token"]: r["sim_ret"] for r in await db.fetchall("SELECT token, sim_ret FROM skipped")}
+            assert rows["DUMP"] < -0.3 and rows["PUMP"] > 0.3
+            s = await skipsim.summary(app, now - 86400)
+            assert s["团伙盘"][0] == 3
+        finally:
+            await db.close()
+    asyncio.run(go())

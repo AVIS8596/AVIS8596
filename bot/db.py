@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS manual_costs (tx TEXT PRIMARY KEY, ts REAL, chain TEX
 CREATE TABLE IF NOT EXISTS bad_actors (chain TEXT, kind TEXT, key TEXT, ts REAL, token TEXT, reason TEXT,
   PRIMARY KEY (chain, kind, key));
 
+-- 阴谋团伙：总是一起出现在同一批币早期可疑买家里的钱包
+CREATE TABLE IF NOT EXISTS gangs (chain TEXT, address TEXT, gang_id INTEGER, size INTEGER, tokens INTEGER, updated_at REAL,
+  PRIMARY KEY (chain, address));
+
 -- 自己的选币模型选中的币（影子模式只记录；acted=1 表示真的下单了）
 CREATE TABLE IF NOT EXISTS model_picks (ts REAL, chain TEXT, token TEXT, symbol TEXT, model TEXT, score REAL,
   price REAL, acted INTEGER DEFAULT 0, p60 REAL, p240 REAL);
@@ -171,6 +175,9 @@ class DB:
         cur = await self.conn.execute("PRAGMA table_info(shadow)")
         if "trail_half" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE shadow ADD COLUMN trail_half INTEGER DEFAULT 0")
+        cur = await self.conn.execute("PRAGMA table_info(skipped)")
+        if "sim_ret" not in {r[1] for r in await cur.fetchall()}:
+            await self.conn.execute("ALTER TABLE skipped ADD COLUMN sim_ret REAL")    # 影子单：按真实卖出规则模拟的收益
         cur = await self.conn.execute("PRAGMA table_info(trades)")
         if "quote_price" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE trades ADD COLUMN quote_price REAL")    # 下单那一刻的报价

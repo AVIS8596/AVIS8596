@@ -167,7 +167,9 @@ async def skipped_review(app: "App", start: float) -> str:
     g: dict[str, list[float]] = {}
     for r in rows:
         g.setdefault(r["cat"], []).append((float(r["px_1h"]) / float(r["price"]) - 1) * 100)
-    lines = ["<b>被过滤的信号</b>（1 小时后涨跌。平均会被个别暴涨币拉高，主要看中位：中位为负说明拦得对）"]
+    from .skipsim import summary as sim_summary
+    sims = await sim_summary(app, start - 3600)
+    lines = ["<b>被过滤的信号</b>（1 小时后涨跌；影子单 = 按真实卖出规则完整模拟，为负说明拦得对）"]
     for cat, ch in sorted(g.items(), key=lambda kv: -len(kv[1])):
         up = sum(1 for c in ch if c >= 30)
         down = sum(1 for c in ch if c <= -30)
@@ -175,8 +177,11 @@ async def skipped_review(app: "App", start: float) -> str:
         med = srt[len(srt) // 2]
         # 如果买了：止损 -35% 封底、扣 4% 成本的近似平均
         est = sum(max(c, -35.0) for c in ch) / len(ch) - 4
+        sim = sims.get(cat)
+        tail = (f"，影子单 {sim[0]} 笔每笔 {sim[1] * 100:+.0f}%（中位 {sim[2] * 100:+.0f}%）" if sim
+                else f"，假如都买了约 {est:+.0f}%/笔")
         lines.append(f"  {cat}：{len(ch)} 个，中位 {med:+.0f}%，平均 {sum(ch) / len(ch):+.0f}%（大涨 {up} 个 / 大跌 {down} 个）"
-                     f"，假如都买了约 {est:+.0f}%/笔")
+                     + tail)
     return "\n".join(lines)
 
 

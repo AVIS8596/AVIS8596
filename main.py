@@ -136,6 +136,11 @@ async def run_bot(cfg) -> None:
     if app.gmgn:
         from bot.discovery.audit import Auditor
         jobs.append(("钱包体检", Auditor(app).run))
+    if app.gmgn:
+        from bot.discovery.gangs import GangWatch
+        from bot.trade.skipsim import SkipSim
+        jobs.append(("阴谋团伙识别", GangWatch(app).run))
+        jobs.append(("影子单", SkipSim(app).run))
     from bot.safety import Safety
     app.safety = Safety(app)
     jobs.append(("安全与成本校准", app.safety.run))
