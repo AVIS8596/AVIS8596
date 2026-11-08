@@ -1,0 +1,174 @@
+"""回放回测：用机器人真实买过的单子（同样的入场时间和价格），拉之后 24 小时的 5 分钟 K 线，
+按不同的卖出规则重新模拟一遍，几分钟就知道"如果当初用这套规则会赚多少"。
+
+- 每根 K 线拆成 4 个价格点（阳线 开→低→高→收，阴线 开→高→低→收，对止损偏保守），逐点套用和实盘一样的 decide_exit
+- 跟卖聪明钱：用信号表里带单钱包的卖出时间还原（过半数卖出那一刻跟卖）
+- 每次卖出扣估算成本（默认 2%），买入成本已经包含在真实入场价里
+- K 线缓存在数据库里，同一笔重复回测不再花接口额度
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import TYPE_CHECKING
+
+from ..utils import f, fmt_usd
+from .positions import decide_exit, exit_rules, learned_rules
+
+if TYPE_CHECKING:
+    from ..app import App
+
+
+def variants(exit_cfg: dict) -> dict[str, tuple[dict | None, bool]]:
+    """名称 → (覆盖的卖出规则，None 表示按档位的当前规则；是否跟卖聪明钱)"""
+    return {
+        "当前规则": (None, True),
+        "当前规则·不跟卖": (None, False),
+        "高手规则": (learned_rules(exit_cfg), False),
+        "止损 -25%": ({"stop_loss_pct": -25}, True),
+        "早止盈（+50% 卖 30%）": ({"take_profit": [{"gain_pct": 50, "sell_pct": 30}, {"gain_pct": 100, "sell_pct": 50},
+                                                {"gain_pct": 300, "sell_pct": 50}]}, True),
+        "观察期 1 小时": ({"stall_hours": 1, "stall_min_gain_pct": 15}, True),
+        "移动止损放宽 +15%": ({"_trail_add": 15}, True),
+        "只用止损和止盈（拿满）": ({"stall_hours": 0, "trailing_start_pct": 10000, "max_hold_hours": 24}, False),
+    }
+
+
+def to_path(candles: list[dict]) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    for c in sorted(candles, key=lambda c: f(c.get("time"))):
+        t = f(c.get("time"))
+        t = t / 1000 if t > 1e12 else t
+        o, h, lo, cl = f(c.get("open")), f(c.get("high")), f(c.get("low")), f(c.get("close"))
+        if cl <= 0:
+            continue
+        seq = (o, lo, h, cl) if cl >= o else (o, h, lo, cl)
+        for i, px in enumerate(seq):
+            if px > 0:
+                pts.append((t + i * 60, px))
+    return pts
+
+
+def simulate(entry: float, t0: float, path: list[tuple[float, float]], rules: dict, follow_t: float | None,
+             follow_pct: float, cost: float) -> float:
+    """返回收益倍数（1.0 = 不赚不亏）。"""
+    pos = {"entry_price": entry, "high_price": entry, "tp_stage": 0, "opened_at": t0, "tier": None, "trail_half": 0}
+    frac, realized = 1.0, 0.0
+    add = float(rules.pop("_trail_add", 0)) if "_trail_add" in rules else 0.0
+    if add:
+        rules["trailing_drop_pct"] = float(rules.get("trailing_drop_pct", 30)) + add
+    followed = False
+    last = entry
+    for t, px in path:
+        if t < t0:
+            continue
+        last = px
+        pos["high_price"] = max(pos["high_price"], px)
+        pct, why = 0.0, ""
+        if follow_t and not followed and t >= follow_t:
+            followed, pct, why = True, follow_pct, "跟卖"
+        if not pct:
+            pct, why = decide_exit(pos, px, rules, t, None)
+        if pct > 0:
+            sell = frac if pct >= 100 or frac * (1 - pct / 100) < 0.02 else frac * pct / 100
+            realized += sell * px / entry * (1 - cost)
+            frac -= sell
+            if why.startswith("止盈"):
+                pos["tp_stage"] += 1
+            if why.startswith("移动止损先卖一半"):
+                pos["trail_half"], pos["high_price"] = 1, px
+            if frac <= 0.001:
+                return realized
+        if t - t0 > 24 * 3600:
+            break
+    return realized + frac * last / entry * (1 - cost)
+
+
+def follow_time(rows: list[dict], sources: list[str], since: float) -> float | None:
+    """过半数带单钱包（单个钱包时就是它）卖出的时刻。"""
+    if not sources:
+        return None
+    last: dict[str, str] = {}
+    for r in sorted(rows, key=lambda r: r["ts"]):
+        if r["wallet"] in sources and r["ts"] >= since - 3600:
+            last[r["wallet"]] = r["side"]
+            sold = sum(1 for w in sources if last.get(w) == "sell")
+            if r["side"] == "sell" and r["ts"] >= since and (len(sources) == 1 or sold * 2 > len(sources)):
+                return float(r["ts"])
+    return None
+
+
+async def candles(app: "App", chain: str, token: str, t0: float) -> list[dict]:
+    db = app.db
+    row = await db.fetchone("SELECT data FROM kline_cache WHERE chain=? AND token=? AND t0=?", (chain, token, int(t0)))
+    if row:
+        return json.loads(row["data"])
+    t1 = min(t0 + 24 * 3600, time.time())
+    rows = await app.gmgn.kline(chain, token, "5m", int(t0) - 300, int(t1))
+    if t1 - t0 >= 4 * 3600:   # 至少 4 小时的完整数据才缓存
+        await db.execute("INSERT OR REPLACE INTO kline_cache(chain,token,t0,data) VALUES(?,?,?,?)",
+                         (chain, token, int(t0), json.dumps(rows)))
+    return rows
+
+
+async def run(app: "App", days: float = 3) -> str:
+    db = app.db
+    now = time.time()
+    pos = await db.fetchall(
+        "SELECT * FROM positions WHERE status='closed' AND opened_at>? AND opened_at<? AND entry_price>0 "
+        "ORDER BY opened_at DESC LIMIT 150", (now - days * 86400, now - 4 * 3600))
+    if len(pos) < 5:
+        return f"最近 {days:g} 天开仓满 4 小时的已平仓单子只有 {len(pos)} 笔，至少 5 笔才能回测"
+    exit_cfg = app.cfg.get("exit", {}) or {}
+    cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
+    vs = variants(exit_cfg)
+    res: dict[str, list[tuple[float, float]]] = {k: [] for k in vs}
+    actual: list[tuple[float, float]] = []
+    used = 0
+    for p in pos:
+        try:
+            path = to_path(await candles(app, p["chain"], p["token"], float(p["opened_at"])))
+        except Exception:  # noqa: BLE001
+            continue
+        if len(path) < 8:
+            continue
+        used += 1
+        sources = json.loads(p["source_wallets"] or "[]")
+        sig = await db.fetchall("SELECT wallet, side, ts FROM signals WHERE chain=? AND token=? AND ts>=?",
+                                (p["chain"], p["token"], float(p["opened_at"]) - 3600))
+        ft = follow_time([dict(r) for r in sig], sources, float(p["opened_at"]))
+        tier_rules = exit_rules(exit_cfg, p.get("tier"))
+        fpct = float(tier_rules.get("follow_smart_sell_pct", 100))
+        cost_usd = float(p["cost_usd"] or 0)
+        actual.append((float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0, cost_usd))
+        for name, (override, follow) in vs.items():
+            rules = dict(override) if override and "take_profit" in override and "stop_loss_pct" in override \
+                else {**tier_rules, **(override or {})}
+            m = simulate(float(p["entry_price"]), float(p["opened_at"]), path, rules, ft if follow else None, fpct, cost)
+            res[name].append((m, cost_usd))
+
+    def summ(xs: list[tuple[float, float]]) -> tuple[float, float, float]:
+        exp = sum(m - 1 for m, _ in xs) / len(xs)
+        win = sum(1 for m, _ in xs if m > 1) / len(xs)
+        usd = sum(c * (m - 1) for m, c in xs)
+        return exp, win, usd
+
+    if not used:
+        return "取不到这些单子的 K 线，稍后再试"
+    a_exp, a_win, a_usd = summ(actual)
+    lines = [f"<b>回放回测</b>（最近 {days:g} 天 {used} 笔真实入场，每次卖出扣 {cost * 100:.0f}% 成本）",
+             f"实际结果：每笔期望 {a_exp * 100:+.1f}%，胜率 {a_win * 100:.0f}%，合计 {fmt_usd(a_usd)}", ""]
+    ranked = sorted(((summ(v), k) for k, v in res.items() if v), key=lambda x: -x[0][0])
+    for (exp, win, usd), name in ranked:
+        lines.append(f"{'🏆 ' if name == ranked[0][1] else ''}{name}：每笔期望 {exp * 100:+.1f}%，胜率 {win * 100:.0f}%，"
+                     f"合计 {fmt_usd(usd)}")
+    best = ranked[0]
+    cur = next(x for x in ranked if x[1] == "当前规则")
+    lines.append("")
+    if best[1] != "当前规则" and best[0][0] - cur[0][0] > 0.02:
+        lines.append(f"「{best[1]}」比当前规则每笔多 {(best[0][0] - cur[0][0]) * 100:.1f}%。样本 {used} 笔"
+                     + ("，还偏少，建议再积累一些再改" if used < 50 else "，可以考虑换成正式规则"))
+    else:
+        lines.append("当前规则已经是最好或差不多，暂时不用改")
+    lines.append("（回测用 5 分钟 K 线近似，真实成交会有偏差；看的是相对好坏）")
+    return "\n".join(lines)

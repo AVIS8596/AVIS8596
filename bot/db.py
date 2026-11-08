@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS positions (
   realized_usd REAL DEFAULT 0, opened_at REAL, closed_at REAL, close_reason TEXT,
   tier TEXT,           -- best / good / normal；空 = 分档上线前的老持仓
   entry_snap TEXT, prev_snap TEXT, health INTEGER, health_note TEXT, health_streak INTEGER DEFAULT 0,
-  health_emergency TEXT, health_reduced INTEGER DEFAULT 0, health_at REAL DEFAULT 0, trail_half INTEGER DEFAULT 0
+  health_emergency TEXT, health_reduced INTEGER DEFAULT 0, health_at REAL DEFAULT 0, trail_half INTEGER DEFAULT 0,
+  post_max REAL         -- 平仓后 4 小时内最高价 / 平均卖出价（看有没有卖飞）
 );
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
 
@@ -103,6 +104,9 @@ CREATE TABLE IF NOT EXISTS wallet_hits (
   PRIMARY KEY (chain, wallet, token)
 );
 
+-- 回放回测用的 K 线缓存（入场后 24 小时的 5 分钟 K 线）
+CREATE TABLE IF NOT EXISTS kline_cache (chain TEXT, token TEXT, t0 INTEGER, data TEXT, PRIMARY KEY (chain, token, t0));
+
 -- 学习中的顶级交易者及其交易画像
 CREATE TABLE IF NOT EXISTS learn_wallets (
   chain TEXT, address TEXT, label TEXT, source TEXT, added_at REAL, profiled_at REAL, profile TEXT,
@@ -116,6 +120,7 @@ POSITION_COLUMNS = [
     ("tier", "TEXT"), ("entry_snap", "TEXT"), ("prev_snap", "TEXT"), ("health", "INTEGER"),
     ("health_note", "TEXT"), ("health_streak", "INTEGER DEFAULT 0"), ("health_emergency", "TEXT"),
     ("health_reduced", "INTEGER DEFAULT 0"), ("health_at", "REAL DEFAULT 0"), ("trail_half", "INTEGER DEFAULT 0"),
+    ("post_max", "REAL"),
 ]
 
 

@@ -34,6 +34,7 @@ HELP = """<b>命令列表</b>
 /review 立即看今日复盘
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
 /alerts off | on 关闭 / 打开聪明钱和新币提醒（交易、风控、复盘照常推送）
+/backtest [天数] 回放回测：用真实入场按 8 套卖出规则重新模拟，看哪套最赚（默认最近 3 天）
 /size 查看每笔买入金额（一般 / 较好 / 优质 三档）
 /size 0.05 0.1 0.2 修改 Solana 三档金额（单位 SOL）
 /size bsc 0.01 0.02 0.04 修改其他链
@@ -289,6 +290,11 @@ class Telegram:
             await self.send(await why_text(self.app, int(args[0])))
         elif cmd == "/learn":
             await self._learn(args)
+        elif cmd == "/backtest":
+            from ..trade.replay import run as replay
+            days = float(args[0]) if args and args[0].replace(".", "").isdigit() else 3
+            await self.send(f"回测中：拉最近 {days:g} 天每笔入场后的 K 线并模拟 8 套卖出规则，大约 1~3 分钟……")
+            await self.send(await replay(self.app, days))
         elif cmd == "/alerts":
             if args and args[0].lower() in ("off", "on"):
                 self.muted = args[0].lower() == "off"
@@ -498,6 +504,8 @@ class Telegram:
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
         r = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>?", (time.time() - 3600,))
         lines.append(f"近1小时信号 {r['n']} 条")
+        from ..trade.regime import regime, text as rg_text
+        lines.append(rg_text(await regime(self.app)))
         sk = await db.fetchone("SELECT COUNT(*) n FROM skipped WHERE ts>?", (time.time() - 3600,))
         lines.append(f"近1小时被风控拦下 {sk['n']} 个币")
         strat = getattr(self.app, "strategies", None)

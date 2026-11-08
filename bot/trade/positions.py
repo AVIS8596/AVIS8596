@@ -188,6 +188,7 @@ class PositionManager:
                     last_fill = time.time()
                     await self.fill_skipped()
                     await self.fill_outcomes()
+                    await self.fill_post_max()
             except Exception as e:  # noqa: BLE001
                 log.exception("持仓检查失败: %s", e)
             await asyncio.sleep(interval)
@@ -559,6 +560,24 @@ class PositionManager:
             px = await self.app.data.prices(chain, list({r["token"] for r in lst}))
             for r in lst:
                 await db.execute("UPDATE skipped SET px_1h=? WHERE id=?", (px.get(r["token"]) or -1, r["id"]))
+
+    async def fill_post_max(self) -> None:
+        """平仓满 4 小时的持仓：查平仓后 4 小时内的最高价，和平均卖出价比，看有没有卖飞。"""
+        db = self.app.db
+        now = time.time()
+        rows = await db.fetchall(
+            "SELECT id, chain, token, closed_at, realized_usd, amount_raw, decimals FROM positions "
+            "WHERE status='closed' AND post_max IS NULL AND closed_at<? AND closed_at>? LIMIT 10",
+            (now - 4 * 3600, now - 3 * 86400))
+        for r in rows:
+            ui = int(r["amount_raw"] or 0) / 10 ** int(r["decimals"] or 0)
+            exit_px = float(r["realized_usd"] or 0) / ui if ui > 0 else 0
+            val = -1.0
+            if exit_px > 0:
+                hi = await self.app.data.recent_high_between(r["chain"], r["token"], float(r["closed_at"]),
+                                                             float(r["closed_at"]) + 4 * 3600)
+                val = hi / exit_px if hi > 0 else -1.0
+            await db.execute("UPDATE positions SET post_max=? WHERE id=?", (val, r["id"]))
 
     async def fill_outcomes(self) -> None:
         """结果档案：满 15 分钟 / 1 小时 / 4 小时后回看价格（取不到记 -1，学习时跳过）。"""

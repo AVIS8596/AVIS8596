@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 import time
 from typing import TYPE_CHECKING
 
@@ -33,15 +34,53 @@ def _pnl(p: dict) -> float:
     return float(p["realized_usd"] or 0) - float(p["cost_usd"] or 0)
 
 
+def _ret(p: dict) -> float:
+    c = float(p["cost_usd"] or 0)
+    return _pnl(p) / c if c > 0 else 0.0
+
+
+def expectancy(rows: list[dict]) -> dict:
+    """每笔期望（按成本的百分比）、平均盈利/亏损、盈亏比、利润因子。"""
+    rs = [_ret(p) for p in rows]
+    wins = [r for r in rs if r > 0]
+    losses = [r for r in rs if r <= 0]
+    aw = sum(wins) / len(wins) if wins else 0.0
+    al = sum(losses) / len(losses) if losses else 0.0
+    pw, pl = sum(_pnl(p) for p in rows if _pnl(p) > 0), -sum(_pnl(p) for p in rows if _pnl(p) <= 0)
+    return {"n": len(rs), "exp": sum(rs) / len(rs) if rs else 0.0, "win": len(wins) / len(rs) if rs else 0.0,
+            "aw": aw, "al": al, "payoff": aw / -al if al < 0 else 0.0, "pf": pw / pl if pl > 0 else 0.0}
+
+
 def _group(rows: list[dict], key) -> list[str]:
     g: dict[str, list[dict]] = {}
     for p in rows:
         g.setdefault(key(p), []).append(p)
     out = []
     for k, lst in sorted(g.items(), key=lambda kv: -sum(_pnl(p) for p in kv[1])):
-        wins = sum(1 for p in lst if _pnl(p) > 0)
-        out.append(f"  {k}：{len(lst)} 笔，胜率 {wins / len(lst) * 100:.0f}%，{fmt_usd(sum(_pnl(p) for p in lst))}")
+        ex = expectancy(lst)
+        out.append(f"  {k}：{len(lst)} 笔，胜率 {ex['win'] * 100:.0f}%，{fmt_usd(sum(_pnl(p) for p in lst))}，"
+                   f"每笔期望 {ex['exp'] * 100:+.1f}%")
     return out
+
+
+def payoff_lines(closed: list[dict]) -> list[str]:
+    """期望值 + 大赢家 + 卖飞：判断规则是不是在砍掉大赢家。"""
+    ex = expectancy(closed)
+    lines = ["<b>期望值</b>（meme 币看这个，不看胜率）",
+             f"每笔期望 <b>{ex['exp'] * 100:+.1f}%</b> = 胜率 {ex['win'] * 100:.0f}% × 平均赚 {ex['aw'] * 100:+.0f}%"
+             f" + 败率 {(1 - ex['win']) * 100:.0f}% × 平均亏 {ex['al'] * 100:+.0f}%（已含成本）",
+             f"盈亏比 {ex['payoff']:.2f}，利润因子 {ex['pf']:.2f}（> 1 才赚钱）"]
+    prof = sorted((_pnl(p) for p in closed if _pnl(p) > 0), reverse=True)
+    if prof:
+        lines.append(f"大赢家：最赚的 3 笔占全部盈利的 {sum(prof[:3]) / sum(prof) * 100:.0f}%，"
+                     f"最大一笔 {max(_ret(p) for p in closed) * 100:+.0f}%")
+    flown = [p for p in closed if float(p.get("post_max") or 0) >= 2]
+    known = [p for p in closed if p.get("post_max") is not None and float(p["post_max"]) > 0]
+    if known:
+        by = Counter(reason_cat(p.get("close_reason")) for p in flown)
+        lines.append(f"卖飞：平仓后 4 小时内又涨到卖出价 2 倍以上的 {len(flown)}/{len(known)} 笔"
+                     + ("（" + "、".join(f"{k} {v}" for k, v in by.most_common()) + "）" if by else ""))
+    return lines
 
 
 async def daily_review(app: "App", start: float) -> str:
@@ -59,6 +98,7 @@ async def daily_review(app: "App", start: float) -> str:
         wins = sum(1 for p in closed if _pnl(p) > 0)
         lines.append(f"平仓 {len(closed)} 笔：赚 {wins} 笔、亏 {len(closed) - wins} 笔，"
                      f"胜率 {wins / len(closed) * 100:.0f}%，已实现 <b>{fmt_usd(pnl)}</b>")
+        lines += payoff_lines(closed)
         lines.append("<b>按买入来源</b>")
         lines += _group(closed, lambda p: re.split(r"[（(|]", p.get("reason") or "其他")[0].strip() or "其他")
         lines.append("<b>按档位</b>")
@@ -70,6 +110,8 @@ async def daily_review(app: "App", start: float) -> str:
     sk = await skipped_review(app, start)
     if sk:
         lines.append(sk)
+    from .regime import regime, text as rg_text
+    lines.append(rg_text(await regime(app)))
     n_open = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE status='open'")
     lines.append(f"当前持仓 {n_open['n']} 个")
     mode = await app.positions.mode()

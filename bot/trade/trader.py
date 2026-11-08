@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.trader")
 TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
 # 这些拒绝原因和标的好坏无关（开关、持仓满、冷却……），不记入"被过滤的信号"统计
-NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期")
+NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期",
+               "市场冷")
 SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
@@ -93,6 +94,10 @@ class Trader:
         p = await self.is_paused()
         if p:
             return p
+        from .regime import regime
+        rg = await regime(self.app)
+        if rg.get("pause"):
+            return "市场冷，暂停买入（最近买入 1 小时后大多在跌）"
         if rep.get("risks"):
             return "致命风险：" + "；".join(rep["risks"])
         if rep["liquidity"] < float(t.get("min_liquidity_usd", 8000)):
@@ -247,6 +252,11 @@ class Trader:
         if amount <= 0:
             return
         reason = f"{reason} | {TIER_NAME[tier]}"
+        from .regime import regime
+        rg = await regime(self.app)
+        if rg.get("mult", 1) != 1:
+            amount = round(amount * rg["mult"], 4)
+            reason += f" | 市场{ {'cold': '冷', 'hot': '热'}.get(rg['state'], '一般') }，仓位 ×{rg['mult']:g}"
         ex = self.exec[chain]
         # 单笔不超过池子流动性的 3%：池子太小时自动减少买入量（大额模拟盘、以后加大实盘金额时有用）
         liq_pct = float(self.cfg.get("trading.max_liquidity_pct", 3))
