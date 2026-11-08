@@ -225,8 +225,8 @@ def test_owner_report(tmp_path):
             await db.close()
             raise
         assert "你在 solana" in txt and "已清仓 2 个币" in txt
-        assert "WIN 你赚 +180%（机器人新币评分不够" in txt
-        assert "机器人没看到 ×1" in txt
+        assert "WIN 你赚 +180%（机器人：新币评分不够" in txt
+        assert "完全没出现在机器人的数据源里 ×1" in txt
         n = await db.fetchone("SELECT COUNT(*) n FROM manual_costs")
         assert n["n"] == 4                                   # 只记你手动的 4 笔，机器人那笔排除
         buy = await db.fetchone("SELECT cost FROM manual_costs WHERE tx='m1'")

@@ -112,28 +112,41 @@ async def record_costs(app: "App", chain: str, acts: list[dict], limit: int = 60
     return n
 
 
-async def coverage(app: "App", chain: str, positions: list[dict]) -> tuple[Counter, list[str]]:
-    """你买过的币，机器人当时看没看到、买没买、没买的卡在哪。"""
+async def coverage(app: "App", chain: str, positions: list[dict], first_buy: dict[str, float]) -> tuple[Counter, list[str]]:
+    """你买过的币，机器人当时看没看到、买没买、没买的卡在哪。
+    "看到"分三层：完整分析过（结果档案）> 在快毕业列表里出现过（早期快照）> 监听的钱包交易过（信号）。"""
     from .brain import block_reason
     db = app.db
+    since = await db.fetchone("SELECT MIN(ts) t FROM token_outcomes WHERE chain=?", (chain,))
+    t_start = f(since["t"]) if since and since["t"] else time.time()
     why: Counter = Counter()
     eg: list[str] = []
     for p in positions:
         tok = p["token"]
+        tb = first_buy.get(tok, 0)
+        if tb and tb < t_start:
+            why["那时机器人还没在这条链上跑"] += 1
+            continue
         bought = await db.fetchone("SELECT 1 FROM positions WHERE chain=? AND token=?", (chain, tok))
         if bought:
             why["机器人也买了"] += 1
             continue
         o = await db.fetchone("SELECT ts, features FROM token_outcomes WHERE chain=? AND token=? ORDER BY ts LIMIT 1",
                               (chain, tok))
-        if not o:
-            why["机器人没看到"] += 1
-            r = "没看到"
-        else:
+        if o:
             r = await block_reason(app, chain, tok, f(o["ts"]), json.loads(o["features"] or "{}"))
-            why["看到了但" + r] += 1
+            why["分析过但" + r] += 1
+        elif await db.fetchone("SELECT 1 FROM early_obs WHERE chain=? AND token=? LIMIT 1", (chain, tok)):
+            r = "在快毕业列表里见过，但没触发早期建仓、也没做完整分析"
+            why[r] += 1
+        elif await db.fetchone("SELECT 1 FROM signals WHERE chain=? AND token=? LIMIT 1", (chain, tok)):
+            r = "监听的钱包交易过，但没触发跟单"
+            why[r] += 1
+        else:
+            r = "完全没出现在机器人的数据源里"
+            why[r] += 1
         if p.get("pnl") is not None and p["pnl"] > 0.5 and len(eg) < 4:
-            eg.append(f"{p['symbol']} 你赚 {p['pnl'] * 100:+.0f}%（机器人{r}）")
+            eg.append(f"{p['symbol']} 你赚 {p['pnl'] * 100:+.0f}%（机器人：{r}）")
     return why, eg
 
 
@@ -164,7 +177,13 @@ async def report(app: "App", send_costs: bool = True) -> str:
             exp = sum(p["pnl"] for p in done) / len(done)
             usd = sum(p["pnl"] * p["cost"] for p in done)
             lines.append(f"已清仓 {len(done)} 个币：每笔期望 {exp * 100:+.1f}%，合计 {fmt_usd(usd)}")
-        why, eg = await coverage(app, chain, pos)
+        first_buy: dict[str, float] = {}
+        for a in man:
+            if _side(a) == "buy":
+                tk = str(dig(a, "token.address", "token.token_address", default=""))
+                ts = f(a.get("timestamp"))
+                first_buy[tk] = min(first_buy.get(tk, ts), ts)
+        why, eg = await coverage(app, chain, pos, first_buy)
         lines.append("你买的币机器人怎么样：" + html.escape("；".join(f"{k} ×{v}" for k, v in why.most_common(5))))
         if eg:
             lines.append("你赚了、机器人没买的：" + html.escape("、".join(eg)))
