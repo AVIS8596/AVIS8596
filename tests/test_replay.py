@@ -50,3 +50,33 @@ def test_expectancy_and_regime():
     assert classify([-0.5] * 40)["state"] == "cold"
     assert classify([0.4] * 20 + [0.0] * 20)["state"] == "hot"
     assert classify([0.1] * 10)["state"] == "unknown"
+
+
+def test_run_report(tmp_path):
+    import asyncio
+    import time
+    from types import SimpleNamespace
+    from bot.db import DB
+    from bot.trade.replay import run
+
+    async def go():
+        db = DB(tmp_path / "r.db")
+        await db.open()
+        now = time.time()
+        for i in range(6):
+            await db.execute(
+                "INSERT INTO positions(chain,token,symbol,status,dry_run,entry_price,cost_usd,realized_usd,opened_at,"
+                "closed_at,tier,source_wallets) VALUES('solana',?,?,'closed',1,1.0,100,?,?,?,'good','[]')",
+                (f"T{i}", f"S{i}", 90 if i else 300, now - 10 * 3600, now - 9 * 3600))
+
+        async def kline(chain, token, res, t0, t1):
+            up = token == "T0"
+            prices = [1, 1.3, 1.8, 2.6, 3.5, 4.0] if up else [1, 0.95, 0.9, 0.85, 0.8, 0.75]
+            return _candles(prices * 3, t0)
+        app = SimpleNamespace(db=db, gmgn=SimpleNamespace(kline=kline),
+                              cfg=SimpleNamespace(get=lambda k, d=None: {"exit": EXIT}.get(k, d), dry_run=True))
+        txt = await run(app, 3)
+        assert "6 笔模拟盘真实入场" in txt and "去掉最赚的 S0" in txt and "当前规则" in txt
+        await db.close()
+
+    asyncio.run(go())

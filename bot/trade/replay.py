@@ -114,16 +114,17 @@ async def candles(app: "App", chain: str, token: str, t0: float) -> list[dict]:
 async def run(app: "App", days: float = 3) -> str:
     db = app.db
     now = time.time()
+    dry = int(app.cfg.dry_run)   # 只用当前模式的单子：实盘小额和模拟盘大额混在一起会把百分比和金额搅乱
     pos = await db.fetchall(
         "SELECT * FROM positions WHERE status='closed' AND opened_at>? AND opened_at<? AND entry_price>0 "
-        "ORDER BY opened_at DESC LIMIT 150", (now - days * 86400, now - 4 * 3600))
+        "AND dry_run=? ORDER BY opened_at DESC LIMIT 150", (now - days * 86400, now - 4 * 3600, dry))
     if len(pos) < 5:
         return f"最近 {days:g} 天开仓满 4 小时的已平仓单子只有 {len(pos)} 笔，至少 5 笔才能回测"
     exit_cfg = app.cfg.get("exit", {}) or {}
     cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
     vs = variants(exit_cfg)
-    res: dict[str, list[tuple[float, float]]] = {k: [] for k in vs}
-    actual: list[tuple[float, float]] = []
+    res: dict[str, list[tuple[float, float, str]]] = {k: [] for k in vs}
+    actual: list[tuple[float, float, str]] = []
     used = 0
     for p in pos:
         try:
@@ -140,34 +141,40 @@ async def run(app: "App", days: float = 3) -> str:
         tier_rules = exit_rules(exit_cfg, p.get("tier"))
         fpct = float(tier_rules.get("follow_smart_sell_pct", 100))
         cost_usd = float(p["cost_usd"] or 0)
-        actual.append((float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0, cost_usd))
+        actual.append((float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0, cost_usd, p["symbol"] or "?"))
         for name, (override, follow) in vs.items():
             rules = dict(override) if override and "take_profit" in override and "stop_loss_pct" in override \
                 else {**tier_rules, **(override or {})}
             m = simulate(float(p["entry_price"]), float(p["opened_at"]), path, rules, ft if follow else None, fpct, cost)
-            res[name].append((m, cost_usd))
+            res[name].append((m, cost_usd, p["symbol"] or "?"))
 
-    def summ(xs: list[tuple[float, float]]) -> tuple[float, float, float]:
-        exp = sum(m - 1 for m, _ in xs) / len(xs)
-        win = sum(1 for m, _ in xs if m > 1) / len(xs)
-        usd = sum(c * (m - 1) for m, c in xs)
-        return exp, win, usd
+    def summ(xs: list[tuple[float, float, str]]) -> dict:
+        rs = sorted(m - 1 for m, _, _ in xs)
+        usds = sorted((c * (m - 1), sym) for m, c, sym in xs)
+        total = sum(u for u, _ in usds)
+        return {"exp": sum(rs) / len(rs), "med": rs[len(rs) // 2], "win": sum(1 for r in rs if r > 0) / len(rs),
+                "usd": total, "best": usds[-1], "ex_best": total - usds[-1][0]}
 
     if not used:
         return "取不到这些单子的 K 线，稍后再试"
-    a_exp, a_win, a_usd = summ(actual)
-    lines = [f"<b>回放回测</b>（最近 {days:g} 天 {used} 笔真实入场，每次卖出扣 {cost * 100:.0f}% 成本）",
-             f"实际结果：每笔期望 {a_exp * 100:+.1f}%，胜率 {a_win * 100:.0f}%，合计 {fmt_usd(a_usd)}", ""]
-    ranked = sorted(((summ(v), k) for k, v in res.items() if v), key=lambda x: -x[0][0])
-    for (exp, win, usd), name in ranked:
-        lines.append(f"{'🏆 ' if name == ranked[0][1] else ''}{name}：每笔期望 {exp * 100:+.1f}%，胜率 {win * 100:.0f}%，"
-                     f"合计 {fmt_usd(usd)}")
+    a = summ(actual)
+    lines = [f"<b>回放回测</b>（最近 {days:g} 天 {used} 笔{'模拟盘' if dry else '实盘'}真实入场，每次卖出扣 {cost * 100:.0f}% 成本）",
+             f"实际结果：每笔期望 {a['exp'] * 100:+.1f}%，中位 {a['med'] * 100:+.0f}%，胜率 {a['win'] * 100:.0f}%，"
+             f"合计 {fmt_usd(a['usd'])}", ""]
+    ranked = sorted(((summ(v), k) for k, v in res.items() if v), key=lambda x: -x[0]["usd"])
+    for st, name in ranked:
+        lines.append(f"{'🏆 ' if name == ranked[0][1] else ''}<b>{name}</b>：合计 {fmt_usd(st['usd'])}，"
+                     f"每笔期望 {st['exp'] * 100:+.1f}%，中位 {st['med'] * 100:+.0f}%，胜率 {st['win'] * 100:.0f}%"
+                     f"｜去掉最赚的 {st['best'][1]}（{fmt_usd(st['best'][0])}）后 {fmt_usd(st['ex_best'])}")
     best = ranked[0]
     cur = next(x for x in ranked if x[1] == "当前规则")
     lines.append("")
-    if best[1] != "当前规则" and best[0][0] - cur[0][0] > 0.02:
-        lines.append(f"「{best[1]}」比当前规则每笔多 {(best[0][0] - cur[0][0]) * 100:.1f}%。样本 {used} 笔"
-                     + ("，还偏少，建议再积累一些再改" if used < 50 else "，可以考虑换成正式规则"))
+    robust = best[0]["ex_best"] > cur[0]["ex_best"]
+    if best[1] != "当前规则" and best[0]["usd"] > cur[0]["usd"]:
+        lines.append(f"「{best[1]}」合计比当前规则多 {fmt_usd(best[0]['usd'] - cur[0]['usd'])}；"
+                     + ("去掉最赚的一笔后依然更好，结论比较稳。" if robust else
+                        "但去掉最赚的一笔后就不如当前规则了，说明主要靠一个大赢家，结论不稳。")
+                     + ("样本还偏少，建议再积累一些再改" if used < 50 else ""))
     else:
         lines.append("当前规则已经是最好或差不多，暂时不用改")
     lines.append("（回测用 5 分钟 K 线近似，真实成交会有偏差；看的是相对好坏）")
