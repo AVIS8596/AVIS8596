@@ -97,6 +97,7 @@ trading:
   min_holders: 80                 # 持有人太少不买
   loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟
   loss_streak_pause_min: 60
+  loss_streak_dry: 0              # 模拟盘的连亏熔断（0 = 不熔断，方便积累数据）
   max_drawdown_pct: 60            # 不接飞刀：从 2 小时内高点跌了 60% 以上不买（3 个以上聪明钱一起买除外）
   copy_min_native: 0.2            # 聪明钱买入不到 0.2 SOL（试探性小单）不单独跟
   stoploss_cooldown_hours: 24     # 止损过的币 24 小时内不再买

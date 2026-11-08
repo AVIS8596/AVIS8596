@@ -530,7 +530,8 @@ class PositionManager:
     async def check_loss_streak(self) -> None:
         """连亏熔断：连续 N 笔亏损（亏超 3%）平仓，暂停买入一段时间。通常说明行情转冷或带单钱包状态不好。"""
         t = self.cfg.get("trading", {}) or {}
-        n = int(t.get("loss_streak", 4) or 0)
+        # 模拟盘默认不熔断（loss_streak_dry: 0）：模拟盘的目的是积累数据，熔断会少掉一段时间的样本
+        n = int(t.get("loss_streak_dry", 0) if self.cfg.dry_run else t.get("loss_streak", 4)) or 0
         if n <= 0:
             return
         db = self.app.db
