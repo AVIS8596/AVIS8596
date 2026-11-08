@@ -131,7 +131,7 @@ async def shadow_compare(app: "App") -> str:
         better = sum(1 for _, v in done if _mult(v[b]) > _mult(v["v1"]) + 0.005)
         worse = sum(1 for _, v in done if _mult(v[b]) < _mult(v["v1"]) - 0.005)
         name = VARIANT_NAME[b]
-        lines += [f"{name} vs 旧规则（{len(done)} 个持仓，不含手续费和滑点）：",
+        lines += [f"{name} vs 旧规则（{len(done)} 个持仓，卖出已扣估算成本）：",
                   f"  旧规则 平均 {a1:+.1f}%，合计 {fmt_usd(u1)} | {name} 平均 {ab:+.1f}%，合计 {fmt_usd(ub)}",
                   f"  {name}更好 {better} 个，更差 {worse} 个"]
         for pid, v in sorted(done, key=lambda x: abs(_mult(x[1][b]) - _mult(x[1]["v1"])), reverse=True)[:2]:

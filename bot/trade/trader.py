@@ -264,6 +264,8 @@ class Trader:
             (chain, token, rep.get("symbol", ""), int(self.cfg.dry_run), reason, json.dumps(wallets[:20]),
              entry, fill.native, cost_usd, str(fill.token_raw), fill.decimals, str(fill.token_raw), entry, time.time(),
              tier, json.dumps(snapshot(rep), ensure_ascii=False), time.time()))
+        await self.app.db.execute("UPDATE token_outcomes SET bought=1 WHERE chain=? AND token=? AND ts>?",
+                                  (chain, token, time.time() - 3600))
         await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason,
                                     exit_rules(self.cfg.get("exit", {}) or {}, tier))
 

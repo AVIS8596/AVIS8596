@@ -55,7 +55,7 @@ class DryRunExecutor:
         if px <= 0 or npx <= 0:
             return Fill(False, error="取不到价格，模拟买入失败")
         dec = await self._decimals(token)
-        ui = amount * npx / px * (1 - slippage_bps / 10000 / 3)   # 模拟一点滑点损耗
+        ui = amount * npx / px * (1 - await self._cost(token, amount * npx))
         return Fill(True, "DRYRUN", int(ui * 10 ** dec), dec, amount)
 
     async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
@@ -63,8 +63,20 @@ class DryRunExecutor:
         npx = await self.app.native_price(self.chain)
         if px <= 0 or npx <= 0:
             return Fill(False, error="取不到价格，模拟卖出失败")
-        native = raw / 10 ** decimals * px / npx * (1 - slippage_bps / 10000 / 3)
+        usd = raw / 10 ** decimals * px
+        native = usd / npx * (1 - await self._cost(token, usd))
         return Fill(True, "DRYRUN", raw, decimals, native)
+
+    async def _cost(self, token: str, usd: float) -> float:
+        """单边成交成本 = 手续费（默认 1%）+ 价格冲击（约 2 × 金额 / 流动性，上限 30%）。
+        以前固定按滑点上限的 1/3（5%）扣，小单偏悲观、大单偏乐观。"""
+        fee = float(self.app.cfg.get("trading.sim_fee_pct", 1)) / 100
+        try:
+            liq = float((await self.app.data.overview(self.chain, token)).get("liquidity") or 0)
+        except Exception:  # noqa: BLE001
+            liq = 0.0
+        impact = min(2 * usd / liq, 0.3) if liq > 0 else 0.05
+        return fee + impact
 
 
 # ====================================================================== Solana

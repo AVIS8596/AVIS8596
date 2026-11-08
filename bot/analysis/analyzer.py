@@ -584,3 +584,15 @@ class Analyzer:
             rows.append((rep["chain"], rep["creator"], "dev", rep["address"], "", t))
         await db.executemany(
             "INSERT OR IGNORE INTO address_tags(chain,address,tag,token,detail,created_at) VALUES(?,?,?,?,?,?)", rows)
+        # 结果档案：同一个币半小时内只记一次
+        if float(rep.get("price") or 0) > 0 and not await db.fetchone(
+                "SELECT 1 FROM token_outcomes WHERE chain=? AND token=? AND ts>?", (rep["chain"], rep["address"], t - 1800)):
+            feats = {k: rep.get(k) for k in ("score", "liquidity", "mcap", "holders", "volume_1h", "change_1h",
+                                             "age_hours", "buys_1h", "sells_1h", "top10_pct", "bundle_held_pct",
+                                             "insider_held_pct", "dev_held_pct")}
+            feats["smart"] = len(rep.get("smart_buyers") or [])
+            feats["risks"] = len(rep.get("risks") or [])
+            await db.execute(
+                "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
+                (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),
+                 json.dumps(feats, default=str)))

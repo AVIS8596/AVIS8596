@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS skipped (
 );
 CREATE INDEX IF NOT EXISTS idx_skipped_ts ON skipped(ts);
 
+-- 结果档案：每个分析过的币当时的各项数据 + 之后 15 分钟 / 1 小时 / 4 小时的价格，用来让机器人从结果里学习
+CREATE TABLE IF NOT EXISTS token_outcomes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, chain TEXT, token TEXT, symbol TEXT, source TEXT,
+  price REAL, features TEXT, p15 REAL, p60 REAL, p240 REAL, bought INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_ts ON token_outcomes(ts);
+CREATE INDEX IF NOT EXISTS idx_outcomes_token ON token_outcomes(chain, token, ts);
+
 -- 学习中的顶级交易者及其交易画像
 CREATE TABLE IF NOT EXISTS learn_wallets (
   chain TEXT, address TEXT, label TEXT, source TEXT, added_at REAL, profiled_at REAL, profile TEXT,

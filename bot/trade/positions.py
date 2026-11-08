@@ -185,6 +185,7 @@ class PositionManager:
                 if time.time() - last_fill > 300:
                     last_fill = time.time()
                     await self.fill_skipped()
+                    await self.fill_outcomes()
             except Exception as e:  # noqa: BLE001
                 log.exception("持仓检查失败: %s", e)
             await asyncio.sleep(interval)
@@ -335,7 +336,8 @@ class PositionManager:
         frac = float(s["frac"])
         sell = frac if pct >= 100 or frac * (1 - pct / 100) < 0.02 else frac * pct / 100
         frac -= sell
-        realized = float(s["realized"]) + sell * px / entry
+        cost = float(self.cfg.get("exit.shadow_cost_pct", 2)) / 100   # 单边成本估算（手续费 + 滑点）
+        realized = float(s["realized"]) + sell * px / entry * (1 - cost)
         stage = int(s["tp_stage"]) + (1 if why.startswith("止盈") else 0)
         reduced = 1 if (why.startswith("健康分") and pct < 100) or s["reduced"] else 0
         half = 1 if why.startswith("移动止损先卖一半") or s.get("trail_half") else 0
@@ -359,8 +361,9 @@ class PositionManager:
             return
         if px > float(s["high"] or 0):
             s["high"] = px
-            await db.execute("UPDATE shadow SET high=?, last_price=? WHERE pid=? AND variant=?",
-                             (px, px, s["pid"], s["variant"]))
+        s["last_price"] = px
+        await db.execute("UPDATE shadow SET high=?, last_price=? WHERE pid=? AND variant=?",
+                         (float(s["high"] or px), px, s["pid"], s["variant"]))
         v = {"entry_price": s["entry_price"], "high_price": s["high"], "tp_stage": s["tp_stage"],
              "opened_at": s["opened_at"], "tier": s["tier"], "trail_half": s.get("trail_half")}
         dyn = dyn_state(s, self.dcfg, now, reduced=int(s["reduced"] or 0)) if s["variant"] == "v2" else None
@@ -381,10 +384,15 @@ class PositionManager:
                                        f"（{why}）。现在只记录，不执行。")
 
     async def shadow_on_manual(self, pid: int, pct: float, why: str, px: float) -> None:
-        """手动卖出、跟卖聪明钱这类不属于规则的卖出，两套虚拟持仓同步执行，保证对比公平。"""
+        """不属于卖出规则的卖出同步到虚拟持仓：手动卖出同步给全部三套；
+        跟卖聪明钱只同步给旧规则（动态管理靠健康分里的聪明钱扣分、高手规则靠自己的止盈止损），
+        这样对比结果能回答"跟卖聪明钱到底有没有用"。"""
+        follow = why.startswith("带单聪明钱")
         for s in await self.app.db.fetchall(
                 "SELECT s.*, p.entry_price FROM shadow s JOIN positions p ON p.id=s.pid "
                 "WHERE s.pid=? AND s.closed=0", (pid,)):
+            if follow and s["variant"] != "v1":
+                continue
             await self._shadow_apply(s, pct, why, px or float(s["last_price"] or 0), time.time())
 
     async def _shadow_report(self) -> None:
@@ -460,7 +468,9 @@ class PositionManager:
                 await self.app.db.execute("UPDATE positions SET trail_half=1, high_price=? WHERE id=?",
                                           (price_hint or float(p["high_price"] or 0), pid))
             if reason.startswith(("手动", "带单聪明钱")):
-                await self.shadow_on_manual(pid, pct, reason, price_hint)
+                ui = fill.token_raw / 10 ** int(p["decimals"] or 0) if fill.token_raw else 0
+                px_fill = price_hint or (usd / ui if ui > 0 else 0)
+                await self.shadow_on_manual(pid, pct, reason, px_fill)
             closed = new_remaining <= original * 0.02
             if closed:
                 await self._close(p, realized, reason)
@@ -512,6 +522,22 @@ class PositionManager:
             px = await self.app.data.prices(chain, list({r["token"] for r in lst}))
             for r in lst:
                 await db.execute("UPDATE skipped SET px_1h=? WHERE id=?", (px.get(r["token"]) or -1, r["id"]))
+
+    async def fill_outcomes(self) -> None:
+        """结果档案：满 15 分钟 / 1 小时 / 4 小时后回看价格（取不到记 -1，学习时跳过）。"""
+        db = self.app.db
+        now = time.time()
+        for col, mins in (("p15", 15), ("p60", 60), ("p240", 240)):
+            rows = await db.fetchall(
+                f"SELECT id, chain, token FROM token_outcomes WHERE {col} IS NULL AND ts<? AND ts>? LIMIT 60",
+                (now - mins * 60, now - mins * 60 - 6 * 3600))
+            by: dict[str, list[dict]] = {}
+            for r in rows:
+                by.setdefault(r["chain"], []).append(r)
+            for chain, lst in by.items():
+                px = await self.app.data.prices(chain, list({r["token"] for r in lst}))
+                await db.executemany(f"UPDATE token_outcomes SET {col}=? WHERE id=?",
+                                     [(px.get(r["token"]) or -1, r["id"]) for r in lst])
 
     async def check_daily_loss(self) -> None:
         key = "trading.max_daily_loss_usd_dry" if self.cfg.dry_run else "trading.max_daily_loss_usd"
