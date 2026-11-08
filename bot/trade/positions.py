@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import time
@@ -584,8 +585,8 @@ class PositionManager:
         db = self.app.db
         now = time.time()
         rows = await db.fetchall(
-            "SELECT id, chain, token, closed_at, realized_usd, amount_raw, decimals FROM positions "
-            "WHERE status='closed' AND post_max IS NULL AND closed_at<? AND closed_at>? LIMIT 10",
+            "SELECT id, chain, token, symbol, closed_at, realized_usd, cost_usd, amount_raw, decimals, close_reason, "
+            "entry_snap FROM positions WHERE status='closed' AND post_max IS NULL AND closed_at<? AND closed_at>? LIMIT 10",
             (now - 4 * 3600, now - 3 * 86400))
         for r in rows:
             ui = int(r["amount_raw"] or 0) / 10 ** int(r["decimals"] or 0)
@@ -595,7 +596,15 @@ class PositionManager:
                 hi = await self.app.data.recent_high_between(r["chain"], r["token"], float(r["closed_at"]),
                                                              float(r["closed_at"]) + 4 * 3600)
                 val = hi / exit_px if hi > 0 else -1.0
-            await db.execute("UPDATE positions SET post_max=? WHERE id=?", (val, r["id"]))
+            # 每笔复盘：打教训标签（自我学习汇总用）
+            from ..brain import LESSON_TIPS, lesson
+            tags = lesson({**dict(r), "post_max": val})
+            await db.execute("UPDATE positions SET post_max=?, lesson=? WHERE id=?",
+                             (val, json.dumps(tags, ensure_ascii=False), r["id"]))
+            bad = [t for t in tags if t in ("买在高位", "卖早了", "止损后又涨回来")]
+            if bad and self.app.tg:
+                await self.app.tg.send(f"📚 复盘 #{r['id']} {html.escape(str(r['symbol'] or '?'))}："
+                                       + "；".join(f"{t}（{LESSON_TIPS[t]}）" for t in tags), low=True)
 
     async def fill_outcomes(self) -> None:
         """结果档案：满 15 分钟 / 1 小时 / 4 小时后回看价格（取不到记 -1，学习时跳过）。"""

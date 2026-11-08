@@ -273,3 +273,8 @@ strategies:
     max_per_day: 6
     persist_sec: 180              # 论证：达标后观察 3 分钟，热度没退（持有人不减、叙事分不明显下降）才继续
     min_token_score: 55           # 论证：完整分析的代币评分要 ≥ 55
+
+# ---------------- 自我学习 ----------------
+learning:
+  auto_tune: auto                 # auto：模拟盘自动改参数（实盘只发建议）｜suggest：只建议｜off：关闭；TG 里 /tune auto|suggest|off 也能改
+  tune_hours: 6                   # 每隔几小时学一次（每次最多改一个参数，同一参数 24 小时内不重复改）

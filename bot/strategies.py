@@ -125,6 +125,17 @@ def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
     return early_status(it, hist, now, cfg)[0]
 
 
+def obs_row(chain: str, addr: str, it: dict, now: float) -> tuple:
+    """早期观察样本（和 structure_problem / early_status 用同样的字段口径）。"""
+    return (now, chain, addr, f(it.get("price")), int(f(it.get("holder_count"))), volume(it),
+            _rate(it, "rug_ratio"), _rate(it, "top_10_holder_rate"),
+            _rate(it, "bundler_trader_amount_rate", "bundler_rate"),
+            max(_rate(it, "rat_trader_amount_rate", "insider_rate"), _rate(it, "suspected_insider_hold_rate")),
+            _rate(it, "creator_balance_rate", "dev_team_hold_rate"),
+            int(str(it.get("is_wash_trading", "")).lower() in ("true", "1", "yes")),
+            int(f(it.get("smart_degen_count"))), int(f(it.get("renowned_count"))), f(it.get("created_timestamp")))
+
+
 def status_key(why: str) -> str:
     """不达标原因的类别（去掉数字），类别变了才记一条，避免刷屏。"""
     return why.split("（")[0].split("：")[0].split(" ")[0]
@@ -193,6 +204,7 @@ class Strategies:
         self.attempts: deque = deque(maxlen=50)   # 最近交给确认期的时间（每小时限量）
         self.last_items: dict[str, dict[str, dict]] = {}   # 最近一轮列表（/whynot 用）
         self.missed: dict[str, float] = {}   # 热度够但结构不过关、已记录过的币
+        self.obs_at: dict[tuple[str, str], tuple[float, int]] = {}   # 早期观察样本：上次记录时间、已记几份
         self.notes: dict[str, str] = {}      # 每个币最近一次记录的判断类别（变了才写 strat_log）
 
     def conf(self, name: str) -> dict:
@@ -228,6 +240,7 @@ class Strategies:
             if n and v > leader.get(n, (-1.0, ""))[0]:
                 leader[n] = (v, str(it.get("address")))
         fired: list[tuple[str, str, str]] = []
+        obs: list[tuple] = []
         st = {"ts": now, "items": len(items), "near": 0, "clean": 0, "best_growth": None, "best_narr": None,
               "error": ""}
         for it in items:
@@ -250,6 +263,12 @@ class Strategies:
                         g = (int(f(it.get("holder_count"))) / old[0][1] - 1) * 100
                         if st["best_growth"] is None or g > st["best_growth"][0]:
                             st["best_growth"] = (g, str(it.get("symbol") or "?"))
+            if it.get("_stage") == "即将毕业" and f(it.get("price")) > 0:
+                # 自我学习的样本：每个快毕业的币每 2.5 分钟记一份快照，最多 30 份
+                last, n = self.obs_at.get(key, (0.0, 0))
+                if now - last >= 150 and n < 30:
+                    self.obs_at[key] = (now, n + 1)
+                    obs.append(obs_row(chain, addr, it, now))
             if ec["enabled"] and it.get("_stage") == "即将毕业":
                 reason, why = early_status(it, dq_before, now, ec)
                 self.note(chain, addr, it, "早期建仓：" + (why or "达标，进入观察"))
@@ -305,6 +324,10 @@ class Strategies:
                 t = asyncio.create_task(self.fire(chain, addr, reason, tier))
                 self.app.hub._tasks.add(t)
                 t.add_done_callback(self.app.hub._tasks.discard)
+        if obs and getattr(self.app, "db", None) is not None:
+            t = asyncio.create_task(self._save_obs(obs))
+            self.app.hub._tasks.add(t)
+            t.add_done_callback(self.app.hub._tasks.discard)
         self.stats[chain] = st
         self.last_items[chain] = {norm_addr(chain, it["address"]): it for it in items if it.get("address")}
         cutoff = now - 3600
@@ -316,7 +339,16 @@ class Strategies:
             self.pending.pop(k, None)
         for k in [k for k, t in self.missed.items() if now - t > 12 * 3600]:
             self.missed.pop(k, None)
+        for k in [k for k, v in self.obs_at.items() if now - v[0] > 6 * 3600]:
+            self.obs_at.pop(k, None)
         return fired
+
+    async def _save_obs(self, rows: list[tuple]) -> None:
+        db = self.app.db
+        await db.executemany("INSERT INTO early_obs(ts,chain,token,price,holders,volume,rug,top10,bundler,insider,"
+                             "creator,wash,smart,kol,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        await db.executemany("INSERT OR IGNORE INTO early_tok(chain,token,first_ts) VALUES(?,?,?)",
+                             [(r[1], r[2], r[0]) for r in rows])
 
     def note(self, chain: str, addr: str, it: dict, msg: str) -> None:
         """记录主动建仓对这个币的判断变化（类别变了才记），/history 里能看到它为什么没早点买。"""

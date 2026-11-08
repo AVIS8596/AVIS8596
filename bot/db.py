@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS wallet_hits (
 );
 
 -- 回放回测用的 K 线缓存（入场后 24 小时的 5 分钟 K 线）
+-- 早期观察样本：快毕业的币每 2~3 分钟一份快照（自我学习用：试不同的早期建仓参数会在什么时候买、结果如何）
+CREATE TABLE IF NOT EXISTS early_obs (ts REAL, chain TEXT, token TEXT, price REAL, holders INTEGER, volume REAL,
+  rug REAL, top10 REAL, bundler REAL, insider REAL, creator REAL, wash INTEGER, smart INTEGER, kol INTEGER, created REAL);
+CREATE INDEX IF NOT EXISTS idx_early_obs ON early_obs(ts);
+CREATE TABLE IF NOT EXISTS early_tok (chain TEXT, token TEXT, first_ts REAL, p60 REAL, p240 REAL,
+  PRIMARY KEY (chain, token));
+
 -- 主动建仓对每个币的判断变化（/history 用）
 CREATE TABLE IF NOT EXISTS strat_log (ts REAL, chain TEXT, token TEXT, msg TEXT, price REAL);
 CREATE INDEX IF NOT EXISTS idx_strat_log ON strat_log(chain, token, ts);
@@ -124,7 +131,7 @@ POSITION_COLUMNS = [
     ("tier", "TEXT"), ("entry_snap", "TEXT"), ("prev_snap", "TEXT"), ("health", "INTEGER"),
     ("health_note", "TEXT"), ("health_streak", "INTEGER DEFAULT 0"), ("health_emergency", "TEXT"),
     ("health_reduced", "INTEGER DEFAULT 0"), ("health_at", "REAL DEFAULT 0"), ("trail_half", "INTEGER DEFAULT 0"),
-    ("post_max", "REAL"),
+    ("post_max", "REAL"), ("lesson", "TEXT"),
 ]
 
 

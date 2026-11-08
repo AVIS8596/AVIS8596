@@ -24,6 +24,7 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/tune 自我学习：学到了哪些参数、样本多少；/tune now 立即学一次；/tune reset 全部恢复
 /history 代币地址 这个币的时间线：发币后多久被看到、当时涨了几倍、被哪条规则拦过、什么时候买卖
 /learn 学习中的高手列表 + 共同规律 + 参数建议
 /learn 钱包地址 [备注] 学习这个人（生成交易画像）
@@ -315,6 +316,32 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd == "/tune":
+            br = getattr(self.app, "brain", None)
+            if not br:
+                await self.send("自我学习未启用")
+                return
+            sub = args[0].lower() if args else ""
+            if sub in ("auto", "suggest", "off"):
+                await self.app.db.kv_set("tune_mode", sub)
+                await self.send(f"自我调参已改为：{ {'auto': '自动（模拟盘自动生效，实盘只建议）', 'suggest': '只建议', 'off': '关闭'}[sub] }")
+            elif sub == "now":
+                await self.send("开始学习：用最近 4 天的结果档案和早期观察样本，逐个参数试放宽 / 收紧一档……")
+                msgs = await br.tune_once(force=True)
+                await self.send("\n".join(msgs) or "没有结果")
+            elif sub == "apply":
+                pend = await self.app.db.kv_get("tune_pending", None)
+                if not pend:
+                    await self.send("没有待确认的建议")
+                    return
+                await br.apply(pend["key"], pend["new"], pend["why"])
+                await self.app.db.kv_set("tune_pending", None)
+                await self.send("✅ 已采纳：" + e(pend["why"]))
+            elif sub == "reset":
+                n = await br.reset()
+                await self.send(f"已恢复 {n} 个参数为配置文件里的值")
+            else:
+                await self.send(await br.status_text())
         elif cmd in ("/history", "/timeline"):
             chain, rest = await self._pick_chain(args)
             if not rest:

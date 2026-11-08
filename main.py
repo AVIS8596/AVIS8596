@@ -57,7 +57,12 @@ async def maintenance(app: App) -> None:
     import os
     db = app.db
     cut = time.time() - 30 * 86400
+    try:
+        await db.execute("DELETE FROM early_obs WHERE ts<?", (time.time() - 7 * 86400,))   # 早期快照量大，留 7 天
+    except Exception as e:  # noqa: BLE001
+        log.debug("清理 early_obs: %s", e)
     for table, col in (("signals", "ts"), ("skipped", "ts"), ("wallet_hits", "ts"), ("strat_log", "ts"),
+                       ("early_tok", "first_ts"),
                        ("candidates", "checked_at")):
         try:
             await db.execute(f"DELETE FROM {table} WHERE {col}<?", (cut,))
@@ -110,6 +115,10 @@ async def run_bot(cfg) -> None:
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)
         jobs.append(("扩充钱包池", app.expander.run))
+        from bot.brain import Brain
+        app.brain = Brain(app)
+        await app.brain.load()             # 学到的参数（数据库里）覆盖配置文件
+        jobs.append(("自我学习", app.brain.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
     for c in cfg.enabled_chains:

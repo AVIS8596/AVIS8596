@@ -50,6 +50,7 @@ def snapshot(rep: dict) -> dict:
         "holders": int(rep.get("holders") or 0), "volume_1h": float(rep.get("volume_1h") or 0),
         "bundle": float(rep.get("bundle_held_pct") or 0), "insider": float(rep.get("insider_held_pct") or 0),
         "dev": float(rep.get("dev_held_pct") or 0), "risks": list(rep.get("risks") or []),
+        "launch_x": float(rep.get("launch_x") or 0), "change_1h": float(rep.get("change_1h") or 0),
     }
 
 

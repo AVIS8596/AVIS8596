@@ -110,6 +110,20 @@ async def daily_review(app: "App", start: float) -> str:
     sk = await skipped_review(app, start)
     if sk:
         lines.append(sk)
+    from ..brain import lessons_text, missed_text
+    for fn in (lessons_text, missed_text):
+        try:
+            txt = await fn(app)
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if txt:
+            lines.append(txt)
+    br = getattr(app, "brain", None)
+    if br:
+        tl = [h for h in (await db.kv_get("tune_log", []) or []) if h["ts"] >= start]
+        lines.append(f"🧠 自我学习：今天调整了 {len(tl)} 个参数" + ("（" + "、".join(
+            f"{h['key'].split('.')[-1]} {h['old']}→{h['new']}" for h in tl) + "）" if tl else "")
+                     + "，发 /tune 查看")
     from .regime import regime, text as rg_text
     lines.append(rg_text(await regime(app)))
     n_open = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE status='open'")
