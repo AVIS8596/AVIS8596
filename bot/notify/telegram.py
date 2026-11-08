@@ -59,6 +59,22 @@ HELP = """<b>命令列表</b>
 
 CHAIN_ALIAS = {"sol": "solana", "eth": "ethereum", "bnb": "bsc", "hood": "robinhood", "rh": "robinhood"}
 
+# 在 Telegram 输入框点 "/" 或左下角菜单按钮就能看到、点选的命令（按常用程度排序）
+MENU = [
+    ("help", "全部命令和用法"), ("status", "运行状态"), ("positions", "当前持仓"), ("review", "今日复盘"),
+    ("history", "代币地址：这个币的时间线（为什么买 / 没买）"), ("whynot", "代币地址：这个币为什么没买"),
+    ("why", "编号：持仓的健康分和卖出规则"), ("sell", "编号 [百分比]：手动卖出"),
+    ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
+    ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
+    ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"),
+    ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
+    ("size", "查看 / 修改每笔买入金额"), ("pause", "暂停买入（止盈止损照常）"), ("resume", "恢复买入"),
+    ("alerts", "off / on：关闭 / 打开聪明钱和新币提醒"), ("dynamic", "动态持仓管理"),
+    ("check", "链 代币地址：立即分析一个币"), ("tag", "链 地址：这个地址被标记过什么"),
+    ("addwallet", "链 地址：手动添加聪明钱"), ("delwallet", "链 地址：拉黑地址"),
+    ("backup", "立即备份数据到这里"), ("restore", "用备份恢复数据"),
+]
+
 
 class Telegram:
     def __init__(self, app: "App"):
@@ -262,7 +278,15 @@ class Telegram:
                         f"{self.tx_link(chain, fill.tx)}{extra}")
 
     # ================================================================ 命令
+    async def set_menu(self) -> None:
+        try:
+            await self.app.http.post("tg", f"{self.base}/setMyCommands", retries=1, json_body={
+                "commands": [{"command": c, "description": d} for c, d in MENU]})
+        except Exception as ex:  # noqa: BLE001
+            log.debug("setMyCommands: %s", ex)
+
     async def poller(self) -> None:
+        await self.set_menu()          # 输入框点 "/" 就能看到全部命令
         self.muted = bool(await self.app.db.kv_get("alerts_muted", False))
         offset = int(await self.app.db.kv_get("tg_offset", 0) or 0)
         while True:
