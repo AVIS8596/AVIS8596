@@ -685,7 +685,16 @@ class Telegram:
         from ..trade.regime import regime, text as rg_text
         lines.append(rg_text(await regime(self.app)))
         sk = await db.fetchone("SELECT COUNT(*) n FROM skipped WHERE ts>?", (time.time() - 3600,))
-        lines.append(f"近1小时被风控拦下 {sk['n']} 个币")
+        top = await db.fetchall("SELECT cat, COUNT(*) n FROM skipped WHERE ts>? GROUP BY cat ORDER BY n DESC LIMIT 4",
+                                (time.time() - 3600,))
+        lines.append(f"近1小时被风控拦下 {sk['n']} 个币" + ("：" + "、".join(f"{r['cat']} {r['n']}" for r in top) if top else ""))
+        last = await db.fetchone("SELECT MAX(opened_at) t FROM positions WHERE dry_run=?", (int(self.app.cfg.dry_run),))
+        if last and last["t"]:
+            lines.append(f"最近一次买入：{(time.time() - float(last['t'])) / 60:.0f} 分钟前")
+        ws = await db.fetchall("SELECT status, COUNT(*) n FROM wallets GROUP BY status")
+        wd = {r["status"]: r["n"] for r in ws}
+        if wd.get("suspect"):
+            lines.append(f"钱包体检：{wd['suspect']} 个可疑（不跟）")
         strat = getattr(self.app, "strategies", None)
         if strat:
             for c in self.app.cfg.enabled_chains:
