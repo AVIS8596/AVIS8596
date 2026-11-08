@@ -91,6 +91,23 @@ def decide_exit(pos: dict, price: float, cfg: dict, now: float, dyn: dict | None
     strong = bool(dyn) and health is not None and health >= float(dc.get("strong_above", 80))
 
     tps = cfg.get("take_profit") or []
+    # 强势长拿：翻倍出本之后（证明是好币），不再按固定价位止盈，一直拿着；
+    # 等它从最高点回撤（上涨疲软）再阶梯卖出，回落到保底线就全部卖掉，最长拿 7 天
+    rn = cfg.get("runner") or {}
+    if rn.get("enabled") and stage >= 1 and high_gain >= float(rn.get("trigger_gain_pct", 100)):
+        ladder = rn.get("ladder") or [{"drop_pct": 25, "sell_pct": 33}, {"drop_pct": 40, "sell_pct": 50},
+                                       {"drop_pct": 55, "sell_pct": 100}]
+        drop = (1 - price / high) * 100
+        k = stage - 1
+        if gain <= float(rn.get("floor_gain_pct", 20)):
+            return 100, f"止盈·强势币回落到保底线（最高 +{high_gain:.0f}%，现在 {gain:+.0f}%），全部卖出"
+        if k < len(ladder) and drop >= float(ladder[k]["drop_pct"]):
+            return float(ladder[k]["sell_pct"]), (f"止盈·强势回撤第{k + 1}档（最高 +{high_gain:.0f}%，"
+                                                  f"回撤 {drop:.0f}%，卖 {float(ladder[k]['sell_pct']):.0f}%）")
+        held = (now - float(pos.get("opened_at") or now)) / 3600
+        if held > float(rn.get("max_hold_hours", 168)):
+            return 100, f"强势长拿满 {float(rn.get('max_hold_hours', 168)):g} 小时（当前 {gain:+.0f}%）"
+        return 0, ""
     if stage < len(tps) and gain >= float(tps[stage]["gain_pct"]) and not (strong and stage >= 1):
         t = tps[stage]
         if stage == 0 and float(t["gain_pct"]) >= 100 and float(t["sell_pct"]) >= 50:
@@ -146,7 +163,7 @@ class PositionManager:
     def _confirmed(self, key, why: str, px: float, entry: float) -> bool:
         """止损和移动止损要连续两次检查（约 10 秒）都触发才卖，避免被瞬间插针打掉；
         跌破硬止损（默认 -50%）不等。其他卖出原因不受影响。"""
-        if not why.startswith(("止损", "移动止损")):
+        if not why.startswith(("止损", "移动止损", "止盈·强势回撤", "止盈·强势币回落")):
             self._breach.pop(key, None)
             return True
         hard = float(self.cfg.get("exit.hard_stop_pct", -50))

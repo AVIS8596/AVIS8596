@@ -244,3 +244,24 @@ def test_learned_variant_rules():
     assert decide_exit(p, 0.79, EXIT, 1001)[0] == 0                            # 旧规则 -35% 才止损
     assert decide_exit(p, 1.32, lr, 1001) == (30, "止盈第1档（+32%）")          # +30% 先卖 30%
     assert decide_exit(p, 1.05, lr, 1000 + 40 * 60)[1].startswith("涨不上去")  # 半小时没到 +10%
+
+
+def test_runner_mode():
+    rn = {"enabled": True, "trigger_gain_pct": 100, "floor_gain_pct": 20, "max_hold_hours": 168,
+          "ladder": [{"drop_pct": 25, "sell_pct": 33}, {"drop_pct": 40, "sell_pct": 50}, {"drop_pct": 55, "sell_pct": 100}]}
+    cfg = {**EXIT, "runner": rn}
+    t = 1000 + 3 * 3600
+    # 还没翻倍出本：照常
+    assert decide_exit(pos(high_price=1.9), 1.9, cfg, t)[0] == 0
+    assert decide_exit(pos(), 2.05, cfg, t)[1].startswith("止盈·翻倍出本")
+    # 翻倍出本后最高 3 倍：回撤 20% 继续拿（固定规则在 +300% 也不卖第 2 档）
+    assert decide_exit(pos(tp_stage=1, high_price=3.0), 2.4, cfg, t)[0] == 0
+    assert decide_exit(pos(tp_stage=1, high_price=4.1), 4.1, cfg, t)[0] == 0
+    pct, why = decide_exit(pos(tp_stage=1, high_price=3.0), 2.2, cfg, t)      # 回撤 27%
+    assert pct == 33 and "强势回撤第1档" in why
+    assert decide_exit(pos(tp_stage=2, high_price=3.0), 1.75, cfg, t)[0] == 50  # 回撤 42%
+    assert decide_exit(pos(tp_stage=1, high_price=3.0), 1.15, cfg, t)[1].startswith("止盈·强势币回落")  # 跌回 +15%
+    assert decide_exit(pos(tp_stage=1, high_price=3.0), 2.9, cfg, 1000 + 200 * 3600)[0] == 100        # 满 7 天
+    # 关闭强势长拿：回到固定止盈（+300% 卖第 2 档）
+    off = {**EXIT, "runner": {**rn, "enabled": False}}
+    assert decide_exit(pos(tp_stage=1, high_price=4.1), 4.1, off, t)[0] == 50

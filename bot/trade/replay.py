@@ -30,6 +30,9 @@ def variants(exit_cfg: dict) -> dict[str, tuple[dict | None, bool]]:
         "当前规则": (None, follow),
         "旧规则（跟卖+观察期+移动止损）": ({"_old": True}, True),
         "当前 + 跟卖": (None, True),
+        "不用强势长拿（固定止盈）": ({"runner": {"enabled": False}}, follow),
+        "强势长拿·回撤更宽（35/50/65%）": ({"runner": {**(exit_cfg.get("runner") or {}), "enabled": True, "ladder": [
+            {"drop_pct": 35, "sell_pct": 33}, {"drop_pct": 50, "sell_pct": 50}, {"drop_pct": 65, "sell_pct": 100}]}}, follow),
         "当前 + 移动止损（+60% 后回撤 30%）": ({"trailing_start_pct": 60, "trailing_drop_pct": 30}, follow),
         "当前 + 移动止损（+100% 后回撤 40%）": ({"trailing_start_pct": 100, "trailing_drop_pct": 40}, follow),
         "当前 + 观察期 1 小时": ({"stall_hours": 1, "stall_min_gain_pct": 15}, follow),

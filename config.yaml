@@ -158,6 +158,17 @@ exit:
   max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
   confirm_ticks: 2                # 止损 / 移动止损要连续 2 次检查（约 10 秒）都触发才卖，防插针
   hard_stop_pct: -50              # 跌破 -50% 不等确认，立刻卖
+  # 强势长拿：翻倍出本（卖一半收回本金）之后，剩下的不再按固定价位止盈，一直拿着；
+  # 从最高点回撤 25% 卖 1/3、回撤 40% 再卖一半、回撤 55% 卖完；回落到 +20% 保底线全部卖出；最长拿 7 天
+  runner:
+    enabled: true
+    trigger_gain_pct: 100
+    floor_gain_pct: 20
+    max_hold_hours: 168
+    ladder:
+      - { drop_pct: 25, sell_pct: 33 }
+      - { drop_pct: 40, sell_pct: 50 }
+      - { drop_pct: 55, sell_pct: 100 }
   # 移动止损在还没止盈过时先卖一半，剩下一半从当时的价格重新算最高点；剩下的跌回成本就卖
   # 按买入档位区分（覆盖上面的同名项；没写的项沿用上面的）。
   #   stall_hours / stall_min_gain_pct：持有满 N 小时还没涨到 +X% 就卖（"涨不上去就走"，已止盈过的不受影响）

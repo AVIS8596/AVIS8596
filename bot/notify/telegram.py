@@ -204,6 +204,12 @@ class Telegram:
             tps = rules.get("take_profit") or []
             if tps:
                 plan += "止盈：" + "，".join(f"+{float(t['gain_pct']):g}% 卖{float(t['sell_pct']):g}%" for t in tps)
+                rn = rules.get("runner") or {}
+                if rn.get("enabled"):
+                    lad = rn.get("ladder") or []
+                    plan += (" | 翻倍出本后强势长拿：从最高点回撤 "
+                             + "/".join(f"{float(x['drop_pct']):g}%" for x in lad) + " 分批卖，"
+                             f"回落到 +{float(rn.get('floor_gain_pct', 20)):g}% 全卖")
                 ts = float(rules.get("trailing_start_pct", 60))
                 plan += (f" | 涨过 +{ts:g}% 后回撤 {float(rules.get('trailing_drop_pct', 30)):g}% 先卖一半\n"
                          if ts < 1000 else "\n")
