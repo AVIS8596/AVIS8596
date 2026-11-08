@@ -112,6 +112,11 @@ CREATE INDEX IF NOT EXISTS idx_early_obs ON early_obs(ts);
 CREATE TABLE IF NOT EXISTS early_tok (chain TEXT, token TEXT, first_ts REAL, p60 REAL, p240 REAL,
   PRIMARY KEY (chain, token));
 
+-- 自己的选币模型选中的币（影子模式只记录；acted=1 表示真的下单了）
+CREATE TABLE IF NOT EXISTS model_picks (ts REAL, chain TEXT, token TEXT, symbol TEXT, model TEXT, score REAL,
+  price REAL, acted INTEGER DEFAULT 0, p60 REAL, p240 REAL);
+CREATE INDEX IF NOT EXISTS idx_model_picks ON model_picks(ts);
+
 -- 主动建仓对每个币的判断变化（/history 用）
 CREATE TABLE IF NOT EXISTS strat_log (ts REAL, chain TEXT, token TEXT, msg TEXT, price REAL);
 CREATE INDEX IF NOT EXISTS idx_strat_log ON strat_log(chain, token, ts);

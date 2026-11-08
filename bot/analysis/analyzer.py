@@ -610,3 +610,11 @@ class Analyzer:
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
                 (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),
                  json.dumps(feats, default=str)))
+            model = getattr(self.app, "model", None)     # 自己的选币模型打分（影子模式只记录）
+            if model:
+                try:
+                    p = await model.on_analysis(rep["chain"], rep["address"], rep, feats, source)
+                    if p is not None:
+                        rep["model_p"] = p
+                except Exception as e:  # noqa: BLE001
+                    log.debug("模型打分失败: %s", e)

@@ -24,6 +24,7 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/model 自己的选币模型：训练成绩、影子期选了哪些币、表现如何；/model train 立即训练
 /tune 自我学习：学到了哪些参数、样本多少；/tune now 立即学一次；/tune reset 全部恢复
 /history 代币地址 这个币的时间线：发币后多久被看到、当时涨了几倍、被哪条规则拦过、什么时候买卖
 /learn 学习中的高手列表 + 共同规律 + 参数建议
@@ -316,6 +317,21 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd == "/model":
+            md = getattr(self.app, "model", None)
+            if not md:
+                await self.send("选币模型未启用")
+                return
+            sub = args[0].lower() if args else ""
+            if sub in ("shadow", "on", "off"):
+                await self.app.db.kv_set("model_mode", sub)
+                note = "（实盘不会自动下单）" if sub == "on" and not self.app.cfg.dry_run else ""
+                await self.send(f"选币模型已改为：{ {'shadow': '影子模式（只记录不下单）', 'on': '模拟盘自己下单', 'off': '关闭'}[sub] }{note}")
+            elif sub == "train":
+                await self.send("开始训练（用最近 10 天的结果档案和 7 天的早期快照），大概要几十秒……")
+                await self.send(e("\n".join(await md.train())))
+            else:
+                await self.send(await md.status_text())
         elif cmd == "/tune":
             br = getattr(self.app, "brain", None)
             if not br:

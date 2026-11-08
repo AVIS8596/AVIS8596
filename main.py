@@ -119,6 +119,10 @@ async def run_bot(cfg) -> None:
         app.brain = Brain(app)
         await app.brain.load()             # 学到的参数（数据库里）覆盖配置文件
         jobs.append(("自我学习", app.brain.run))
+        from bot.model import SelfModel
+        app.model = SelfModel(app)
+        await app.model.load()
+        jobs.append(("选币模型", app.model.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
     for c in cfg.enabled_chains:

@@ -118,6 +118,14 @@ async def daily_review(app: "App", start: float) -> str:
             txt = ""
         if txt:
             lines.append(txt)
+    md = getattr(app, "model", None)
+    if md:
+        try:
+            txt = await md.review_text(start)
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if txt:
+            lines.append(txt)
     br = getattr(app, "brain", None)
     if br:
         tl = [h for h in (await db.kv_get("tune_log", []) or []) if h["ts"] >= start]

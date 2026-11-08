@@ -125,6 +125,10 @@ def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
     return early_status(it, hist, now, cfg)[0]
 
 
+OBS_COLS = ("ts", "chain", "token", "price", "holders", "volume", "rug", "top10", "bundler", "insider", "creator",
+            "wash", "smart", "kol", "created")
+
+
 def obs_row(chain: str, addr: str, it: dict, now: float) -> tuple:
     """早期观察样本（和 structure_problem / early_status 用同样的字段口径）。"""
     return (now, chain, addr, f(it.get("price")), int(f(it.get("holder_count"))), volume(it),
@@ -204,7 +208,8 @@ class Strategies:
         self.attempts: deque = deque(maxlen=50)   # 最近交给确认期的时间（每小时限量）
         self.last_items: dict[str, dict[str, dict]] = {}   # 最近一轮列表（/whynot 用）
         self.missed: dict[str, float] = {}   # 热度够但结构不过关、已记录过的币
-        self.obs_at: dict[tuple[str, str], tuple[float, int]] = {}   # 早期观察样本：上次记录时间、已记几份
+        self.obs_at: dict[tuple[str, str], tuple[float, int]] = {}
+        self.obs_seq: dict[tuple[str, str], tuple[dict, dict | None]] = {}   # 每个币第一份 / 上一份快照（早期模型算走势）   # 早期观察样本：上次记录时间、已记几份
         self.notes: dict[str, str] = {}      # 每个币最近一次记录的判断类别（变了才写 strat_log）
 
     def conf(self, name: str) -> dict:
@@ -268,7 +273,16 @@ class Strategies:
                 last, n = self.obs_at.get(key, (0.0, 0))
                 if now - last >= 150 and n < 30:
                     self.obs_at[key] = (now, n + 1)
-                    obs.append(obs_row(chain, addr, it, now))
+                    row = obs_row(chain, addr, it, now)
+                    obs.append(row)
+                    model = getattr(self.app, "model", None)
+                    if model:      # 早期模型打分（影子模式只记录）
+                        s = dict(zip(OBS_COLS, row))
+                        first, prev = self.obs_seq.get(key, (s, None))
+                        self.obs_seq[key] = (first, s)
+                        t = asyncio.create_task(model.on_early(s, prev, first))
+                        self.app.hub._tasks.add(t)
+                        t.add_done_callback(self.app.hub._tasks.discard)
             if ec["enabled"] and it.get("_stage") == "即将毕业":
                 reason, why = early_status(it, dq_before, now, ec)
                 self.note(chain, addr, it, "早期建仓：" + (why or "达标，进入观察"))
@@ -341,6 +355,7 @@ class Strategies:
             self.missed.pop(k, None)
         for k in [k for k, v in self.obs_at.items() if now - v[0] > 6 * 3600]:
             self.obs_at.pop(k, None)
+            self.obs_seq.pop(k, None)
         return fired
 
     async def _save_obs(self, rows: list[tuple]) -> None:

@@ -278,3 +278,7 @@ strategies:
 learning:
   auto_tune: auto                 # auto：模拟盘自动改参数（实盘只发建议）｜suggest：只建议｜off：关闭；TG 里 /tune auto|suggest|off 也能改
   tune_hours: 6                   # 每隔几小时学一次（每次最多改一个参数，同一参数 24 小时内不重复改）
+  model: shadow                   # 自己的选币模型：shadow 影子（只记录不下单）｜on 模拟盘自己下单｜off；TG 里 /model 也能改
+  model_auto_promote: true        # 影子期选的币有 30 个出结果、平均赚 10% 以上、中位不亏 → 模拟盘自动让它下单（实盘永远不自动）
+  model_train_hours: 24           # 每天用最新数据重训一次
+  model_max_per_hour: 3           # 模型每小时最多下 3 笔
