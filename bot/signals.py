@@ -172,8 +172,29 @@ class SignalHub:
             delay = float(t.get("confirm_sec", 30))
             data = self.app.data
             p0 = await data.price(chain, token) or float(rep.get("price") or 0)
+            aud = None
+            if watch_wallet:      # 确认期里顺便给带单钱包做体检（24 小时内做过就直接用结果）
+                from .discovery.audit import audit, token_roles
+                role = token_roles(rep).get(watch_wallet)
+                if role:          # 带单钱包就是这个币的项目方 / 捆绑 / 老鼠仓 / 开盘狙击：跟它买就是给它接盘
+                    await self.app.trader.skip(chain, token, rep, reason,
+                                               f"带单钱包体检不过：它就是这个币的{role}，跟它买就是给它接盘")
+                    return
+                aud = asyncio.create_task(audit(self.app, chain, watch_wallet))
             if delay > 0:
                 await asyncio.sleep(delay)
+            if aud:
+                try:
+                    res = await asyncio.wait_for(aud, 15)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("带单钱包体检失败 %s: %s", watch_wallet, e)
+                    res = None
+                if res and res["verdict"] == "suspect":
+                    await self.app.trader.skip(chain, token, rep, reason, "带单钱包体检不过：" + res["notes"][0])
+                    return
+                if res and res["verdict"] == "sniper" and len(wallets or []) <= 1:
+                    await self.app.trader.skip(chain, token, rep, reason, "带单钱包体检：狙击型，跟单时早已晚了")
+                    return
             if watch_wallet:
                 sold = await self.app.db.fetchone(
                     "SELECT 1 FROM signals WHERE chain=? AND token=? AND wallet=? AND side='sell' AND ts>=?",

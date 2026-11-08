@@ -24,6 +24,7 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/audit 钱包地址 钱包体检：是不是项目方的号 / 老鼠仓 / 狙击机器人（跟单前机器人会自动体检）
 /me 你自己手动的实盘：画像、每笔期望、你买过机器人没买的币卡在哪，成交也算进实盘成本；/me add 链 地址 加别的钱包
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
@@ -340,6 +341,15 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd == "/audit":
+            chain, rest = await self._pick_chain(args)
+            if not rest:
+                await self.send("格式：/audit 钱包地址（可在地址前加链名）")
+                return
+            from ..discovery.audit import audit, text as audit_text
+            w = norm_addr(chain, rest[0])
+            await self.send("正在体检：拉它最近的交易、看它赚钱的币现在怎么样……")
+            await self.send(audit_text(chain, w, await audit(self.app, chain, w, force=True)))
         elif cmd == "/me":
             from ..owner import report as me_report
             sub = args[0].lower() if args else ""

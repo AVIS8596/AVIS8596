@@ -133,6 +133,9 @@ async def run_bot(cfg) -> None:
         jobs.append(("选币模型", app.model.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
+    if app.gmgn:
+        from bot.discovery.audit import Auditor
+        jobs.append(("钱包体检", Auditor(app).run))
     from bot.safety import Safety
     app.safety = Safety(app)
     jobs.append(("安全与成本校准", app.safety.run))

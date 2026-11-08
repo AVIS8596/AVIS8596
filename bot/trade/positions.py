@@ -638,8 +638,10 @@ class PositionManager:
             n = await db.fetchone("SELECT COUNT(*) n FROM bad_actors WHERE chain=? AND kind='wallet_rug' AND key LIKE ? "
                                   "AND ts>?", (p["chain"], f"{w}:%", now - 7 * 86400))
             if n and n["n"] >= 2:
-                await db.execute("UPDATE wallets SET status='inactive' WHERE chain=? AND address=? AND status='active'",
-                                 (p["chain"], w))
+                await db.execute("UPDATE wallets SET status='suspect', audit_at=?, audit_verdict='suspect', "
+                                 "audit_notes=? WHERE chain=? AND address=? AND status='active'",
+                                 (now, json.dumps([f"7 天内 {n['n']} 次带机器人买进亏光的币（最近：{why}）"],
+                                                  ensure_ascii=False), p["chain"], w))
                 log.warning("钱包 %s 7 天内带我们买进 %d 个亏光的币，移出监听", w, n["n"])
                 tg = getattr(self.app, "tg", None)
                 if tg:

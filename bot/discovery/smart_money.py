@@ -120,7 +120,7 @@ class SmartMoney:
         checked = {r["address"] for r in await db.fetchall(
             "SELECT address FROM candidates WHERE chain=? AND checked_at>?", (chain, day_ago))}
         known = {r["address"] for r in await db.fetchall(
-            "SELECT address FROM wallets WHERE chain=? AND status IN ('active','manual','blacklist')", (chain,))}
+            "SELECT address FROM wallets WHERE chain=? AND status IN ('active','manual','blacklist','suspect')", (chain,))}
         todo = {a: src for a, src in cands.items() if a not in checked and a not in known}
         log.info("%s 聪明钱候选 %d 个，待核实 %d 个", chain, len(cands), len(todo))
         added = await self.evaluate_many(chain, todo)

@@ -164,7 +164,8 @@ class DB:
         cur = await self.conn.execute("PRAGMA table_info(wallets)")
         wcols = {r[1] for r in await cur.fetchall()}
         for col, typ in (("avg_hold_sec", "REAL"), ("kind", "TEXT DEFAULT 'smart'"), ("sig_n", "INTEGER DEFAULT 0"),
-                         ("sig_ret", "REAL"), ("sig_hit", "REAL"), ("sig_dump", "REAL")):
+                         ("sig_ret", "REAL"), ("sig_hit", "REAL"), ("sig_dump", "REAL"),
+                         ("audit_at", "REAL"), ("audit_verdict", "TEXT"), ("audit_notes", "TEXT")):
             if col not in wcols:
                 await self.conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         cur = await self.conn.execute("PRAGMA table_info(shadow)")
@@ -250,7 +251,7 @@ class DB:
             """INSERT INTO wallets(chain,address,status,source,realized_usd,win_rate,trades,score,evaluated_at,created_at,
                  avg_hold_sec) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(chain,address) DO UPDATE SET
-                 status=CASE WHEN wallets.status IN ('manual','blacklist') THEN wallets.status
+                 status=CASE WHEN wallets.status IN ('manual','blacklist','suspect') THEN wallets.status
                              WHEN COALESCE(wallets.kind,'smart')!='smart' AND excluded.status='inactive'
                                THEN wallets.status ELSE excluded.status END,
                  realized_usd=excluded.realized_usd, win_rate=excluded.win_rate, trades=excluded.trades,

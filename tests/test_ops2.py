@@ -386,7 +386,7 @@ def test_bad_actor_memory(tmp_path):
             p = dict(await db.fetchone("SELECT * FROM positions WHERE id=1"))
             await pm._close(p, 0.05, "止损（-99.9%）")
             w = await db.fetchone("SELECT status FROM wallets WHERE address='RUGW'")
-            assert w["status"] == "inactive"                    # 7 天内第 2 次带进亏光的币：移出监听
+            assert w["status"] == "suspect"                     # 7 天内第 2 次带进亏光的币：标为可疑，不再监听
             tr = Trader.__new__(Trader)
             tr.app, tr.cfg = app, app.cfg
             # 同一个项目方发的新币
@@ -403,6 +403,92 @@ def test_bad_actor_memory(tmp_path):
                              "VALUES(2,'solana','T9','OKCOIN','open',100,0,'[]')")
             await pm._close(dict(await db.fetchone("SELECT * FROM positions WHERE id=2")), 0, "取不到价格超过 30 分钟")
             assert not await db.fetchone("SELECT 1 FROM bad_actors WHERE key='OKCOIN'")
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_wallet_audit_judge(tmp_path):
+    from bot.discovery.audit import audit, judge
+
+    def P(tok, pnl=0.5, sym=None, age=5.0):
+        return {"token": tok, "pnl": pnl, "symbol": sym or tok, "entry_age_min": age}
+    sells = {t: 1.0 for t in "ABCDE"}
+    # 赚钱的 5 个币里 4 个在它卖出后跌了 90% 以上：割完即死
+    v, notes = judge([P(t) for t in "ABCDE"], sells, {"A": 0.01, "B": 0.05, "C": 0.0, "D": 0.09, "E": 0.8}, 0)
+    assert v == "suspect" and notes[0].startswith("割完即死")
+    # 同名多合约
+    v, notes = judge([P("A", sym="TAOLF"), P("B", sym="taolf"), P("C")], sells, {"A": 1, "B": 1, "C": 1}, 0)
+    assert v == "suspect" and "TAOLF×2" in notes[0]
+    # 被标记过
+    assert judge([P("A")], sells, {"A": 1}, 3)[0] == "suspect"
+    # 开盘狙击（没有其他问题）
+    v, notes = judge([P(t, age=0.1) for t in "ABCDE"], sells, {t: 1.0 for t in "ABCDE"}, 0)
+    assert v == "sniper"
+    # 正常
+    assert judge([P(t) for t in "ABCDE"], sells, {t: 2.0 for t in "ABCDE"}, 0)[0] == "ok"
+
+    async def go():
+        db = DB(tmp_path / "au.db")
+        await db.open()
+        try:
+            await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana','W','active')")
+            now = time.time()
+            acts, holds = [], []
+            for i, t in enumerate("ABCDE"):
+                acts += [{"event_type": "buy", "timestamp": now - 7200 + i, "price_usd": 0.1, "cost_usd": 10,
+                          "token": {"address": t, "symbol": t}},
+                         {"event_type": "sell", "timestamp": now - 3600 + i, "price_usd": 1.0, "cost_usd": 100,
+                          "token": {"address": t, "symbol": t}}]
+                holds.append({"token": {"address": t, "creation_timestamp": now - 8000}, "history_bought_cost": 10,
+                              "history_sold_income": 100, "balance": 0, "usd_value": 0})
+
+            async def wallet_activity(chain, addr, n, cursor):
+                return {"activities": acts}
+
+            async def wallet_holdings(chain, addr, n, cursor):
+                return {"list": holds}
+
+            async def prices(chain, toks):
+                return {t: 0.001 for t in toks}             # 全部归零了
+            app = SimpleNamespace(db=db, gmgn=SimpleNamespace(wallet_activity=wallet_activity,
+                                                              wallet_holdings=wallet_holdings),
+                                  data=SimpleNamespace(prices=prices))
+            r = await audit(app, "solana", "W")
+            assert r["verdict"] == "suspect"
+            w = await db.fetchone("SELECT status, audit_verdict FROM wallets WHERE address='W'")
+            assert w["status"] == "suspect" and w["audit_verdict"] == "suspect"
+            assert (await audit(app, "solana", "W"))["cached"]           # 24 小时内用缓存
+            # 重新评估聪明钱时不会把可疑钱包改回 active
+            await db.upsert_wallet("solana", "W", status="active", source="x", realized_usd=1, win_rate=1, trades=1, score=1)
+            assert (await db.fetchone("SELECT status FROM wallets WHERE address='W'"))["status"] == "suspect"
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_audit_token_roles_and_creator_affinity(tmp_path):
+    from bot.discovery.audit import creator_affinity, judge, token_roles
+    rep = {"creator": "DEV", "bundle_wallets": [{"wallet": "B1"}], "insider_wallets": [{"wallet": "I1"}],
+           "sniper_wallets": [{"wallet": "S1"}]}
+    assert token_roles(rep) == {"B1": "捆绑", "I1": "老鼠仓", "S1": "开盘狙击", "DEV": "项目方"}
+    # 好币大多最终也会归零：一半归零不算割完即死，要 70% 以上
+    sells = {t: 1.0 for t in "ABCDEF"}
+    pos = [{"token": t, "pnl": 0.5, "symbol": t, "entry_age_min": 5} for t in "ABCDEF"]
+    assert judge(pos, sells, {"A": 0, "B": 0, "C": 0, "D": 2, "E": 2, "F": 2}, 0)[0] == "ok"
+    assert judge(pos, sells, {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 2}, 0)[0] == "suspect"
+
+    async def go():
+        db = DB(tmp_path / "ca.db")
+        await db.open()
+        try:
+            for t in ("X1", "X2"):
+                await db.execute("INSERT INTO tokens(chain,address,creator) VALUES('solana',?,'RUGDEV')", (t,))
+            app = SimpleNamespace(db=db)
+            assert await creator_affinity(app, "solana", ["X1", "X2", "Z"]) == ""      # 2 个、项目方没上黑名单
+            await db.execute("INSERT INTO bad_actors(chain,kind,key,ts,token,reason) VALUES('solana','creator','RUGDEV',?,"
+                             "'X1','x')", (time.time(),))
+            assert "跟项目方走得近" in await creator_affinity(app, "solana", ["X1", "X2"])
         finally:
             await db.close()
     asyncio.run(go())
