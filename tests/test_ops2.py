@@ -362,3 +362,47 @@ def test_fresh_reanalyzes_stale_report():
         new = await tr.fresh("solana", "T", old)
         assert calls == [True] and new["price"] == 2.0 and new["smart_buyers"] == [] and new["symbol"] == "X"
     asyncio.run(go())
+
+
+def test_bad_actor_memory(tmp_path):
+    from bot.trade.positions import PositionManager
+    from bot.trade.trader import Trader, skip_cat
+
+    async def go():
+        db = DB(tmp_path / "bad.db")
+        await db.open()
+        try:
+            now = time.time()
+            app = SimpleNamespace(db=db, cfg=Cfg({"trading": {}}))
+            pm = PositionManager.__new__(PositionManager)
+            pm.app, pm.cfg = app, app.cfg
+            await db.execute("INSERT INTO tokens(chain,address,symbol,creator,first_seen) VALUES('solana','T1','TAOLF','DEV',?)",
+                             (now,))
+            await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana','RUGW','active')")
+            await db.execute("INSERT INTO bad_actors(chain,kind,key,ts,token,reason) VALUES('solana','wallet_rug',"
+                             "'RUGW:T0',?,'T0','x')", (now - 3600,))
+            await db.execute("INSERT INTO positions(id,chain,token,symbol,status,cost_usd,realized_usd,source_wallets,"
+                             "opened_at) VALUES(1,'solana','T1','TAOLF','open',100,0,'[\"RUGW\"]',?)", (now - 600,))
+            p = dict(await db.fetchone("SELECT * FROM positions WHERE id=1"))
+            await pm._close(p, 0.05, "止损（-99.9%）")
+            w = await db.fetchone("SELECT status FROM wallets WHERE address='RUGW'")
+            assert w["status"] == "inactive"                    # 7 天内第 2 次带进亏光的币：移出监听
+            tr = Trader.__new__(Trader)
+            tr.app, tr.cfg = app, app.cfg
+            # 同一个项目方发的新币
+            why = await tr.bad_actor("solana", "T2", {"creator": "DEV", "symbol": "OTHER"})
+            assert why.startswith("项目方黑名单") and skip_cat(why) == "坏项目方"
+            # 换了项目方、同名重发
+            why = await tr.bad_actor("solana", "T3", {"creator": "DEV2", "symbol": "$taolf"})
+            assert why.startswith("同名币黑名单") and skip_cat(why) == "同名币"
+            # 发过一大堆币的项目方
+            assert "批量发币" in await tr.bad_actor("solana", "T4", {"creator": "X", "symbol": "NEW", "dev_launches": 40})
+            assert await tr.bad_actor("solana", "T5", {"creator": "Y", "symbol": "FINE", "dev_launches": 2}) == ""
+            # 数据源故障导致的"取不到价格"平仓不算坏人
+            await db.execute("INSERT INTO positions(id,chain,token,symbol,status,cost_usd,realized_usd,source_wallets) "
+                             "VALUES(2,'solana','T9','OKCOIN','open',100,0,'[]')")
+            await pm._close(dict(await db.fetchone("SELECT * FROM positions WHERE id=2")), 0, "取不到价格超过 30 分钟")
+            assert not await db.fetchone("SELECT 1 FROM bad_actors WHERE key='OKCOIN'")
+        finally:
+            await db.close()
+    asyncio.run(go())

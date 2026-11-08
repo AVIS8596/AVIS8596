@@ -56,7 +56,7 @@ def test_auc_and_fit_basic():
 def test_feature_vectors():
     v = feats_a({"score": 70, "mcap": 100000, "liquidity": 20000, "volume_1h": 50000, "buys_1h": 30, "sells_1h": 10,
                  "holders": 300, "age_hours": 2}, "robinhood", "smart_buy")
-    assert len(v) == len(FEATS_A) and v[9] == 0.75 and v[10] == 0.5 and v[-2] == 4 and v[-1] == 1
+    assert len(v) == len(FEATS_A) and v[9] == 0.75 and v[10] == 0.5 and v[22] == 4 and v[23] == 1
     s0 = {"ts": 0, "price": 1, "holders": 100, "volume": 1000, "created": -600, "chain": "solana"}
     s1 = {"ts": 120, "price": 1.5, "holders": 120, "volume": 2000, "created": -600, "chain": "solana"}
     b = feats_b(s1, s0, s0)

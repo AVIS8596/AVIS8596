@@ -234,11 +234,26 @@ class PositionManager:
                                    f"不是币真的归零。已恢复成持仓继续按规则管理，复盘数据也已更正")
         return len(rows)
 
+    async def backfill_bad(self) -> int:
+        """一次性：把最近 7 天亏光过的单子补记进坏人记忆。"""
+        db = self.app.db
+        if await db.kv_get("bad_backfill_v1", False):
+            return 0
+        rows = await db.fetchall("SELECT * FROM positions WHERE status='closed' AND cost_usd>0 AND realized_usd<=cost_usd*0.2 "
+                                 "AND closed_at>? AND (close_reason IS NULL OR close_reason NOT LIKE '取不到价格%')",
+                                 (time.time() - 7 * 86400,))
+        for p in rows:
+            cost = float(p["cost_usd"] or 0)
+            await self.remember_bad(dict(p), f"{p['symbol'] or '?'} 亏 {(1 - float(p['realized_usd'] or 0) / cost) * 100:.0f}%")
+        await db.kv_set("bad_backfill_v1", True)
+        return len(rows)
+
     async def run(self) -> None:
         try:
             await self.repair_outage_zeroes()
+            await self.backfill_bad()
         except Exception as e:  # noqa: BLE001
-            log.warning("恢复误平仓失败: %s", e)
+            log.warning("恢复误平仓 / 补记坏人失败: %s", e)
         interval = float(self.cfg.get("exit.check_interval_sec", 10))
         last_fill = 0.0
         while True:
@@ -589,12 +604,48 @@ class PositionManager:
         await self.app.db.execute(
             "UPDATE positions SET status='closed', closed_at=?, close_reason=?, realized_usd=? WHERE id=?",
             (time.time(), reason, realized, p["id"]))
+        # 亏光（亏 80% 以上，比如撤池子 / 项目方砸盘）：记住项目方和币名，之后不再碰（数据源故障导致的"取不到价格"不算）
+        cost = float(p["cost_usd"] or 0)
+        if cost > 0 and realized <= cost * 0.2 and not str(reason).startswith("取不到价格"):
+            try:
+                await self.remember_bad(p, f"{p.get('symbol') or '?'} 亏 {(1 - realized / cost) * 100:.0f}%")
+            except Exception as e:  # noqa: BLE001
+                log.debug("记录坏人失败: %s", e)
         # 更新带单钱包的跟单战绩（用于修正钱包评分）
         win = realized > float(p["cost_usd"] or 0)
         for w in json.loads(p["source_wallets"] or "[]"):
             col = "follow_wins" if win else "follow_losses"
             await self.app.db.execute(f"UPDATE wallets SET {col}={col}+1 WHERE chain=? AND address=?",
                                       (p["chain"], w))
+
+    async def remember_bad(self, p: dict, why: str) -> None:
+        from .trader import norm_symbol
+        db = self.app.db
+        now = time.time()
+        tok = await db.fetchone("SELECT creator FROM tokens WHERE chain=? AND address=?", (p["chain"], p["token"]))
+        creator = (tok["creator"] if tok else "") or ""
+        if creator:
+            await db.execute("INSERT OR REPLACE INTO bad_actors(chain,kind,key,ts,token,reason) VALUES(?,?,?,?,?,?)",
+                             (p["chain"], "creator", creator, now, p["token"], why))
+        sym = norm_symbol(p.get("symbol"))
+        if sym:
+            await db.execute("INSERT OR REPLACE INTO bad_actors(chain,kind,key,ts,token,reason) VALUES(?,?,?,?,?,?)",
+                             ("*", "symbol", sym, now, p["token"], why))
+        # 带我们买进亏光币的钱包：7 天内第 2 次就移出监听（多半是项目方自己的号或老鼠仓，"胜率高"是靠割人）
+        for w in json.loads(p.get("source_wallets") or "[]"):
+            await db.execute("INSERT OR REPLACE INTO bad_actors(chain,kind,key,ts,token,reason) VALUES(?,?,?,?,?,?)",
+                             (p["chain"], "wallet_rug", f"{w}:{p['token']}", now, p["token"], why))
+            n = await db.fetchone("SELECT COUNT(*) n FROM bad_actors WHERE chain=? AND kind='wallet_rug' AND key LIKE ? "
+                                  "AND ts>?", (p["chain"], f"{w}:%", now - 7 * 86400))
+            if n and n["n"] >= 2:
+                await db.execute("UPDATE wallets SET status='inactive' WHERE chain=? AND address=? AND status='active'",
+                                 (p["chain"], w))
+                log.warning("钱包 %s 7 天内带我们买进 %d 个亏光的币，移出监听", w, n["n"])
+                tg = getattr(self.app, "tg", None)
+                if tg:
+                    await tg.send(f"🚫 钱包 {w[:6]}…{w[-4:]} 7 天内第 {n['n']} 次带机器人买进亏光的币（最近：{why}），"
+                                  f"已移出监听——多半是项目方自己的号或老鼠仓")
+        log.info("记住坏人：%s 项目方 %s，币名 %s", why, creator[:8] or "?", sym)
 
     async def check_loss_streak(self) -> None:
         """连亏熔断：连续 N 笔亏损（亏超 3%）平仓，暂停买入一段时间。通常说明行情转冷或带单钱包状态不好。"""

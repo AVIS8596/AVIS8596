@@ -118,6 +118,10 @@ CREATE TABLE IF NOT EXISTS trade_costs (trade_id INTEGER PRIMARY KEY, ts REAL, c
 -- 你自己手动实盘成交的成本（成交价 vs 那一分钟 K 线中间价）
 CREATE TABLE IF NOT EXISTS manual_costs (tx TEXT PRIMARY KEY, ts REAL, chain TEXT, side TEXT, cost REAL, usd REAL);
 
+-- 坏人记忆：让我们亏光过（≥80%）的项目方和币名，之后同一个项目方 / 同名币不再买
+CREATE TABLE IF NOT EXISTS bad_actors (chain TEXT, kind TEXT, key TEXT, ts REAL, token TEXT, reason TEXT,
+  PRIMARY KEY (chain, kind, key));
+
 -- 自己的选币模型选中的币（影子模式只记录；acted=1 表示真的下单了）
 CREATE TABLE IF NOT EXISTS model_picks (ts REAL, chain TEXT, token TEXT, symbol TEXT, model TEXT, score REAL,
   price REAL, acted INTEGER DEFAULT 0, p60 REAL, p240 REAL);

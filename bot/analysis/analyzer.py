@@ -180,6 +180,9 @@ class Analyzer:
             "risks": facts.risks, "warnings": facts.warnings, "score": sc, "reasons": reasons,
             "smart_buyers": smart, "analyzed_at": time.time(), **extra,
         }
+        dev = ov.get("dev") or {}
+        rep["dev_launches"] = int(f(dev.get("creator_open_count")))           # 项目方以前发过几个币
+        rep["dev_sold"] = int(str(dev.get("creator_token_status") or "").lower() in ("sell", "creator_close"))
         return rep
 
     # ================================================================== Solana
@@ -320,6 +323,7 @@ class Analyzer:
         self._apply(res, facts, gsec)
         facts.age_hours = (time.time() - launch_ts) / 3600 if launch_ts else 0
         ex = self._extra(res, creator, launch_ts)
+        ex["lp_burn"] = str((gsec or {}).get("burn_status") or "")
         # 已知"阴谋地址"/早期发现者现在的持仓（来自大涨币挖矿）：先只记录，让结果档案告诉我们它们在场时是涨是跌
         if g_hold and supply:
             ks = list(g_hold)
@@ -445,7 +449,9 @@ class Analyzer:
                         similar_tol=float(self.cfg.get("discovery.similar_amount_cv", 0.15)))
         self._apply(res, facts, gsec)
         facts.age_hours = (time.time() - launch_ts) / 3600 if launch_ts else 0
-        return self._extra(res, creator, launch_ts)
+        ex = self._extra(res, creator, launch_ts)
+        ex["lp_burn"] = str((gsec or {}).get("burn_status") or "")
+        return ex
 
     async def _block_at(self, chain: str, ts: float) -> int:
         """按时间找区块号（二分查找），GMGN 只给创建时间不给区块号时用。"""
@@ -610,6 +616,9 @@ class Analyzer:
             for k in ("cabal_pct", "early_finder_pct", "winner_pct"):
                 feats[k] = rep.get(k, 0)
             feats["risks"] = len(rep.get("risks") or [])
+            feats["dev_launches"] = rep.get("dev_launches", 0)
+            feats["dev_sold"] = rep.get("dev_sold", 0)
+            feats["lp_burned"] = int(rep.get("lp_burn") == "burn")
             await db.execute(
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
                 (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),

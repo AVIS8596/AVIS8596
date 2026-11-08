@@ -24,7 +24,11 @@ SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱�
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
-             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘")]
+             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币")]
+
+
+def norm_symbol(s) -> str:
+    return str(s or "").strip().upper().lstrip("$")
 
 
 def skip_cat(why: str) -> str:
@@ -162,12 +166,46 @@ class Trader:
                 if rep["launch_x"] >= lx:
                     return (f"从发币价已经涨了 {rep['launch_x']:.0f} 倍（上限 {lx:g} 倍），涨幅大部分已经兑现，"
                             f"不在山顶接（3 个以上聪明钱一起买才追）")
+        # 坏人记忆 + 批量发币：让我们亏光过的项目方 / 同名币不再买；发过一大堆币的项目方不碰
+        bad = await self.bad_actor(chain, token, rep)
+        if bad:
+            return bad
         # 止损 / 紧急卖出过的币 24 小时内不再买
         last = await db.fetchone("SELECT close_reason, closed_at FROM positions WHERE chain=? AND token=? "
                                  "AND status='closed' ORDER BY closed_at DESC LIMIT 1", (chain, token))
         if last and str(last["close_reason"] or "").startswith(("止损", "🚨", "取不到价格")) and \
                 time.time() - float(last["closed_at"] or 0) < float(t.get("stoploss_cooldown_hours", 24)) * 3600:
             return "冷却期内（这个币止损过，24 小时内不再买）"
+        return ""
+
+    async def bad_actor(self, chain: str, token: str, rep: dict) -> str:
+        t = self.cfg.get("trading", {}) or {}
+        db = self.app.db
+        creator = str(rep.get("creator") or "")
+        sym = norm_symbol(rep.get("symbol"))
+        now = time.time()
+        if creator:
+            r = await db.fetchone("SELECT token, reason FROM bad_actors WHERE chain=? AND kind='creator' AND key=? AND ts>?",
+                                  (chain, creator, now - 30 * 86400))
+            if r:
+                return f"项目方黑名单：这个项目方的币以前让我们亏光过（{r['reason']}），不再碰它发的币"
+        if sym:
+            r = await db.fetchone("SELECT reason FROM bad_actors WHERE kind='symbol' AND key=? AND ts>?",
+                                  (sym, now - float(t.get("bad_symbol_hours", 48)) * 3600))
+            if r:
+                return f"同名币黑名单：{rep.get('symbol')} 这个名字 48 小时内刚亏光过（{r['reason']}），换个合约重发多半是同一伙人"
+            r = await db.fetchone("SELECT token FROM positions WHERE UPPER(TRIM(symbol))=? AND NOT (chain=? AND token=?) "
+                                  "AND opened_at>?", (sym, chain, token, now - 24 * 3600))
+            if r:
+                return f"同名币：24 小时内买过另一个叫 {rep.get('symbol')} 的币，同名重发多半是跟风盘或同一伙人"
+        mx = int(t.get("max_dev_launches", 15))
+        if mx and int(rep.get("dev_launches") or 0) >= mx:
+            return f"项目方批量发币：以前已经发过 {int(rep['dev_launches'])} 个币（上限 {mx}），撤池子的高发人群"
+        if creator:
+            n = await db.fetchone("SELECT COUNT(*) n FROM tokens WHERE chain=? AND creator=? AND first_seen>?",
+                                  (chain, creator, now - 7 * 86400))
+            if n and n["n"] >= int(t.get("max_dev_tokens_7d", 3)) + 1:
+                return f"项目方批量发币：7 天内机器人见过它发的 {n['n']} 个币"
         return ""
 
     async def launch_price(self, chain: str, token: str, created: float) -> float:
