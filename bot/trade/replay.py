@@ -13,24 +13,31 @@ import time
 from typing import TYPE_CHECKING
 
 from ..utils import f, fmt_usd
-from .positions import decide_exit, exit_rules, learned_rules
+from .positions import DEFAULT_EXIT_TIERS, decide_exit, exit_rules, learned_rules
 
 if TYPE_CHECKING:
     from ..app import App
 
 
+OLD_RULES = {"trailing_start_pct": 60, "trailing_drop_pct": 30}   # 11-08 之前的规则（配合 DEFAULT_EXIT_TIERS）
+
+
 def variants(exit_cfg: dict) -> dict[str, tuple[dict | None, bool]]:
-    """名称 → (覆盖的卖出规则，None 表示按档位的当前规则；是否跟卖聪明钱)"""
+    """名称 → (覆盖的卖出规则，None 表示按档位的当前规则；是否跟卖聪明钱)。
+    当前规则的"跟卖"开关跟着 config 的 exit.follow_smart_sell 走。"""
+    follow = bool(exit_cfg.get("follow_smart_sell", True))
     return {
-        "当前规则": (None, True),
-        "当前规则·不跟卖": (None, False),
-        "高手规则": (learned_rules(exit_cfg), False),
-        "止损 -25%": ({"stop_loss_pct": -25}, True),
+        "当前规则": (None, follow),
+        "旧规则（跟卖+观察期+移动止损）": ({"_old": True}, True),
+        "当前 + 跟卖": (None, True),
+        "当前 + 移动止损（+60% 后回撤 30%）": ({"trailing_start_pct": 60, "trailing_drop_pct": 30}, follow),
+        "当前 + 移动止损（+100% 后回撤 40%）": ({"trailing_start_pct": 100, "trailing_drop_pct": 40}, follow),
+        "当前 + 观察期 1 小时": ({"stall_hours": 1, "stall_min_gain_pct": 15}, follow),
+        "止损 -25%": ({"stop_loss_pct": -25}, follow),
+        "止损 -50%": ({"stop_loss_pct": -50}, follow),
         "早止盈（+50% 卖 30%）": ({"take_profit": [{"gain_pct": 50, "sell_pct": 30}, {"gain_pct": 100, "sell_pct": 50},
-                                                {"gain_pct": 300, "sell_pct": 50}]}, True),
-        "观察期 1 小时": ({"stall_hours": 1, "stall_min_gain_pct": 15}, True),
-        "移动止损放宽 +15%": ({"_trail_add": 15}, True),
-        "只用止损和止盈（拿满）": ({"stall_hours": 0, "trailing_start_pct": 10000, "max_hold_hours": 24}, False),
+                                                {"gain_pct": 300, "sell_pct": 50}]}, follow),
+        "高手规则": (learned_rules(exit_cfg), False),
     }
 
 
@@ -143,8 +150,13 @@ async def run(app: "App", days: float = 3) -> str:
         cost_usd = float(p["cost_usd"] or 0)
         actual.append((float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0, cost_usd, p["symbol"] or "?"))
         for name, (override, follow) in vs.items():
-            rules = dict(override) if override and "take_profit" in override and "stop_loss_pct" in override \
-                else {**tier_rules, **(override or {})}
+            if override and override.get("_old"):
+                base = {k: v for k, v in exit_cfg.items() if k not in ("tiers", "dynamic", "learned")}
+                rules = {**base, **OLD_RULES, **DEFAULT_EXIT_TIERS.get(p.get("tier") or "", {})}
+            elif override and "take_profit" in override and "stop_loss_pct" in override:
+                rules = dict(override)
+            else:
+                rules = {**tier_rules, **(override or {})}
             m = simulate(float(p["entry_price"]), float(p["opened_at"]), path, rules, ft if follow else None, fpct, cost)
             res[name].append((m, cost_usd, p["symbol"] or "?"))
 
@@ -177,5 +189,6 @@ async def run(app: "App", days: float = 3) -> str:
                      + ("样本还偏少，建议再积累一些再改" if used < 50 else ""))
     else:
         lines.append("当前规则已经是最好或差不多，暂时不用改")
+    lines.append("（注：11-08 起卖出规则改成了止损 + 分批止盈拿满，旧规则作为对照一直保留在回测里）")
     lines.append("（回测用 5 分钟 K 线近似，真实成交会有偏差；看的是相对好坏）")
     return "\n".join(lines)

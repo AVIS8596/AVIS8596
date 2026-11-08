@@ -173,8 +173,8 @@ async def shadow_compare(app: "App") -> str:
         better = sum(1 for _, v in done if _mult(v[b]) > _mult(v["v1"]) + 0.005)
         worse = sum(1 for _, v in done if _mult(v[b]) < _mult(v["v1"]) - 0.005)
         name = VARIANT_NAME[b]
-        lines += [f"{name} vs 旧规则（{len(done)} 个持仓，卖出已扣估算成本）：",
-                  f"  旧规则 平均 {a1:+.1f}%，合计 {fmt_usd(u1)} | {name} 平均 {ab:+.1f}%，合计 {fmt_usd(ub)}",
+        lines += [f"{name} vs 当前规则（{len(done)} 个持仓，卖出已扣估算成本）：",
+                  f"  当前规则 平均 {a1:+.1f}%，合计 {fmt_usd(u1)} | {name} 平均 {ab:+.1f}%，合计 {fmt_usd(ub)}",
                   f"  {name}更好 {better} 个，更差 {worse} 个"]
         for pid, v in sorted(done, key=lambda x: abs(_mult(x[1][b]) - _mult(x[1]["v1"])), reverse=True)[:2]:
             d = (_mult(v[b]) - _mult(v["v1"])) * 100
@@ -247,7 +247,7 @@ async def why_text(app: "App", pid: int) -> str:
             st = "已卖完" if s["closed"] else f"还剩 {float(s['frac']) * 100:.0f}%"
             return f"{st}，收益 {(_mult(s) - 1) * 100:+.1f}%"
         if "v1" in sh and "v2" in sh:
-            lines.append(f"\n<b>模拟对比</b>：旧规则 {desc(sh['v1'])} | 动态管理 {desc(sh['v2'])}"
+            lines.append(f"\n<b>模拟对比</b>：当前规则 {desc(sh['v1'])} | 动态管理 {desc(sh['v2'])}"
                          + (f" | 高手规则 {desc(sh['v3'])}" if "v3" in sh else ""))
             lg = json.loads(sh["v2"]["log"] or "[]")
             if lg:

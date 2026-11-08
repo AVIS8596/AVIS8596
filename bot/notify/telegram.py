@@ -204,8 +204,9 @@ class Telegram:
             tps = rules.get("take_profit") or []
             if tps:
                 plan += "止盈：" + "，".join(f"+{float(t['gain_pct']):g}% 卖{float(t['sell_pct']):g}%" for t in tps)
-                plan += (f" | 涨过 +{float(rules.get('trailing_start_pct', 60)):g}% 后回撤 "
-                         f"{float(rules.get('trailing_drop_pct', 30)):g}% 先卖一半\n")
+                ts = float(rules.get("trailing_start_pct", 60))
+                plan += (f" | 涨过 +{ts:g}% 后回撤 {float(rules.get('trailing_drop_pct', 30)):g}% 先卖一半\n"
+                         if ts < 1000 else "\n")
         await self.send(
             f"{self.mode()} ✅ <b>买入 #{pid}</b> {self.tok_link(chain, rep['address'], rep.get('symbol') or '?')}\n"
             f"原因：{e(reason)} | 评分 {rep['score']}\n"

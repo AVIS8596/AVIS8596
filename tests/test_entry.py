@@ -200,6 +200,7 @@ def test_follow_sell_needs_majority(tmp_path):
     async def go():
         db = DB(tmp_path / "m.db")
         await db.open()
+        RAW["exit"]["follow_smart_sell"] = True     # 配置里默认已关闭跟卖，这里测试跟卖本身的逻辑
         app = _app(db, [])
         sells = []
 

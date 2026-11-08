@@ -194,7 +194,7 @@ def test_full_flow(tmp_path):
         # 3) 复盘、对比、诊断都能正常出文字
         from bot.trade.review import daily_review, shadow_compare, why_text
         await db.execute("UPDATE shadow SET closed=1, last_price=1.0 WHERE pid=?", (pid,))
-        assert "动态管理 vs 旧规则（1 个持仓" in await shadow_compare(app)
+        assert "动态管理 vs 当前规则（1 个持仓" in await shadow_compare(app)
         assert "紧急卖出" in await daily_review(app, now - 3600)
         assert "健康分" in await why_text(app, pid)
         assert "没有这个持仓" in await why_text(app, 999)

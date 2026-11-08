@@ -38,7 +38,7 @@ LEARNED_DEFAULT = {
     "stall_hours": 0.5, "stall_min_gain_pct": 10,
 }
 VARIANTS = ("v1", "v2", "v3")
-VARIANT_NAME = {"v1": "旧规则", "v2": "动态管理", "v3": "高手规则"}
+VARIANT_NAME = {"v1": "当前规则", "v2": "动态管理", "v3": "高手规则"}
 
 
 def learned_rules(cfg: dict) -> dict:

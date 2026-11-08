@@ -147,10 +147,13 @@ exit:
   take_profit:                    # 分批止盈：涨到 x% 卖出持仓的 y%
     - { gain_pct: 100, sell_pct: 50 }
     - { gain_pct: 300, sell_pct: 50 }
-  trailing_start_pct: 60          # 涨超 60% 后启动移动止损
-  trailing_drop_pct: 30           # 从最高点回撤 30% 全部卖出
+  # 回放回测（11-08）：跟卖、"涨不上去就卖"、移动止损把后来大涨的币提前卖掉了；只用止损 + 分批止盈拿满 24 小时，
+  # 同一批入场合计从 -$58 变成 +$745（去掉最大赢家后仍 +$293）。所以先关掉这三条，让利润奔跑。
+  # 想恢复：trailing_start_pct 改回 60、follow_smart_sell 改回 true、tiers 里的 stall_hours 改回 1 / 4 / 12
+  trailing_start_pct: 10000       # 移动止损（10000 = 关闭）
+  trailing_drop_pct: 30
   max_hold_hours: 24              # 最长持仓时间
-  follow_smart_sell: true         # 带单的聪明钱卖出时跟着卖
+  follow_smart_sell: false        # 带单的聪明钱卖出时跟着卖（已关闭；动态管理的健康分里仍会参考聪明钱卖出）
   max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
   confirm_ticks: 2                # 止损 / 移动止损要连续 2 次检查（约 10 秒）都触发才卖，防插针
   hard_stop_pct: -50              # 跌破 -50% 不等确认，立刻卖
@@ -160,18 +163,18 @@ exit:
   #   follow_smart_sell_pct：带单聪明钱卖出时跟卖多少（%）
   tiers:
     normal:                       # 一般
-      max_hold_hours: 6
-      stall_hours: 1
+      max_hold_hours: 24
+      stall_hours: 0              # "涨不上去就卖"（0 = 关闭）
       stall_min_gain_pct: 15
     good:                         # 👍 较好
       max_hold_hours: 24
-      stall_hours: 4
+      stall_hours: 0
       stall_min_gain_pct: 20
     best:                         # 🔥 优质：拿得久、翻倍先出本，剩下的让利润多跑一会
       max_hold_hours: 72
-      stall_hours: 12
+      stall_hours: 0
       stall_min_gain_pct: 30
-      trailing_start_pct: 80
+      trailing_start_pct: 10000
       trailing_drop_pct: 35
       follow_smart_sell_pct: 50
       take_profit:
