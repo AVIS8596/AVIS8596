@@ -82,6 +82,18 @@ def test_entry_filters(tmp_path):
         app._state["high"] = 1.5                                                    # 只回撤 33%：正常
         assert await tr.check("solana", "T", dict(GOOD)) == ""
         app._state["high"] = 0.0
+        # 涨幅已兑现：发币价 0.08，现价 1（12.5 倍）
+        async def kline(chain, token, res, a, b):
+            return [{"time": a * 1000, "open": 0.08}]
+        app.gmgn = SimpleNamespace(kline=kline)
+        assert "涨幅大部分已经兑现" in await tr.check("solana", "X", dict(GOOD))
+        assert await tr.check("solana", "X", dict(GOOD), ["a", "b", "c"]) == ""   # 3 个聪明钱可以追
+        assert await tr.check("solana", "Y", {**GOOD, "age_hours": 30}) == ""      # 发币超过 24 小时不看
+        assert skip_cat("从发币价已经涨了 12 倍") == "涨幅已兑现"
+        rep = dict(GOOD)
+        await tr.check("solana", "X", rep)
+        assert any(x.startswith("❌ 从发币价涨了 12.5 倍") for x in tr.explain(rep))
+        del app.gmgn
         # 被拦下的信号记录下来，同一个币半小时只记一次；持仓满这类和质量无关的不记
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 30% 超限")
         await tr.skip("solana", "T", GOOD, "跟单", "捆绑地址持有 31% 超限")

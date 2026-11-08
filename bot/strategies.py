@@ -89,33 +89,45 @@ def structure_problem(it: dict, cfg: dict) -> str:
     return ""
 
 
-def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
-    """快毕业 + 结构干净 + 持有人快速增长。符合返回买入理由，否则返回空。"""
+def early_status(it: dict, hist: deque, now: float, cfg: dict) -> tuple[str, str]:
+    """快毕业 + 结构干净 + 持有人快速增长。返回 (买入理由, 不达标的原因)，二者只有一个非空。"""
     created = f(it.get("created_timestamp"))
     if created and now - created > float(cfg["max_age_min"]) * 60:
-        return ""
+        return "", f"发币超过 {float(cfg['max_age_min']) / 60:g} 小时"
     holders = int(f(it.get("holder_count")))
-    if holders < int(cfg["min_holders"]) or volume(it) < float(cfg["min_volume"]):
-        return ""
-    if structure_problem(it, cfg):
-        return ""
+    if holders < int(cfg["min_holders"]):
+        return "", f"持有人 {holders}（要 ≥ {cfg['min_holders']}）"
+    if volume(it) < float(cfg["min_volume"]):
+        return "", f"成交 ${volume(it):,.0f}（要 ≥ ${float(cfg['min_volume']):,.0f}）"
+    prob = structure_problem(it, cfg)
+    if prob:
+        return "", "结构不过关：" + prob
     win = float(cfg["growth_window_min"]) * 60
     old = [(t, h) for t, h in hist if now - t <= win * 2]
     if not old or now - old[0][0] < win * 0.6 or old[0][1] <= 0:
-        return ""   # 观察时间还不够，下一轮再看
+        return "", "刚进列表，观察持有人增长中"
     t0, h0 = old[0]
     growth = (holders / h0 - 1) * 100
     mins = (now - t0) / 60
     need = float(cfg["min_holder_growth_pct"]) * (mins / float(cfg["growth_window_min"]))
     if growth < max(need, float(cfg["min_holder_growth_pct"]) * 0.6):
-        return ""
+        return "", f"持有人增长不够（{mins:.0f} 分钟 +{growth:.0f}%，要 ≥ {cfg['min_holder_growth_pct']}%/{cfg['growth_window_min']} 分钟）"
     extra = []
     if int(f(it.get("smart_degen_count"))):
         extra.append(f"聪明钱 {int(f(it.get('smart_degen_count')))}")
     if int(f(it.get("renowned_count"))):
         extra.append(f"KOL {int(f(it.get('renowned_count')))}")
     return (f"{EARLY}（快毕业，持有人 {mins:.0f} 分钟 {h0}→{holders} +{growth:.0f}%"
-            + ("，" + "，".join(extra) if extra else "") + "）")
+            + ("，" + "，".join(extra) if extra else "") + "）"), ""
+
+
+def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
+    return early_status(it, hist, now, cfg)[0]
+
+
+def status_key(why: str) -> str:
+    """不达标原因的类别（去掉数字），类别变了才记一条，避免刷屏。"""
+    return why.split("（")[0].split("：")[0].split(" ")[0]
 
 
 def _k(n: float) -> str:
@@ -181,6 +193,7 @@ class Strategies:
         self.attempts: deque = deque(maxlen=50)   # 最近交给确认期的时间（每小时限量）
         self.last_items: dict[str, dict[str, dict]] = {}   # 最近一轮列表（/whynot 用）
         self.missed: dict[str, float] = {}   # 热度够但结构不过关、已记录过的币
+        self.notes: dict[str, str] = {}      # 每个币最近一次记录的判断类别（变了才写 strat_log）
 
     def conf(self, name: str) -> dict:
         base = EARLY_DEFAULTS if name == "early" else NARRATIVE_DEFAULTS
@@ -238,7 +251,8 @@ class Strategies:
                         if st["best_growth"] is None or g > st["best_growth"][0]:
                             st["best_growth"] = (g, str(it.get("symbol") or "?"))
             if ec["enabled"] and it.get("_stage") == "即将毕业":
-                reason = early_signal(it, dq_before, now, ec)
+                reason, why = early_status(it, dq_before, now, ec)
+                self.note(chain, addr, it, "早期建仓：" + (why or "达标，进入观察"))
                 if reason and (int(f(it.get("smart_degen_count"))) >= 2 or int(f(it.get("renowned_count"))) >= 1):
                     tier = "good"
             if not reason and nc["enabled"]:
@@ -280,6 +294,7 @@ class Strategies:
                 if holders < pend["holders"] or (sc is not None and pend["score"] is not None
                                                  and sc < pend["score"] - 15):
                     self.pending.pop(pk, None)   # 热度在退，不买
+                    self.note(chain, addr, it, f"{'早期建仓' if name == 'early' else '强叙事'}：观察期内热度回落，放弃")
                     continue
                 if now - pend["first"] < persist:
                     continue
@@ -302,6 +317,23 @@ class Strategies:
         for k in [k for k, t in self.missed.items() if now - t > 12 * 3600]:
             self.missed.pop(k, None)
         return fired
+
+    def note(self, chain: str, addr: str, it: dict, msg: str) -> None:
+        """记录主动建仓对这个币的判断变化（类别变了才记），/history 里能看到它为什么没早点买。"""
+        if getattr(self.app, "db", None) is None:
+            return
+        k = f"{chain}:{addr}"
+        key = status_key(msg.split("：", 1)[1] if "：" in msg else msg) + msg.split("：")[0]
+        if self.notes.get(k) == key:
+            return
+        self.notes[k] = key
+        if len(self.notes) > 5000:
+            self.notes.clear()
+        t = asyncio.create_task(self.app.db.execute(
+            "INSERT INTO strat_log(ts,chain,token,msg,price) VALUES(?,?,?,?,?)",
+            (time.time(), chain, addr, msg, f(it.get("price")))))
+        self.app.hub._tasks.add(t)
+        t.add_done_callback(self.app.hub._tasks.discard)
 
     def explain(self, chain: str, addr: str) -> list[str]:
         """这个币在主动建仓两条策略里的情况（给 /whynot 用）。"""
@@ -365,12 +397,16 @@ class Strategies:
         per_hour = int(self.cfg.get("strategies.max_per_hour", 2))
         if sum(1 for t in self.attempts if now - t < 3600) >= per_hour:
             log.info("主动建仓这 1 小时已经 %d 笔，跳过 %s", per_hour, token)
+            await self.app.db.execute("INSERT INTO strat_log(ts,chain,token,msg,price) VALUES(?,?,?,?,?)",
+                                      (now, chain, token, f"{prefix}：达标，但这 1 小时已经买了 {per_hour} 笔，跳过", 0))
             return
         n = await self.app.db.fetchone(
             "SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
             (prefix + "%", self.app.day_start()))
         if n and n["n"] >= int(c["max_per_day"]):
             log.info("%s 今天已买 %d 笔，达到上限，跳过 %s", prefix, n["n"], token)
+            await self.app.db.execute("INSERT INTO strat_log(ts,chain,token,msg,price) VALUES(?,?,?,?,?)",
+                                      (now, chain, token, f"{prefix}：达标，但今天已经买满 {n['n']} 笔，跳过", 0))
             return
         rep = await self.app.analyzer.analyze(chain, token, source=prefix)
         if not rep:

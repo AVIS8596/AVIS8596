@@ -23,3 +23,35 @@ def test_timeline():
     assert "拦下它的规则：" in txt
     assert "&lt;b&gt;" in txt and "×50.0" in txt
     assert "还没看到过" in build(ZoneInfo("UTC"), "x", c, 0, [], [], [], c + 10)
+
+
+def test_strategy_notes_in_timeline():
+    from collections import deque
+    from types import SimpleNamespace
+    from bot.strategies import Strategies, early_status
+    c = 1_000_000.0
+    notes = [{"ts": c + 120, "msg": "早期建仓：持有人增长不够（3 分钟 +8%，要 ≥ 15%/3 分钟）", "price": 0.00001},
+             {"ts": c + 600, "msg": "早期建仓：达标，但这 1 小时已经买了 2 笔，跳过", "price": 0}]
+    txt = build(ZoneInfo("UTC"), "t", c, 0.000005, [], [], [], c + 700, notes)
+    assert "🧪 早期建仓：持有人增长不够" in txt and "×2.0" in txt and "发币后 2 分钟" in txt
+    # 判断类别不变不重复记
+    logged = []
+    st = Strategies(SimpleNamespace(cfg=SimpleNamespace(get=lambda k, d=None: d), hub=SimpleNamespace(_tasks=set()),
+                                    db=SimpleNamespace(execute=None)))
+
+    async def ex(sql, args):
+        logged.append(args[3])
+    st.app.db.execute = ex
+
+    async def go():
+        import asyncio
+        st.note("solana", "A", {}, "早期建仓：持有人增长不够（3 分钟 +8%）")
+        st.note("solana", "A", {}, "早期建仓：持有人增长不够（3 分钟 +11%）")
+        st.note("solana", "A", {}, "早期建仓：结构不过关：老鼠仓 18%")
+        await asyncio.sleep(0)
+    import asyncio
+    asyncio.run(go())
+    assert len(logged) == 2
+    reason, why = early_status({"holder_count": 50, "created_timestamp": c}, deque(), c + 60,
+                               {"max_age_min": 180, "min_holders": 100, "min_volume": 1})
+    assert not reason and why.startswith("持有人 50")

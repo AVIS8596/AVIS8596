@@ -21,7 +21,7 @@ def _x(px: float, base: float) -> str:
 
 async def launch_price(app: "App", chain: str, token: str, created: float) -> float:
     """发币后第一根 5 分钟 K 线的开盘价（取不到返回 0）。"""
-    if not created or not app.gmgn:
+    if not created or not getattr(app, "gmgn", None):
         return 0.0
     try:
         rows = await app.gmgn.kline(chain, token, "5m", int(created) - 60, int(min(created + 3600, time.time())))
@@ -35,7 +35,7 @@ async def launch_price(app: "App", chain: str, token: str, created: float) -> fl
 
 
 def build(app_tz, symbol: str, created: float, base: float, outcomes: list[dict], skipped: list[dict],
-          positions: list[dict], now: float) -> str:
+          positions: list[dict], now: float, notes: list[dict] | None = None) -> str:
     def hm(ts: float) -> str:
         return datetime.fromtimestamp(ts, app_tz).strftime("%m-%d %H:%M")
 
@@ -47,6 +47,8 @@ def build(app_tz, symbol: str, created: float, base: float, outcomes: list[dict]
                             f"聪明钱 {ft.get('smart', 0)} 个"))
     for s in skipped:
         ev.append((s["ts"], f"❌ 没买（{s.get('trigger') or '?'}）{_x(f(s.get('price')), base)}：{html.escape(str(s.get('reason')))}"))
+    for n in notes or []:
+        ev.append((n["ts"], f"🧪 {html.escape(str(n.get('msg')))} {_x(f(n.get('price')), base)}".rstrip()))
     for p in positions:
         ev.append((p["opened_at"], f"✅ 买入 #{p['id']} {_x(f(p['entry_price']), base)}：{html.escape(p.get('reason') or '')}"))
         if p.get("closed_at"):
@@ -62,7 +64,8 @@ def build(app_tz, symbol: str, created: float, base: float, outcomes: list[dict]
     first = ev[0][0]
     if created:
         pts = sorted([(o["ts"], f(o.get("price"))) for o in outcomes] + [(x["ts"], f(x.get("price"))) for x in skipped]
-                     + [(p["opened_at"], f(p.get("entry_price"))) for p in positions])
+                     + [(p["opened_at"], f(p.get("entry_price"))) for p in positions]
+                     + [(n["ts"], f(n.get("price"))) for n in notes or []])
         px0 = next((px for _, px in pts if px > 0), 0.0)
         mult = f"，当时价格已经是发币价的 {px0 / base:.1f} 倍" if base > 0 and px0 > 0 else ""
         head.append(f"第一次看到：发币后 {(first - created) / 60:.0f} 分钟{mult}")
@@ -73,9 +76,10 @@ def build(app_tz, symbol: str, created: float, base: float, outcomes: list[dict]
     blocked = Counter(skip_cat(str(s.get("reason") or "")) for s in skipped if not buy or s["ts"] < buy)
     if blocked:
         head.append("拦下它的规则：" + html.escape("；".join(f"{k} ×{n}" for k, n in blocked.most_common(3))))
-    lines = head + [""] + [f"{hm(ts)} {txt}" for ts, txt in ev[-20:]]
-    if len(ev) > 20:
-        lines.insert(len(head) + 1, f"（共 {len(ev)} 条，只显示最近 20 条）")
+    rows = [f"{hm(ts)} {txt}" for ts, txt in ev]
+    if len(rows) > 20:   # 开头（为什么没早买）和结尾（最近发生了什么）都重要，中间省略
+        rows = rows[:8] + [f"……中间省略 {len(rows) - 20} 条……"] + rows[-12:]
+    lines = head + [""] + rows
     return "\n".join(lines)
 
 
@@ -89,10 +93,15 @@ async def history(app: "App", chain: str, token: str) -> str:
         "SELECT id, opened_at, closed_at, entry_price, reason, close_reason, realized_usd, symbol FROM positions "
         "WHERE chain=? AND token=? ORDER BY opened_at", (chain, token))]
     try:
+        notes = [dict(r) for r in await db.fetchall(
+            "SELECT ts, msg, price FROM strat_log WHERE chain=? AND token=? ORDER BY ts", (chain, token))]
+    except Exception:  # noqa: BLE001
+        notes = []
+    try:
         ov = await app.data.overview(chain, token)
     except Exception:  # noqa: BLE001
         ov = {}
     created = f(ov.get("created_ts"))
     symbol = ov.get("symbol") or next((x.get("symbol") for x in positions + skipped if x.get("symbol")), "?")
     base = await launch_price(app, chain, token, created)
-    return build(app.tz, str(symbol), created, base, outcomes, skipped, positions, time.time())
+    return build(app.tz, str(symbol), created, base, outcomes, skipped, positions, time.time(), notes)

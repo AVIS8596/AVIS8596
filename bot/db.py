@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS wallet_hits (
 );
 
 -- 回放回测用的 K 线缓存（入场后 24 小时的 5 分钟 K 线）
+-- 主动建仓对每个币的判断变化（/history 用）
+CREATE TABLE IF NOT EXISTS strat_log (ts REAL, chain TEXT, token TEXT, msg TEXT, price REAL);
+CREATE INDEX IF NOT EXISTS idx_strat_log ON strat_log(chain, token, ts);
+
 CREATE TABLE IF NOT EXISTS kline_cache (chain TEXT, token TEXT, t0 INTEGER, data TEXT, PRIMARY KEY (chain, token, t0));
 
 -- 学习中的顶级交易者及其交易画像

@@ -57,7 +57,7 @@ async def maintenance(app: App) -> None:
     import os
     db = app.db
     cut = time.time() - 30 * 86400
-    for table, col in (("signals", "ts"), ("skipped", "ts"), ("wallet_hits", "ts"),
+    for table, col in (("signals", "ts"), ("skipped", "ts"), ("wallet_hits", "ts"), ("strat_log", "ts"),
                        ("candidates", "checked_at")):
         try:
             await db.execute(f"DELETE FROM {table} WHERE {col}<?", (cut,))

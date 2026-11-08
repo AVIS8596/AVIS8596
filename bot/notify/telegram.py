@@ -452,6 +452,11 @@ class Telegram:
                  "", "<b>主动建仓</b>"]
         strat = getattr(self.app, "strategies", None)
         lines += strat.explain(chain, token) if strat else ["主动建仓未启用"]
+        age = f(rep.get("age_hours"))
+        if 0 < age <= 24 and f(rep.get("price")) > 0:
+            base = await self.app.trader.launch_price(chain, token, time.time() - age * 3600)
+            if base > 0:
+                rep["launch_x"] = f(rep["price"]) / base
         lines += ["", "<b>风控过滤</b>（所有买入方式都要过）"] + self.app.trader.explain(rep)
         sk = await self.app.db.fetchone("SELECT reason, ts FROM skipped WHERE chain=? AND token=? ORDER BY id DESC LIMIT 1",
                                         (chain, token))

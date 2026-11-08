@@ -24,7 +24,7 @@ SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱�
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
-             ("从 2 小时内高点", "接飞刀")]
+             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现")]
 
 
 def skip_cat(why: str) -> str:
@@ -51,6 +51,7 @@ class Trader:
         self._locks: dict[str, asyncio.Lock] = {}
         self._buying: set[str] = set()
         self._bal_warned: dict[str, float] = {}
+        self._launch: dict[str, float] = {}    # 发币价缓存（判断"涨幅已兑现"用）
 
     def setup(self) -> list[str]:
         """创建执行器。返回不可用的链（缺 key 等）。"""
@@ -147,6 +148,15 @@ class Trader:
         cd = float(t.get("token_cooldown_min", 120)) * 60
         if time.time() - await db.last_closed_at(chain, token) < cd:
             return "冷却期内"
+        # 涨幅已经兑现：刚发不久的币，价格已经是发币价的很多倍（默认 10 倍）还没回调，多半是在山顶接盘
+        lx = float(t.get("max_launch_multiple", 10))
+        if lx and 0 < age <= 24 and n_smart < int(t.get("chase_ok_smart", 3)) and float(rep.get("price") or 0) > 0:
+            base = await self.launch_price(chain, token, time.time() - age * 3600)
+            if base > 0:
+                rep["launch_x"] = float(rep["price"]) / base
+                if rep["launch_x"] >= lx:
+                    return (f"从发币价已经涨了 {rep['launch_x']:.0f} 倍（上限 {lx:g} 倍），涨幅大部分已经兑现，"
+                            f"不在山顶接（3 个以上聪明钱一起买才追）")
         # 止损 / 紧急卖出过的币 24 小时内不再买
         last = await db.fetchone("SELECT close_reason, closed_at FROM positions WHERE chain=? AND token=? "
                                  "AND status='closed' ORDER BY closed_at DESC LIMIT 1", (chain, token))
@@ -154,6 +164,15 @@ class Trader:
                 time.time() - float(last["closed_at"] or 0) < float(t.get("stoploss_cooldown_hours", 24)) * 3600:
             return "冷却期内（这个币止损过，24 小时内不再买）"
         return ""
+
+    async def launch_price(self, chain: str, token: str, created: float) -> float:
+        k = f"{chain}:{token}"
+        if k not in self._launch:
+            from .history import launch_price
+            if len(self._launch) > 3000:
+                self._launch.clear()
+            self._launch[k] = await launch_price(self.app, chain, token, created)
+        return self._launch[k]
 
     def explain(self, rep: dict, reason: str = "强叙事") -> list[str]:
         """把买入前的每一条风控过滤逐条列出来（✅ 通过 / ❌ 不通过），给 /whynot 用。"""
@@ -179,6 +198,9 @@ class Trader:
             (int(rep.get("holders") or 0) >= int(t.get("min_holders", 80)),
              f"持有人 {rep.get('holders')}（要 ≥ {t.get('min_holders', 80)}）"),
         ]
+        if rep.get("launch_x"):
+            lx = float(t.get("max_launch_multiple", 10))
+            rows.append((rep["launch_x"] < lx, f"从发币价涨了 {rep['launch_x']:.1f} 倍（要 ＜ {lx:g} 倍）"))
         return [("✅ " if ok else "❌ ") + txt for ok, txt in rows]
 
     async def consider(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str],

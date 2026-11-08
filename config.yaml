@@ -106,6 +106,7 @@ trading:
   regime: { cold: 0.5, normal: 1, hot: 1, cold_pause: false }   # 市场冷热：冷时仓位 ×0.5；cold_pause: true 则冷时暂停买入
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
   max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
+  max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
   max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
