@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -89,7 +90,7 @@ def manual_only(acts: list[dict], bot_rows: list[dict]) -> list[dict]:
     return out
 
 
-async def record_costs(app: "App", chain: str, acts: list[dict], limit: int = 60) -> int:
+async def record_costs(app: "App", chain: str, acts: list[dict], limit: int = 25) -> int:
     """你手动成交的价格 vs 那一分钟 K 线中间价，存进 manual_costs（实盘成本样本）。"""
     from .trade.costs import ref_price
     db = app.db
@@ -103,6 +104,7 @@ async def record_costs(app: "App", chain: str, acts: list[dict], limit: int = 60
         fill = f(a.get("price_usd"))
         tok = str(dig(a, "token.address", "token.token_address", default=""))
         ref = await ref_price(app, chain, tok, f(a.get("timestamp"))) if fill > 0 and tok else 0
+        await asyncio.sleep(0.3)        # 后台任务，慢慢查，别和交易抢 GMGN 额度
         cost = None
         if fill > 0 and ref > 0:
             cost = (fill / ref - 1) if _side(a) == "buy" else (1 - fill / ref)

@@ -236,3 +236,32 @@ def test_owner_report(tmp_path):
         assert prof["label"] == "我自己" and prof["source"] == "owner"
         await db.close()
     asyncio.run(go())
+
+
+def test_dex_fallback_when_gmgn_paused():
+    from bot.data import DataHub
+
+    calls = []
+
+    async def get(service, url, **kw):
+        calls.append(url)
+        return [{"baseToken": {"address": "TokA"}, "priceUsd": "0.5", "liquidity": {"usd": 1000}},
+                {"baseToken": {"address": "TokA"}, "priceUsd": "0.6", "liquidity": {"usd": 9000}},
+                {"baseToken": {"address": "Other"}, "priceUsd": "9", "liquidity": {"usd": 1}}]
+
+    class H:
+        _limiters: dict = {}
+
+        def set_rate(self, s, r):
+            self._limiters[s] = r
+    h = H()
+    h.get = get
+    gm = SimpleNamespace(paused_until=time.time() + 600)
+    app = SimpleNamespace(cfg=Cfg({}), gmgn=gm, http=h)
+    d = DataHub(app)
+
+    async def go():
+        assert await d.price("solana", "TokA") == 0.6               # 选流动性最大的池子
+        assert await d.prices("solana", ["TokA"]) == {"TokA": 0.6}  # 8 秒内走缓存
+        assert len(calls) == 1 and "tokens/v1/solana/TokA" in calls[0]
+    asyncio.run(go())

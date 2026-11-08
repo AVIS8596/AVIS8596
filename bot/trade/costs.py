@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import time
@@ -61,7 +62,10 @@ async def calibrate(app: "App", limit: int = 200) -> dict:
         try:
             if r["side"] == "buy":
                 fill = f(r["price_usd"])
-                ref = f(r["quote_price"]) or await ref_price(app, r["chain"], r["token"], f(r["ts"]))
+                ref = f(r["quote_price"])
+                if not ref:
+                    ref = await ref_price(app, r["chain"], r["token"], f(r["ts"]))
+                    await asyncio.sleep(0.3)        # 后台任务，慢慢查，别和交易抢 GMGN 额度
                 if fill > 0 and ref > 0:
                     cost = fill / ref - 1
             else:

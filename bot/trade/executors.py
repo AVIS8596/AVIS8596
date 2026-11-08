@@ -9,6 +9,7 @@ EVM：0x Swap API v2（allowance-holder），卖出前自动授权
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -78,8 +79,8 @@ class DryRunExecutor:
         公式 = 手续费（默认 1%）+ 价格冲击（约 2 × 金额 / 流动性，上限 30%）；
         实测 = 实盘成交价比报价多花 / 少拿的中位数（至少 8 笔实盘成交才用，见 costs.py）。"""
         fee = float(self.app.cfg.get("trading.sim_fee_pct", 1)) / 100
-        try:
-            liq = float((await self.app.data.overview(self.chain, token)).get("liquidity") or 0)
+        try:     # GMGN 被限流时最多等 3 秒，取不到流动性就按 5% 冲击估算，不让模拟成交卡住
+            liq = float((await asyncio.wait_for(self.app.data.overview(self.chain, token), 3)).get("liquidity") or 0)
         except Exception:  # noqa: BLE001
             liq = 0.0
         impact = min(2 * usd / liq, 0.3) if liq > 0 else 0.05

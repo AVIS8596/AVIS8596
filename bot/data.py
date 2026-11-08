@@ -23,6 +23,7 @@ class DataHub:
     def __init__(self, app: "App"):
         self.app = app
         self.provider = app.cfg.get("data.provider", "gmgn")
+        self._dex: dict[tuple[str, str], tuple[float, float]] = {}   # DexScreener 兜底价格缓存
         self._px: dict[tuple[str, str], tuple[float, float]] = {}
         self._info: dict[tuple[str, str], tuple[float, dict]] = {}
 
@@ -52,9 +53,20 @@ class DataHub:
                     self._info.pop(kk, None)
         return d
 
+    def gm_paused(self) -> bool:
+        g = self.app.gmgn
+        return bool(g and g.paused_until > time.time() + 2)
+
     async def price(self, chain: str, token: str) -> float:
         if self.use_gmgn:
-            return f(dig(await self._gm_info(chain, token), "price.price", "price"))
+            if self.gm_paused():        # GMGN 被限流暂停时用 DexScreener 取价，止盈止损不停摆
+                p = (await self.dex_prices(chain, [token])).get(token, 0.0)
+                if p > 0:
+                    return p
+            p = f(dig(await self._gm_info(chain, token), "price.price", "price"))
+            if p > 0:
+                return p
+            return (await self.dex_prices(chain, [token])).get(token, 0.0)
         return await self.app.birdeye.price(chain, token)
 
     async def prices(self, chain: str, tokens: list[str]) -> dict[str, float]:
@@ -62,8 +74,59 @@ class DataHub:
             return {}
         if not self.use_gmgn:
             return await self.app.birdeye.multi_price(chain, tokens)
-        res = await asyncio.gather(*(self.price(chain, t) for t in tokens), return_exceptions=True)
+        if self.gm_paused():
+            got = await self.dex_prices(chain, tokens)
+            if len(got) >= len(tokens) * 0.5:
+                return got
+        sem = asyncio.Semaphore(6)       # 一次最多 6 个并发，避免一批几十个请求同时冲向 GMGN
+
+        async def one(t: str) -> float:
+            async with sem:
+                return await self.price(chain, t)
+        res = await asyncio.gather(*(one(t) for t in tokens), return_exceptions=True)
         return {t: p for t, p in zip(tokens, res) if isinstance(p, float) and p > 0}
+
+    DEX_CHAIN = {"solana": "solana", "bsc": "bsc", "ethereum": "ethereum", "base": "base", "robinhood": "robinhood"}
+
+    async def dex_prices(self, chain: str, tokens: list[str]) -> dict[str, float]:
+        """DexScreener 免费接口兜底取价（每次最多 30 个币；取流动性最大的池子）。"""
+        cid = self.DEX_CHAIN.get(chain)
+        if not cid or not tokens:
+            return {}
+        if "dexs" not in self.app.http._limiters:
+            self.app.http.set_rate("dexs", 4)
+        out: dict[str, float] = {}
+        now = time.time()
+        need = []
+        for t in tokens:
+            hit = self._dex.get((chain, t))
+            if hit and now - hit[0] < 8:
+                out[t] = hit[1]
+            else:
+                need.append(t)
+        for i in range(0, len(need), 30):
+            batch = need[i:i + 30]
+            try:
+                rows = await self.app.http.get("dexs", f"https://api.dexscreener.com/tokens/v1/{cid}/{','.join(batch)}",
+                                               retries=1, timeout=10)
+            except Exception as e:  # noqa: BLE001
+                log.debug("DexScreener 取价失败: %s", e)
+                continue
+            best: dict[str, tuple[float, float]] = {}
+            low = {t.lower(): t for t in batch}
+            for r in rows if isinstance(rows, list) else (rows or {}).get("pairs") or []:
+                a = str(dig(r, "baseToken.address", default="")).lower()
+                if a not in low:
+                    continue
+                liq, px = f(dig(r, "liquidity.usd", default=0)), f(r.get("priceUsd"))
+                if px > 0 and liq >= best.get(a, (-1, 0))[0]:
+                    best[a] = (liq, px)
+            for a, (_, px) in best.items():
+                out[low[a]] = px
+                self._dex[(chain, low[a])] = (now, px)
+        if len(self._dex) > 5000:
+            self._dex.clear()
+        return out
 
     async def native_usd(self, chain: str) -> float:
         info = CHAINS[chain]
@@ -255,7 +318,8 @@ class DataHub:
             g = self.app.gmgn
             parts.append(f"GMGN 已用权重 {g.weight_used:,}，被限流 {g.bans} 次")
             if g.paused_until > time.time():
-                parts.append(f"⚠️ GMGN 限流暂停到 {time.strftime('%H:%M:%S', time.localtime(g.paused_until))}")
+                parts.append(f"⚠️ GMGN 限流暂停到 {self.app.fmt_time(g.paused_until)}（期间价格改用 DexScreener，"
+                             f"止盈止损照常；{g.last_err[:60]}）")
             if g.disabled:
                 parts.append("GMGN 套餐不支持：" + ", ".join(sorted(g.disabled)))
         if self.app.birdeye.key:

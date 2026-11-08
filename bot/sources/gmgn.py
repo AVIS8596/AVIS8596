@@ -110,6 +110,11 @@ class _Bucket:
                 await asyncio.sleep((w - self.tokens) / self.rate)
 
 
+_RETRY = object()       # 被限流，稍后重试
+_NET = object()         # 网络错误 / 服务器 5xx，稍后重试（下单除外）
+_SKIP = object()
+
+
 class Gmgn:
     def __init__(self, api_key: str, private_key_pem: str = "", plan: str = "plus", usage: float = 0.8):
         self.key = api_key
@@ -119,6 +124,9 @@ class Gmgn:
             rate = min(rate, 1.5)   # 实测免费版实际额度比文档写的紧，保守一点，避免被封
         self.bucket = _Bucket(rate)
         self.paused_until = 0.0
+        self.consec = 0                 # 连续被限流的次数（解封后先放一个请求试探，成功了才全部放行）
+        self.gate = asyncio.Lock()
+        self.last_err = ""
         self.disabled: set[str] = set()                    # 当前套餐用不了的接口
         self.weight_used = 0
         self.bans = 0
@@ -156,6 +164,32 @@ class Gmgn:
             wait = self.paused_until - time.time()
             if wait > 0:
                 await asyncio.sleep(wait + 0.5)
+            if self.consec:
+                # 刚被限流过：同一时间只放一个请求出去试探，免得解封瞬间一拥而上又被封（GMGN 封禁期间的请求会延长封禁）
+                async with self.gate:
+                    wait = self.paused_until - time.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait + 0.5)
+                    res = await self._once(method, path, query, body_str, sess, signed, trade, dkey) \
+                        if self.consec else _SKIP
+                if res is _SKIP:          # 排队期间别的请求已经试探成功了：正常发
+                    res = await self._once(method, path, query, body_str, sess, signed, trade, dkey)
+            else:
+                res = await self._once(method, path, query, body_str, sess, signed, trade, dkey)
+            if res is _RETRY or res is _NET:
+                if attempt < retries and path != "/v1/trade/swap":
+                    if res is _NET:
+                        await asyncio.sleep(1 + attempt)
+                    continue
+                raise GmgnError(path, 429 if res is _RETRY else 0, None,
+                                "RATE_LIMIT" if res is _RETRY else "NETWORK", self.last_err)
+            return res
+        return None
+
+    async def _once(self, method: str, path: str, query: dict | None, body_str: str, sess: aiohttp.ClientSession,
+                    signed: bool, trade: bool, dkey: str) -> Any:
+        """发一次请求。被限流返回 _RETRY；网络错误 / 服务器错误抛 GmgnError（由调用方决定）。"""
+        if True:
             await self.bucket.take(WEIGHTS.get(path, 2))
             self.weight_used += WEIGHTS.get(path, 2)
             ts = int(time.time())
@@ -172,31 +206,35 @@ class Gmgn:
                     reset_hdr = resp.headers.get("X-RateLimit-Reset", "")
                     status = resp.status
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if attempt >= retries or path == "/v1/trade/swap":   # 下单绝不盲目重发
+                if path == "/v1/trade/swap":   # 下单绝不盲目重发
                     raise GmgnError(path, 0, None, "NETWORK", str(e)) from e
-                await asyncio.sleep(1 + attempt)
-                continue
+                self.last_err = str(e)
+                return _NET
             try:
                 js = json.loads(text)
             except json.JSONDecodeError:
-                if status >= 500 and attempt < retries and path != "/v1/trade/swap":
-                    await asyncio.sleep(1 + attempt)
-                    continue
+                if status >= 500 and path != "/v1/trade/swap":
+                    self.last_err = f"HTTP {status} {text[:100]}"
+                    return _NET
                 raise GmgnError(path, status, None, "NON_JSON", text[:200])
             if js.get("code") == 0:
+                if self.consec:
+                    log.info("GMGN 已恢复（之前连续被限流 %d 次）", self.consec)
+                self.consec = 0
                 return js.get("data")
             err = str(js.get("error") or "")
             reset_at = float(js.get("reset_at") or (reset_hdr if reset_hdr.isdigit() else 0) or 0)
             if err.startswith("RATE_LIMIT") or status == 429:
-                # 全局暂停到解封时间，期间任何请求都会延长封禁
-                fallback = 60 if "BAN" in err else 5
-                self.paused_until = max(self.paused_until, (reset_at or time.time() + fallback) + 1)
+                # 全局暂停到解封时间；连续被限流时等待时间翻倍（5 秒起，最长 10 分钟），解封后先试探
+                self.consec += 1
+                fallback = min(600.0, (60 if "BAN" in err else 5) * 2 ** (self.consec - 1))
+                self.paused_until = max(self.paused_until, max(reset_at, time.time() + fallback) + 1)
                 self.bucket.tokens = 0          # 解封后从零开始慢慢恢复，不要一下子把积压的请求全发出去
                 self.bans += 1
-                log.warning("GMGN 限流（%s），所有 GMGN 请求暂停到 %s", err or status,
-                            time.strftime("%H:%M:%S", time.localtime(self.paused_until)))
-                if attempt < retries and path != "/v1/trade/swap":
-                    continue
+                self.last_err = f"{err or status} {js.get('message') or ''}".strip()
+                log.warning("GMGN 限流（%s，第 %d 次连续），所有 GMGN 请求暂停 %.0f 秒", self.last_err, self.consec,
+                            self.paused_until - time.time())
+                return _RETRY
             msg = str(js.get("message") or "")
             if err in ("PLAN_UPGRADE_REQUIRED", "PRO_PLAN_REQUIRED"):
                 up = str(js.get("upgrade_message") or msg or "")

@@ -184,7 +184,8 @@ class Safety:
         self.app = app
         self.cfg = app.cfg
         self.hc = os.environ.get("HEALTHCHECK_URL", "").strip()
-        self.last = {"cost": 0.0, "withdraw": 0.0, "owner": 0.0}
+        # 启动 20 分钟后才做你的实盘参考更新，避免重启时一堆后台请求同时冲向 GMGN
+        self.last = {"cost": 0.0, "withdraw": 0.0, "owner": time.time() - 24 * 3600 + 1200}
 
     async def ping(self, fail: bool = False) -> None:
         if not self.hc:
