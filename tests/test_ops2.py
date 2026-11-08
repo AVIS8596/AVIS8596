@@ -174,3 +174,65 @@ def test_backup_slim_and_restore_check(tmp_path):
     bad = tmp_path / "bad.db"
     bad.write_bytes(b"not a db")
     assert check_backup(bad).startswith("❌")
+
+
+def test_owner_report(tmp_path):
+    from bot import owner
+
+    async def go():
+        db = DB(tmp_path / "o.db")
+        await db.open()
+        now = time.time()
+        acts = [
+            # 机器人下的单（哈希对得上）
+            {"event_type": "buy", "tx_hash": "BOT1", "timestamp": now - 7200, "price_usd": 1.0, "cost_usd": 10,
+             "token": {"address": "B", "symbol": "BOTC"}},
+            # 你手动的：WIN 买 1.0 卖 3.0；LOSE 买 1.0 卖 0.5
+            {"event_type": "buy", "tx_hash": "M1", "timestamp": now - 7000, "price_usd": 1.02, "cost_usd": 50,
+             "token": {"address": "WIN", "symbol": "WIN"}},
+            {"event_type": "sell", "tx_hash": "M2", "timestamp": now - 3000, "price_usd": 2.85, "cost_usd": 140,
+             "token": {"address": "WIN", "symbol": "WIN"}},
+            {"event_type": "buy", "tx_hash": "M3", "timestamp": now - 6000, "price_usd": 1.0, "cost_usd": 50,
+             "token": {"address": "LOSE", "symbol": "LOSE"}},
+            {"event_type": "sell", "tx_hash": "M4", "timestamp": now - 5000, "price_usd": 0.5, "cost_usd": 25,
+             "token": {"address": "LOSE", "symbol": "LOSE"}},
+        ]
+        holds = [{"token": {"address": "WIN", "creation_timestamp": now - 8000, "total_supply": 1e9},
+                  "history_bought_cost": 50, "history_sold_income": 140, "balance": 0, "usd_value": 0},
+                 {"token": {"address": "LOSE", "creation_timestamp": now - 6600, "total_supply": 1e9},
+                  "history_bought_cost": 50, "history_sold_income": 25, "balance": 0, "usd_value": 0}]
+
+        async def wallet_activity(chain, addr, n, cursor):
+            return {"activities": acts if chain == "solana" else []}
+
+        async def wallet_holdings(chain, addr, n, cursor):
+            return {"list": holds if chain == "solana" else []}
+
+        async def kline(chain, token, res, a, b):
+            px = {"WIN": 1.0, "LOSE": 1.0}.get(token, 1.0)
+            return [{"time": (a + 170) * 1000, "open": px, "close": px if a + 180 < now - 4000 else px * 3}]
+        app = SimpleNamespace(db=db, cfg=Cfg({}), live_costs=None,
+                              gmgn=SimpleNamespace(wallet_activity=wallet_activity, wallet_holdings=wallet_holdings,
+                                                   kline=kline))
+        app.cfg.secrets = SimpleNamespace(gmgn_wallet_sol="SoLwallet", gmgn_wallet_evm="0xABC")
+        await db.execute("INSERT INTO trades(ts,chain,token,side,tx,dry_run,ok) VALUES(?,?,?,?,?,?,?)",
+                         (now - 7200, "solana", "B", "buy", "BOT1", 0, 1))
+        await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
+                         (now - 7100, "solana", "WIN", "WIN", "x", 1.0, '{"score": 50, "smart": 0}'))
+        try:
+            txt = await owner.report(app)
+        except Exception:
+            await db.close()
+            raise
+        assert "你在 solana" in txt and "已清仓 2 个币" in txt
+        assert "WIN 你赚 +180%（机器人新币评分不够" in txt
+        assert "机器人没看到 ×1" in txt
+        n = await db.fetchone("SELECT COUNT(*) n FROM manual_costs")
+        assert n["n"] == 4                                   # 只记你手动的 4 笔，机器人那笔排除
+        buy = await db.fetchone("SELECT cost FROM manual_costs WHERE tx='m1'")
+        assert abs(buy["cost"] - 0.02) < 1e-6
+        assert app.live_costs["all"]["buy"]["n"] == 2 and app.live_costs["all"]["me"] == 4
+        prof = await db.fetchone("SELECT label, source FROM learn_wallets WHERE address='SoLwallet'")
+        assert prof["label"] == "我自己" and prof["source"] == "owner"
+        await db.close()
+    asyncio.run(go())

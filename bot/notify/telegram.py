@@ -24,6 +24,7 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/me 你自己手动的实盘：画像、每笔期望、你买过机器人没买的币卡在哪，成交也算进实盘成本；/me add 链 地址 加别的钱包
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
 /backup 立即把数据备份发到这里（每天也会自动发）；/restore 用备份恢复
@@ -333,6 +334,22 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd == "/me":
+            from ..owner import report as me_report
+            sub = args[0].lower() if args else ""
+            if sub == "add" and len(args) >= 3 and args[1].lower() in self.app.cfg.enabled_chains:
+                from ..owner import owner_wallets
+                ws = await owner_wallets(self.app)
+                c = args[1].lower()
+                ws.append((c, norm_addr(c, args[2])))
+                await self.app.db.kv_set("owner_wallets", [list(x) for x in dict.fromkeys(ws)])
+                await self.send(f"已加入你的钱包：{c} {e(args[2][:8])}…，发 /me 查看")
+            elif sub == "reset":
+                await self.app.db.kv_set("owner_wallets", None)
+                await self.send("已恢复为默认（GMGN 绑定的 Solana 钱包 + EVM 钱包在罗宾汉链）")
+            else:
+                await self.send("正在拉你的交易记录、逐笔对 K 线算成本，大概要 1 分钟……")
+                await self.send(await me_report(self.app))
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))

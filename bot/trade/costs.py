@@ -84,7 +84,13 @@ async def summarize(app: "App", days: float = 30) -> dict:
     db = app.db
     since = time.time() - days * 86400
     out: dict[str, dict] = {}
-    rows = await db.fetchall("SELECT chain, side, cost FROM trade_costs WHERE ts>? AND cost IS NOT NULL", (since,))
+    rows = [dict(r, src="bot") for r in await db.fetchall(
+        "SELECT chain, side, cost FROM trade_costs WHERE ts>? AND cost IS NOT NULL", (since,))]
+    try:      # 你自己手动的实盘成交也算样本（/me 会自动收集）
+        rows += [dict(r, src="me") for r in await db.fetchall(
+            "SELECT chain, side, cost FROM manual_costs WHERE ts>? AND cost IS NOT NULL", (since,))]
+    except Exception:  # noqa: BLE001
+        pass
     # 失败率只看 11-08 01:45 修复下单问题（GMGN 中间状态、余额查询）之后的成交，之前的老问题不算
     fails = await db.fetchall("SELECT chain, side, ok, error FROM trades WHERE dry_run=0 AND ts>?", (max(since, FIX_TS),))
     for scope in ["all"] + sorted({r["chain"] for r in rows}):
@@ -102,6 +108,7 @@ async def summarize(app: "App", days: float = 30) -> dict:
             d[side] = {"n": len(cs), "med": median(cs), "avg": sum(cs) / len(cs) if cs else 0.0,
                        "fail": sum(1 for r in tot if not r["ok"]) / len(tot) if tot else 0.0, "tries": len(tot),
                        "errs": sorted(errs.items(), key=lambda kv: -kv[1])[:4]}
+        d["me"] = sum(1 for r in sel if r["src"] == "me")
         out[scope] = d
     out["_at"] = time.time()
     await db.kv_set("live_costs", out)
@@ -138,7 +145,8 @@ def text(costs: dict | None) -> str:
             continue
         name = "全部" if scope == "all" else scope
         b, s = d["buy"], d["sell"]
-        lines.append(f"  {name}：买入多花 中位 {b['med'] * 100:+.1f}%（{b['n']} 笔），卖出少拿 中位 {s['med'] * 100:+.1f}%"
+        me = f"，其中你手动的 {d.get('me', 0)} 笔" if d.get("me") else ""
+        lines.append(f"  {name}{me}：买入多花 中位 {b['med'] * 100:+.1f}%（{b['n']} 笔），卖出少拿 中位 {s['med'] * 100:+.1f}%"
                      f"（{s['n']} 笔），失败率 买 {b['fail'] * 100:.0f}%（{b['tries']} 次）/ 卖 {s['fail'] * 100:.0f}%"
                      f"（{s['tries']} 次）")
     rt = max(0.0, a["buy"]["med"]) + max(0.0, a["sell"]["med"])

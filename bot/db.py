@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS early_tok (chain TEXT, token TEXT, first_ts REAL, p60
 -- 实盘真实成交成本（成交价比报价多花 / 少拿的比例）
 CREATE TABLE IF NOT EXISTS trade_costs (trade_id INTEGER PRIMARY KEY, ts REAL, chain TEXT, side TEXT, cost REAL, usd REAL);
 
+-- 你自己手动实盘成交的成本（成交价 vs 那一分钟 K 线中间价）
+CREATE TABLE IF NOT EXISTS manual_costs (tx TEXT PRIMARY KEY, ts REAL, chain TEXT, side TEXT, cost REAL, usd REAL);
+
 -- 自己的选币模型选中的币（影子模式只记录；acted=1 表示真的下单了）
 CREATE TABLE IF NOT EXISTS model_picks (ts REAL, chain TEXT, token TEXT, symbol TEXT, model TEXT, score REAL,
   price REAL, acted INTEGER DEFAULT 0, p60 REAL, p240 REAL);

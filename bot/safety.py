@@ -184,7 +184,7 @@ class Safety:
         self.app = app
         self.cfg = app.cfg
         self.hc = os.environ.get("HEALTHCHECK_URL", "").strip()
-        self.last = {"cost": 0.0, "withdraw": 0.0}
+        self.last = {"cost": 0.0, "withdraw": 0.0, "owner": 0.0}
 
     async def ping(self, fail: bool = False) -> None:
         if not self.hc:
@@ -230,6 +230,13 @@ class Safety:
                     if not await db.kv_get("cost_applied_at", 0) and \
                             max(a.get("buy", {}).get("n", 0), a.get("sell", {}).get("n", 0)) >= MIN_N:
                         await db.kv_set("cost_applied_at", now)      # 从这一刻起模拟盘按实测成本成交
+                if now - self.last["owner"] > 24 * 3600 and getattr(self.app, "gmgn", None):
+                    self.last["owner"] = now
+                    try:          # 每天悄悄更新一次你手动交易的成本样本和画像（/me 才发报告）
+                        from .owner import report
+                        await report(self.app, send_costs=True)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("更新你的实盘参考失败: %s", e)
                 if now - self.last["withdraw"] > 24 * 3600:
                     self.last["withdraw"] = now
                     await self.withdraw_check()
