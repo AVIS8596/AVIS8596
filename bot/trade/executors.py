@@ -424,23 +424,37 @@ class GmgnExecutor:
     def _err(r: dict) -> str:
         return str(r.get("error_status") or r.get("error_code") or r.get("status") or "未知错误")
 
+    async def _bal_safe(self, token: str, tries: int = 3) -> tuple[int | None, int | None]:
+        """查余额，节点限流（429）时退避重试；实在查不到返回 (None, None)，不让一次查询失败导致整笔交易失败。"""
+        import asyncio
+        for i in range(tries):
+            try:
+                return await self._token_balance(token)
+            except Exception as e:  # noqa: BLE001
+                log.debug("查余额失败（第 %d 次）%s: %s", i + 1, token, e)
+                await asyncio.sleep(1.5 * (i + 1))
+        return None, None
+
     async def _wait_balance(self, token: str, cond, tries: int = 8, gap: float = 3.0) -> tuple[int, int]:
         """订单状态未知时，再观察一会儿链上余额，确认到底成交没有。"""
         import asyncio
-        bal, dec = await self._token_balance(token)
+        bal, dec = await self._bal_safe(token, 2)
         for _ in range(tries):
-            if cond(bal):
+            if bal is not None and cond(bal):
                 break
             await asyncio.sleep(gap)
-            bal, dec = await self._token_balance(token)
-        return bal, dec
+            b2, d2 = await self._bal_safe(token, 2)
+            if b2 is not None:
+                bal, dec = b2, d2
+        return (bal if bal is not None else 0), (dec or 0)
 
     async def buy(self, token: str, amount: float, slippage_bps: int) -> Fill:
         from ..sources.gmgn import GmgnError
         g = await self._gas_ok()
         if g:
             return Fill(False, error=g)
-        before, dec = await self._token_balance(token)
+        before, dec = await self._bal_safe(token)
+        before, dec = before or 0, dec or 0
         quote = await self._quote_px(token)
         params = self._base_params(self.native, token, slippage_bps)
         params["input_amount"] = str(int(amount * 10 ** self.ndec))
@@ -463,14 +477,19 @@ class GmgnExecutor:
 
     async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         from ..sources.gmgn import GmgnError
-        have, dec = await self._token_balance(token)
-        if have <= 0:
+        have, dec = await self._bal_safe(token)
+        if have is not None and have <= 0:
             return Fill(False, error="钱包里没有这个币了")
         g = await self._gas_ok()
         if g:
             return Fill(False, error=g)
+        if have is None:            # 余额查不到（节点限流）：按持仓记录的数量卖，不因为查询失败而卖不掉
+            have, dec = raw, decimals
         raw = min(raw, have)
-        native_before = await self.native_balance()
+        try:
+            native_before: float | None = await self.native_balance()
+        except Exception:  # noqa: BLE001
+            native_before = None
         params = self._base_params(token, self.native, slippage_bps)
         if urgent:   # 紧急卖出（撤池子、dev 清仓）：加优先费和小费抢先成交
             from .health import dyn_cfg
@@ -496,8 +515,11 @@ class GmgnExecutor:
         sold = int(f(rep.get("input_amount"))) or max(have - after, 0)
         out_dec = int(f(rep.get("output_token_decimals"))) or self.ndec
         got = int(f(rep.get("output_amount"))) / 10 ** out_dec
-        if not got and sold:
-            got = max(await self.native_balance() - native_before, 0.0)   # 没有成交回报时按余额变化估算
+        if not got and sold and native_before is not None:
+            try:
+                got = max(await self.native_balance() - native_before, 0.0)   # 没有成交回报时按余额变化估算
+            except Exception:  # noqa: BLE001
+                pass
         if self._ok(r) or after < have:
             return Fill(True, h, sold, decimals or dec, got)
         return Fill(False, h, error=f"GMGN: 订单状态 {self._st(r) or '未知'}，链上暂未看到卖出", unknown=True)

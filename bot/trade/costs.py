@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.costs")
 
 MIN_N = 8          # 至少 8 笔实盘成交才用实测成本
+FIX_TS = 1794077100.0   # 2026-11-08 01:45（UTC+7）修复了下单状态判断和余额查询，之前的失败不计入失败率
 
 
 async def ref_price(app: "App", chain: str, token: str, ts: float) -> float:
@@ -84,7 +85,8 @@ async def summarize(app: "App", days: float = 30) -> dict:
     since = time.time() - days * 86400
     out: dict[str, dict] = {}
     rows = await db.fetchall("SELECT chain, side, cost FROM trade_costs WHERE ts>? AND cost IS NOT NULL", (since,))
-    fails = await db.fetchall("SELECT chain, side, ok, error FROM trades WHERE dry_run=0 AND ts>?", (since,))
+    # 失败率只看 11-08 01:45 修复下单问题（GMGN 中间状态、余额查询）之后的成交，之前的老问题不算
+    fails = await db.fetchall("SELECT chain, side, ok, error FROM trades WHERE dry_run=0 AND ts>?", (max(since, FIX_TS),))
     for scope in ["all"] + sorted({r["chain"] for r in rows}):
         sel = [r for r in rows if scope == "all" or r["chain"] == scope]
         fs = [r for r in fails if scope == "all" or r["chain"] == scope]
@@ -130,14 +132,15 @@ def text(costs: dict | None) -> str:
     if not costs or not (costs.get("all") or {}).get("buy", {}).get("tries"):
         return "还没有实盘成交记录，模拟盘暂时用公式估算成本（手续费 1% + 价格冲击）"
     a = costs["all"]
-    lines = ["<b>💸 实盘真实成本</b>（最近 30 天实盘成交）"]
+    lines = ["<b>💸 实盘真实成本</b>（最近 30 天实盘成交；失败率只算 11-08 01:45 修复下单问题之后的）"]
     for scope, d in costs.items():
         if scope.startswith("_"):
             continue
         name = "全部" if scope == "all" else scope
         b, s = d["buy"], d["sell"]
         lines.append(f"  {name}：买入多花 中位 {b['med'] * 100:+.1f}%（{b['n']} 笔），卖出少拿 中位 {s['med'] * 100:+.1f}%"
-                     f"（{s['n']} 笔），失败率 买 {b['fail'] * 100:.0f}% / 卖 {s['fail'] * 100:.0f}%")
+                     f"（{s['n']} 笔），失败率 买 {b['fail'] * 100:.0f}%（{b['tries']} 次）/ 卖 {s['fail'] * 100:.0f}%"
+                     f"（{s['tries']} 次）")
     rt = max(0.0, a["buy"]["med"]) + max(0.0, a["sell"]["med"])
     used = [name for side, name in (("buy", "买入"), ("sell", "卖出")) if a[side]["n"] >= MIN_N]
     rest = [name for side, name in (("buy", "买入"), ("sell", "卖出")) if a[side]["n"] < MIN_N]
