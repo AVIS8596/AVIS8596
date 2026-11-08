@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import html
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -83,7 +84,7 @@ async def summarize(app: "App", days: float = 30) -> dict:
     since = time.time() - days * 86400
     out: dict[str, dict] = {}
     rows = await db.fetchall("SELECT chain, side, cost FROM trade_costs WHERE ts>? AND cost IS NOT NULL", (since,))
-    fails = await db.fetchall("SELECT chain, side, ok FROM trades WHERE dry_run=0 AND ts>?", (since,))
+    fails = await db.fetchall("SELECT chain, side, ok, error FROM trades WHERE dry_run=0 AND ts>?", (since,))
     for scope in ["all"] + sorted({r["chain"] for r in rows}):
         sel = [r for r in rows if scope == "all" or r["chain"] == scope]
         fs = [r for r in fails if scope == "all" or r["chain"] == scope]
@@ -91,12 +92,27 @@ async def summarize(app: "App", days: float = 30) -> dict:
         for side in ("buy", "sell"):
             cs = [f(r["cost"]) for r in sel if r["side"] == side]
             tot = [r for r in fs if r["side"] == side]
+            errs: dict[str, int] = {}
+            for r in tot:
+                if not r["ok"]:
+                    k = err_key(r["error"])
+                    errs[k] = errs.get(k, 0) + 1
             d[side] = {"n": len(cs), "med": median(cs), "avg": sum(cs) / len(cs) if cs else 0.0,
-                       "fail": sum(1 for r in tot if not r["ok"]) / len(tot) if tot else 0.0, "tries": len(tot)}
+                       "fail": sum(1 for r in tot if not r["ok"]) / len(tot) if tot else 0.0, "tries": len(tot),
+                       "errs": sorted(errs.items(), key=lambda kv: -kv[1])[:4]}
         out[scope] = d
     out["_at"] = time.time()
     await db.kv_set("live_costs", out)
     return out
+
+
+def err_key(e: str | None) -> str:
+    """把失败原因归类（去掉数字、地址），方便统计。"""
+    import re
+    s = str(e or "未知").strip()
+    s = re.sub(r"0x[0-9a-fA-F]{6,}|[1-9A-HJ-NP-Za-km-z]{30,}", "…", s)
+    s = re.sub(r"\d+(\.\d+)?", "#", s)
+    return s[:60] or "未知"
 
 
 def measured(costs: dict | None, chain: str, side: str) -> float | None:
@@ -123,6 +139,13 @@ def text(costs: dict | None) -> str:
         lines.append(f"  {name}：买入多花 中位 {b['med'] * 100:+.1f}%（{b['n']} 笔），卖出少拿 中位 {s['med'] * 100:+.1f}%"
                      f"（{s['n']} 笔），失败率 买 {b['fail'] * 100:.0f}% / 卖 {s['fail'] * 100:.0f}%")
     rt = max(0.0, a["buy"]["med"]) + max(0.0, a["sell"]["med"])
-    use = "已用于模拟盘" if a["buy"]["n"] >= MIN_N or a["sell"]["n"] >= MIN_N else f"样本不到 {MIN_N} 笔，暂未替换"
-    lines.append(f"  一买一卖合计约 {rt * 100:.1f}%（{use}；模拟盘每边取 公式估算 和 实测 里更高的那个）")
+    used = [name for side, name in (("buy", "买入"), ("sell", "卖出")) if a[side]["n"] >= MIN_N]
+    rest = [name for side, name in (("buy", "买入"), ("sell", "卖出")) if a[side]["n"] < MIN_N]
+    lines.append(f"  一买一卖合计约 {rt * 100:.1f}%。模拟盘每边取 公式估算 和 实测 里更高的那个："
+                 + ("、".join(used) + " 已用实测" if used else "")
+                 + ("；" if used and rest else "") + ("、".join(rest) + f" 样本不到 {MIN_N} 笔，暂用公式" if rest else ""))
+    for side, name in (("buy", "买入"), ("sell", "卖出")):
+        errs = a[side].get("errs") or []
+        if errs:
+            lines.append(f"  {name}失败原因：" + html.escape("；".join(f"{k} ×{n}" for k, n in errs)))
     return "\n".join(lines)
