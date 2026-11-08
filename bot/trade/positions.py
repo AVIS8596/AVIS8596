@@ -159,6 +159,7 @@ class PositionManager:
         self._breach: dict = {}   # 止损/移动止损连续触发次数（防插针）
         self._shadow_px_at: dict = {}   # 已平仓持仓的虚拟持仓上次取价时间
         self._px_ok_at: dict[int, float] = {}   # 每个持仓上次取到价格的时间
+        self._started = time.time()             # 程序启动时间：重启后"多久没取到价格"从这里算起
         self._check_sem = asyncio.Semaphore(2)
 
     def _confirmed(self, key, why: str, px: float, entry: float) -> bool:
@@ -194,7 +195,32 @@ class PositionManager:
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
 
+    async def repair_outage_zeroes(self) -> int:
+        """11-08 晚上 GMGN 被限流期间，模拟盘持仓因为"取不到价格"被误按归零平仓——那不是币归零，恢复成持仓继续管理。"""
+        db = self.app.db
+        if await db.kv_get("repair_zero_1108", False):
+            return 0
+        rows = await db.fetchall(
+            "SELECT * FROM positions WHERE status='closed' AND dry_run=1 AND close_reason LIKE '取不到价格%' "
+            "AND closed_at BETWEEN 1794148200 AND 1794151800")
+        for p in rows:
+            await db.execute("UPDATE positions SET status='open', closed_at=NULL, close_reason=NULL WHERE id=?",
+                             (p["id"],))
+            for w in json.loads(p["source_wallets"] or "[]"):
+                await db.execute("UPDATE wallets SET follow_losses=MAX(follow_losses-1, 0) WHERE chain=? AND address=?",
+                                 (p["chain"], w))
+        await db.kv_set("repair_zero_1108", True)
+        if rows:
+            log.warning("恢复了 %d 个被误按归零平仓的模拟持仓", len(rows))
+            await self.app.tg.send(f"♻️ 恢复了 {len(rows)} 个模拟持仓：它们是 GMGN 限流期间取不到价格被误按归零平仓的，"
+                                   f"不是币真的归零。已恢复成持仓继续按规则管理，复盘数据也已更正")
+        return len(rows)
+
     async def run(self) -> None:
+        try:
+            await self.repair_outage_zeroes()
+        except Exception as e:  # noqa: BLE001
+            log.warning("恢复误平仓失败: %s", e)
         interval = float(self.cfg.get("exit.check_interval_sec", 10))
         last_fill = 0.0
         while True:
@@ -293,10 +319,13 @@ class PositionManager:
                 prices[(chain, t)] = got.get(t) or got.get(t.lower()) or 0.0
 
         # ---- 真实持仓 ----
+        missing = sum(1 for p in pos if prices.get((p["chain"], p["token"]), 0.0) <= 0)
+        g = getattr(self.app, "gmgn", None)
+        outage = bool(g and (g.paused_until > now or getattr(g, "consec", 0))) or (len(pos) >= 3 and missing * 2 > len(pos))
         for p in pos:
             px = prices.get((p["chain"], p["token"]), 0.0)
             if px <= 0:
-                await self._no_price(p, now)
+                await self._no_price(p, now, outage)
                 continue
             self._px_ok_at[p["id"]] = now
             if px > float(p["high_price"] or 0):
@@ -315,10 +344,14 @@ class PositionManager:
         if mode == "shadow":
             await self._shadow_report()
 
-    async def _no_price(self, p: dict, now: float) -> None:
+    async def _no_price(self, p: dict, now: float, outage: bool = False) -> None:
         """长时间取不到价格（多半已归零/下架）：持有满 1 小时且 30 分钟取不到价 → 实盘尝试清仓，模拟盘按归零平仓。
-        否则这种持仓永远占着持仓名额，最后会把买入名额占满。"""
-        last = self._px_ok_at.get(p["id"]) or float(p["opened_at"] or now)
+        否则这种持仓永远占着持仓名额，最后会把买入名额占满。
+        数据源整体故障（GMGN 被限流、大部分持仓同时取不到价）时不算，那不是币归零。"""
+        if outage:
+            self._px_ok_at[p["id"]] = now       # 故障期间不计时
+            return
+        last = self._px_ok_at.get(p["id"]) or max(float(p["opened_at"] or now), self._started)
         if now - last < 1800 or now - float(p["opened_at"] or now) < 3600 or p["id"] in self._selling:
             return
         if p.get("dry_run"):

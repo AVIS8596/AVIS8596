@@ -265,3 +265,58 @@ def test_dex_fallback_when_gmgn_paused():
         assert await d.prices("solana", ["TokA"]) == {"TokA": 0.6}  # 8 秒内走缓存
         assert len(calls) == 1 and "tokens/v1/solana/TokA" in calls[0]
     asyncio.run(go())
+
+
+def test_outage_does_not_zero_positions(tmp_path):
+    from bot.trade.positions import PositionManager
+
+    db_holder: list = []
+
+    async def go():
+        db = DB(tmp_path / "z.db")
+        db_holder.append(db)
+        await db.open()
+        sent = []
+
+        async def send(m, low=False):
+            sent.append(m)
+        app = SimpleNamespace(db=db, cfg=Cfg({"exit": {}}), tg=SimpleNamespace(send=send),
+                              gmgn=SimpleNamespace(paused_until=0, consec=0))
+        pm = PositionManager.__new__(PositionManager)
+        pm.app, pm.cfg, pm._px_ok_at, pm._selling, pm._started = app, app.cfg, {}, set(), time.time() - 3600
+        closed = []
+
+        async def close(p, realized, reason):
+            closed.append(reason)
+        pm._close = close
+        old = {"id": 1, "opened_at": time.time() - 5 * 3600, "dry_run": 1, "realized_usd": 0, "symbol": "X"}
+        # 刚重启 1 小时、但上次取到价格的时间不在内存里：从启动时间算起，不会立刻归零
+        pm._started = time.time() - 600
+        await pm._no_price(dict(old), time.time())
+        assert not closed
+        # 数据源故障：不计时
+        pm._started = time.time() - 7200
+        await pm._no_price(dict(old), time.time(), outage=True)
+        assert not closed and pm._px_ok_at[1] > time.time() - 5
+        # 真的 30 分钟以上取不到：按归零平仓
+        pm._px_ok_at[1] = time.time() - 2000
+        await pm._no_price(dict(old), time.time())
+        assert closed
+        # 修复 11-08 晚上误平仓的持仓
+        await db.execute("INSERT INTO wallets(chain,address,status,follow_losses) VALUES('solana','W','active',3)")
+        await db.execute("INSERT INTO positions(id,chain,token,status,dry_run,close_reason,closed_at,source_wallets,"
+                         "realized_usd,cost_usd) VALUES(9,'solana','T','closed',1,'取不到价格超过 30 分钟（大概率已归零），"
+                         "按归零平仓',1794150540,'[\"W\"]',0,200)")
+        assert await pm.repair_outage_zeroes() == 1
+        p = await db.fetchone("SELECT status, closed_at FROM positions WHERE id=9")
+        assert p["status"] == "open" and p["closed_at"] is None
+        assert (await db.fetchone("SELECT follow_losses FROM wallets WHERE address='W'"))["follow_losses"] == 2
+        assert await pm.repair_outage_zeroes() == 0          # 只修一次
+        assert "恢复了 1 个模拟持仓" in sent[-1]
+
+    async def main():
+        try:
+            await go()
+        finally:
+            await db_holder[0].close()
+    asyncio.run(main())
