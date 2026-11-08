@@ -118,6 +118,14 @@ async def daily_review(app: "App", start: float) -> str:
             txt = ""
         if txt:
             lines.append(txt)
+    try:
+        from ..golive import daily_line, live_vs_paper
+        lines.append(await daily_line(app))
+        lv = await live_vs_paper(app)
+        if lv:
+            lines.append(lv)
+    except Exception:  # noqa: BLE001
+        pass
     md = getattr(app, "model", None)
     if md:
         try:

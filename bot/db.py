@@ -112,6 +112,9 @@ CREATE INDEX IF NOT EXISTS idx_early_obs ON early_obs(ts);
 CREATE TABLE IF NOT EXISTS early_tok (chain TEXT, token TEXT, first_ts REAL, p60 REAL, p240 REAL,
   PRIMARY KEY (chain, token));
 
+-- 实盘真实成交成本（成交价比报价多花 / 少拿的比例）
+CREATE TABLE IF NOT EXISTS trade_costs (trade_id INTEGER PRIMARY KEY, ts REAL, chain TEXT, side TEXT, cost REAL, usd REAL);
+
 -- 自己的选币模型选中的币（影子模式只记录；acted=1 表示真的下单了）
 CREATE TABLE IF NOT EXISTS model_picks (ts REAL, chain TEXT, token TEXT, symbol TEXT, model TEXT, score REAL,
   price REAL, acted INTEGER DEFAULT 0, p60 REAL, p240 REAL);
@@ -160,6 +163,9 @@ class DB:
         cur = await self.conn.execute("PRAGMA table_info(shadow)")
         if "trail_half" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE shadow ADD COLUMN trail_half INTEGER DEFAULT 0")
+        cur = await self.conn.execute("PRAGMA table_info(trades)")
+        if "quote_price" not in {r[1] for r in await cur.fetchall()}:
+            await self.conn.execute("ALTER TABLE trades ADD COLUMN quote_price REAL")    # 下单那一刻的报价
         cur = await self.conn.execute("PRAGMA table_info(positions)")
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in POSITION_COLUMNS:

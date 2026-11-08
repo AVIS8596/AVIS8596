@@ -76,6 +76,14 @@ async def maintenance(app: App) -> None:
     for old_f in sorted(glob.glob(str(bdir / "memebot-*.db")))[:-3]:
         os.remove(old_f)
     log.info("每日维护完成，备份到 %s", target)
+    if getattr(app, "tg", None):
+        from bot.safety import backup_to_tg
+        try:
+            err = await backup_to_tg(app)          # 精简备份发到 Telegram（异地保存）
+        except Exception as e:  # noqa: BLE001
+            err = f"每日备份失败：{e}"
+        if err:
+            await app.tg.send(f"⚠️ {err}")
 
 
 def cfg_path_dir(app: App) -> str:
@@ -125,6 +133,9 @@ async def run_bot(cfg) -> None:
         jobs.append(("选币模型", app.model.run))
         for c in cfg.enabled_chains:
             jobs.append((f"{c}早期/叙事建仓", lambda c=c: strat.run(c)))
+    from bot.safety import Safety
+    app.safety = Safety(app)
+    jobs.append(("安全与成本校准", app.safety.run))
     for c in cfg.enabled_chains:
         if app.data.use_gmgn or c != "solana":
             jobs.append((f"{c}新币", lambda c=c: newtok.listings(c)))

@@ -24,6 +24,9 @@ HELP = """<b>命令列表</b>
 /positions 当前持仓（🔥优质 👍较好，带健康分）
 /why 编号 查看某个持仓的健康分、加减分原因和卖出规则，例：/why 3
 /whynot 代币地址 这个币为什么没买（逐条列出每项检查）
+/golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
+/costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
+/backup 立即把数据备份发到这里（每天也会自动发）；/restore 用备份恢复
 /model 自己的选币模型：训练成绩、影子期选了哪些币、表现如何；/model train 立即训练
 /tune 自我学习：学到了哪些参数、样本多少；/tune now 立即学一次；/tune reset 全部恢复
 /history 代币地址 这个币的时间线：发币后多久被看到、当时涨了几倍、被哪条规则拦过、什么时候买卖
@@ -270,11 +273,24 @@ class Telegram:
                 if str(msg.get("chat", {}).get("id")) != self.chat:
                     continue   # 只听主人的
                 text = (msg.get("text") or "").strip()
+                if msg.get("document") and str(msg.get("caption") or "").strip().startswith("/restore"):
+                    t = asyncio.create_task(self._restore_doc(msg))      # 发备份文件 + 说明 /restore = 恢复
+                    self._cmd_tasks.add(t)
+                    t.add_done_callback(self._cmd_tasks.discard)
+                    continue
                 if text.startswith("/"):
                     # 放到后台执行，卖出/分析这类慢命令不会卡住后续命令
                     t = asyncio.create_task(self._safe_command(text))
                     self._cmd_tasks.add(t)
                     t.add_done_callback(self._cmd_tasks.discard)
+
+    async def _restore_doc(self, msg: dict) -> None:
+        from ..safety import restore_receive
+        try:
+            await self.send(await restore_receive(self.app, msg))
+        except Exception as ex:  # noqa: BLE001
+            log.exception("接收备份出错")
+            await self.send(f"接收备份出错：{e(str(ex)[:200])}")
 
     async def _safe_command(self, text: str) -> None:
         try:
@@ -317,6 +333,26 @@ class Telegram:
                             else "🔔 聪明钱/新币提醒已打开（发 /alerts off 关闭）")
         elif cmd == "/whynot":
             await self._whynot(args)
+        elif cmd == "/golive":
+            from ..golive import text as golive_text
+            await self.send(await golive_text(self.app))
+        elif cmd == "/costs":
+            from ..trade.costs import calibrate, text as cost_text
+            self.app.live_costs = await calibrate(self.app)
+            await self.send(cost_text(self.app.live_costs))
+        elif cmd == "/backup":
+            from ..safety import backup_to_tg
+            await self.send("正在打包备份……")
+            err = await backup_to_tg(self.app)
+            if err:
+                await self.send(err)
+        elif cmd == "/restore":
+            from ..safety import restore_confirm
+            if args and args[0].lower() == "confirm":
+                await self.send(await restore_confirm(self.app))
+            else:
+                await self.send("恢复数据：把机器人每天发的备份文件（memebot-日期-slim.db.gz）发给我，说明文字写 /restore；"
+                                "我检查没问题后，再发 /restore confirm")
         elif cmd == "/model":
             md = getattr(self.app, "model", None)
             if not md:

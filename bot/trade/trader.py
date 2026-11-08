@@ -19,7 +19,7 @@ log = logging.getLogger("memebot.trader")
 TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
 # 这些拒绝原因和标的好坏无关（开关、持仓满、冷却……），不记入"被过滤的信号"统计
 NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期",
-               "市场冷")
+               "市场冷", "总敞口")
 SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
@@ -282,7 +282,17 @@ class Trader:
         if rg.get("mult", 1) != 1:
             amount = round(amount * rg["mult"], 4)
             reason += f" | 市场{ {'cold': '冷', 'hot': '热'}.get(rg['state'], '一般') }，仓位 ×{rg['mult']:g}"
+        from .sizing import exposure_ok, size_mult
+        sm, why = await size_mult(self.app, reason, tier)       # 仓位按各买入来源 / 档位的真实战绩调整
+        if sm != 1:
+            amount = round(amount * sm, 4)
+            reason += f" | {why}"
         ex = self.exec[chain]
+        npx_e = await self.app.native_price(chain)
+        ok, why = await exposure_ok(self.app, amount * npx_e)
+        if not ok:
+            await self.skip(chain, token, rep, "总敞口", f"总敞口已到上限：{why}")
+            return
         # 单笔不超过池子流动性的 3%：池子太小时自动减少买入量（大额模拟盘、以后加大实盘金额时有用）
         liq_pct = float(self.cfg.get("trading.max_liquidity_pct", 3))
         npx0 = await self.app.native_price(chain)
@@ -315,10 +325,10 @@ class Trader:
         ui = fill.token_raw / 10 ** fill.decimals if fill.decimals is not None else 0
         entry = cost_usd / ui if ui > 0 else rep.get("price", 0)
         await self.app.db.execute(
-            "INSERT INTO trades(ts,chain,token,side,native_amount,token_raw,price_usd,usd_value,tx,dry_run,ok,error) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO trades(ts,chain,token,side,native_amount,token_raw,price_usd,usd_value,tx,dry_run,ok,error,"
+            "quote_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), chain, token, "buy", fill.native, str(fill.token_raw), entry, cost_usd, fill.tx,
-             int(self.cfg.dry_run), int(fill.ok), fill.error))
+             int(self.cfg.dry_run), int(fill.ok), fill.error, fill.quote or None))
         if not fill.ok:
             await self.app.tg.trade_failed(chain, rep, "买入", fill)
             return

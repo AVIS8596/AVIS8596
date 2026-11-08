@@ -107,6 +107,11 @@ trading:
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
   max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
   max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
+  sim_fixed_fee_native: { solana: 0.0005, bsc: 0.0002, ethereum: 0.0005, base: 0.00003, robinhood: 0.00003 }   # 模拟盘每笔扣的固定优先费 / Gas（原生币）
+  evidence_sizing: true           # 仓位按各买入来源 / 档位最近 7 天的真实期望值自动调（×0.25 ~ ×1.5，满 15 笔才调）
+  evidence_min_trades: 15
+  max_exposure_usd_dry: 6000      # 模拟盘所有持仓合计金额上限（防止一群 meme 一起崩）
+  max_exposure_usd: 0             # 实盘的上限（0 = 不限，受钱包余额限制）
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
   max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
@@ -282,3 +287,10 @@ learning:
   model_auto_promote: true        # 影子期选的币有 30 个出结果、平均赚 10% 以上、中位不亏 → 模拟盘自动让它下单（实盘永远不自动）
   model_train_hours: 24           # 每天用最新数据重训一次
   model_max_per_hour: 3           # 模型每小时最多下 3 笔
+  exit_days: 4                    # 卖出规则自动调整：用最近几天的真实入场回放
+  exit_min_trades: 30             # 至少多少笔才调整卖出规则
+
+# ---------------- 无人值守的安全 ----------------
+safety:
+  tg_backup: true                 # 每天把精简版数据库备份发到 Telegram（异地保存，服务器坏了能恢复）
+  withdraw_above_native: {}       # 实盘钱包余额超过多少就提醒转出，如 { solana: 3, bsc: 0.5 }（空 = 不提醒）

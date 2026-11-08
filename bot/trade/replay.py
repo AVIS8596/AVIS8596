@@ -121,21 +121,16 @@ async def candles(app: "App", chain: str, token: str, t0: float) -> list[dict]:
     return rows
 
 
-async def run(app: "App", days: float = 3) -> str:
+async def collect(app: "App", days: float = 3) -> tuple[list[dict], int]:
+    """当前模式下最近 days 天、开仓满 4 小时的已平仓单子，连同 K 线路径和跟卖时间。返回 (单子列表, 候选总数)。"""
     db = app.db
     now = time.time()
     dry = int(app.cfg.dry_run)   # 只用当前模式的单子：实盘小额和模拟盘大额混在一起会把百分比和金额搅乱
     pos = await db.fetchall(
         "SELECT * FROM positions WHERE status='closed' AND opened_at>? AND opened_at<? AND entry_price>0 "
         "AND dry_run=? ORDER BY opened_at DESC LIMIT 150", (now - days * 86400, now - 4 * 3600, dry))
-    if len(pos) < 5:
-        return f"最近 {days:g} 天开仓满 4 小时的已平仓单子只有 {len(pos)} 笔，至少 5 笔才能回测"
     exit_cfg = app.cfg.get("exit", {}) or {}
-    cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
-    vs = variants(exit_cfg)
-    res: dict[str, list[tuple[float, float, str]]] = {k: [] for k in vs}
-    actual: list[tuple[float, float, str]] = []
-    used = 0
+    out = []
     for p in pos:
         try:
             path = to_path(await candles(app, p["chain"], p["token"], float(p["opened_at"])))
@@ -143,25 +138,45 @@ async def run(app: "App", days: float = 3) -> str:
             continue
         if len(path) < 8:
             continue
-        used += 1
         sources = json.loads(p["source_wallets"] or "[]")
         sig = await db.fetchall("SELECT wallet, side, ts FROM signals WHERE chain=? AND token=? AND ts>=?",
                                 (p["chain"], p["token"], float(p["opened_at"]) - 3600))
-        ft = follow_time([dict(r) for r in sig], sources, float(p["opened_at"]))
         tier_rules = exit_rules(exit_cfg, p.get("tier"))
-        fpct = float(tier_rules.get("follow_smart_sell_pct", 100))
         cost_usd = float(p["cost_usd"] or 0)
-        actual.append((float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0, cost_usd, p["symbol"] or "?"))
+        out.append({"p": dict(p), "path": path, "ft": follow_time([dict(r) for r in sig], sources, float(p["opened_at"])),
+                    "tier_rules": tier_rules, "fpct": float(tier_rules.get("follow_smart_sell_pct", 100)),
+                    "cost_usd": cost_usd, "symbol": p["symbol"] or "?", "opened_at": float(p["opened_at"]),
+                    "actual": float(p["realized_usd"] or 0) / cost_usd if cost_usd else 1.0})
+    return out, len(pos)
+
+
+def replay_one(t: dict, exit_cfg: dict, override: dict | None, follow: bool, cost: float) -> float:
+    p = t["p"]
+    if override and override.get("_old"):
+        base = {k: v for k, v in exit_cfg.items() if k not in ("tiers", "dynamic", "learned")}
+        rules = {**base, **OLD_RULES, **DEFAULT_EXIT_TIERS.get(p.get("tier") or "", {})}
+    elif override and "take_profit" in override and "stop_loss_pct" in override:
+        rules = dict(override)
+    else:
+        rules = {**t["tier_rules"], **(override or {})}
+    return simulate(float(p["entry_price"]), t["opened_at"], t["path"], rules, t["ft"] if follow else None,
+                    t["fpct"], cost)
+
+
+async def run(app: "App", days: float = 3) -> str:
+    trades, n_pos = await collect(app, days)
+    dry = int(app.cfg.dry_run)
+    if n_pos < 5:
+        return f"最近 {days:g} 天开仓满 4 小时的已平仓单子只有 {n_pos} 笔，至少 5 笔才能回测"
+    exit_cfg = app.cfg.get("exit", {}) or {}
+    cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
+    vs = variants(exit_cfg)
+    res: dict[str, list[tuple[float, float, str]]] = {k: [] for k in vs}
+    actual = [(t["actual"], t["cost_usd"], t["symbol"]) for t in trades]
+    used = len(trades)
+    for t in trades:
         for name, (override, follow) in vs.items():
-            if override and override.get("_old"):
-                base = {k: v for k, v in exit_cfg.items() if k not in ("tiers", "dynamic", "learned")}
-                rules = {**base, **OLD_RULES, **DEFAULT_EXIT_TIERS.get(p.get("tier") or "", {})}
-            elif override and "take_profit" in override and "stop_loss_pct" in override:
-                rules = dict(override)
-            else:
-                rules = {**tier_rules, **(override or {})}
-            m = simulate(float(p["entry_price"]), float(p["opened_at"]), path, rules, ft if follow else None, fpct, cost)
-            res[name].append((m, cost_usd, p["symbol"] or "?"))
+            res[name].append((replay_one(t, exit_cfg, override, follow, cost), t["cost_usd"], t["symbol"]))
 
     def summ(xs: list[tuple[float, float, str]]) -> dict:
         rs = sorted(m - 1 for m, _, _ in xs)

@@ -197,6 +197,9 @@ EARLY_PARAMS = (
     Param("strategies.early.max_top10_rate", (0.25, 0.3, 0.35, 0.4), 0.3, "早期建仓：前10持仓上限"),
 )
 NEWTOKEN_KEYS = {"trading.auto_min_score", "trading.auto_min_cluster"}
+STOPS = (-25, -30, -35, -45, -55)
+LADDERS = ((20, 35, 50), (25, 40, 55), (30, 45, 60), (35, 50, 65))
+FLOORS = (10, 20, 35)
 
 
 def entry_pass(ft: dict, v: dict, min_liq: float = 8000) -> bool:
@@ -310,6 +313,12 @@ def set_cfg(raw: dict, dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def _fmt(v: Any) -> str:
+    if isinstance(v, list):
+        return "/".join(str(x.get("drop_pct", x)) if isinstance(x, dict) else str(x) for x in v) + "%"
+    return str(v)
+
+
 def _num(v: float) -> float | int:
     return int(v) if float(v).is_integer() else float(v)
 
@@ -319,6 +328,7 @@ class Brain:
         self.app = app
         self.cfg = app.cfg
         self.last_tune = 0.0
+        self.last_exit = 0.0
 
     # ---------------- 参数覆盖（学到的参数存在数据库里，重启后自动加载）
     async def load(self) -> None:
@@ -339,10 +349,11 @@ class Brain:
         old = self.cfg.get(key)
         if key not in base:
             base[key] = old
-        tuned[key] = _num(value)
-        set_cfg(self.cfg.raw, key, _num(value))
+        val = _num(value) if isinstance(value, (int, float)) else value
+        tuned[key] = val
+        set_cfg(self.cfg.raw, key, val)
         hist = (await db.kv_get("tune_log", []) or [])[-49:]
-        hist.append({"ts": time.time(), "key": key, "old": old, "new": _num(value), "why": why})
+        hist.append({"ts": time.time(), "key": key, "old": old, "new": val, "why": why})
         await db.kv_set("tuned", tuned)
         await db.kv_set("tune_base", base)
         await db.kv_set("tune_log", hist)
@@ -448,6 +459,11 @@ class Brain:
         for name, r in (("新币买入", a), ("风控过滤", b), ("早期建仓", c)):
             if r:
                 found.append((name, r))
+        if mode != "off" or force:
+            try:
+                out += await self.tune_exits(force)
+            except Exception as e:  # noqa: BLE001
+                log.warning("卖出规则调整失败: %s", e)
         if force:
             out.append(f"数据：结果档案 {len(newtok)} 个币（其中 {len(filt)} 个用于风控过滤），早期观察 {len(early)} 个币")
         if not found:
@@ -471,6 +487,80 @@ class Brain:
                        + html.escape(why) + "\n同意就发 /tune apply")
         return out
 
+    # ---------------- 卖出规则自动调整（用真实入场回放 K 线）
+    def exit_candidates(self, exit_cfg: dict, skip: set[str]) -> list[tuple[str, Any, str, dict]]:
+        out: list[tuple[str, Any, str, dict]] = []
+        stop = float(exit_cfg.get("stop_loss_pct", -35))
+        if "exit.stop_loss_pct" not in skip:
+            i = min(range(len(STOPS)), key=lambda j: abs(STOPS[j] - stop))
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(STOPS) and STOPS[j] != stop:
+                    out.append(("exit.stop_loss_pct", STOPS[j], f"止损 {stop:g}% → {STOPS[j]}%",
+                                {"stop_loss_pct": STOPS[j]}))
+        rn = dict(exit_cfg.get("runner") or {})
+        if rn.get("enabled"):
+            lad = rn.get("ladder") or [{"drop_pct": 25, "sell_pct": 33}, {"drop_pct": 40, "sell_pct": 50},
+                                       {"drop_pct": 55, "sell_pct": 100}]
+            sells = [x.get("sell_pct", 100) for x in lad][:3] + [100] * (3 - min(3, len(lad)))
+            first = float(lad[0].get("drop_pct", 25))
+            if "exit.runner.ladder" not in skip:
+                i = min(range(len(LADDERS)), key=lambda j: abs(LADDERS[j][0] - first))
+                for j in (i - 1, i + 1):
+                    if 0 <= j < len(LADDERS) and LADDERS[j][0] != first:
+                        new = [{"drop_pct": d, "sell_pct": s} for d, s in zip(LADDERS[j], sells)]
+                        out.append(("exit.runner.ladder", new,
+                                    "强势长拿回撤档位 " + "/".join(f"{x.get('drop_pct')}" for x in lad) + "% → "
+                                    + "/".join(str(d) for d in LADDERS[j]) + "%", {"runner": {**rn, "ladder": new}}))
+            fl = float(rn.get("floor_gain_pct", 20))
+            if "exit.runner.floor_gain_pct" not in skip:
+                i = min(range(len(FLOORS)), key=lambda j: abs(FLOORS[j] - fl))
+                for j in (i - 1, i + 1):
+                    if 0 <= j < len(FLOORS) and FLOORS[j] != fl:
+                        out.append(("exit.runner.floor_gain_pct", FLOORS[j], f"强势长拿保底线 +{fl:g}% → +{FLOORS[j]}%",
+                                    {"runner": {**rn, "floor_gain_pct": FLOORS[j]}}))
+        return out
+
+    async def tune_exits(self, force: bool = False) -> list[str]:
+        if not force and time.time() - self.last_exit < 24 * 3600:
+            return []
+        self.last_exit = time.time()
+        from .trade.replay import collect, replay_one
+        trades, _ = await collect(self.app, float(self.cfg.get("learning.exit_days", 4)))
+        min_n = int(self.cfg.get("learning.exit_min_trades", 30))
+        if len(trades) < min_n:
+            return [f"卖出规则：可回放的单子 {len(trades)} 笔（要 ≥ {min_n}），暂不调整"] if force else []
+        exit_cfg = self.cfg.get("exit", {}) or {}
+        cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
+        follow = bool(exit_cfg.get("follow_smart_sell", True))
+        recent = {h["key"] for h in (await self.app.db.kv_get("tune_log", []) or []) if time.time() - h["ts"] < 86400}
+        cands = self.exit_candidates(exit_cfg, recent)
+        trades.sort(key=lambda t: t["opened_at"])
+
+        def evaluate() -> dict | None:
+            base = [replay_one(t, exit_cfg, None, follow, cost) for t in trades]
+            cut = int(len(base) * 0.6)
+            best = None
+            for key, val, label, ov in cands:
+                new = [replay_one(t, exit_cfg, ov, follow, cost) for t in trades]
+                d = [n - b for n, b in zip(new, base)]
+                if sum(d[:cut]) <= 0 or sum(d[cut:]) <= 0 or sum(d) - max(d) <= 0:
+                    continue
+                if not best or sum(d) > best["gain"]:
+                    best = {"key": key, "new": val, "label": label, "gain": sum(d), "n": len(d),
+                            "old_avg": sum(base) / len(base) - 1, "new_avg": sum(new) / len(new) - 1,
+                            "better": sum(1 for x in d if x > 1e-9), "worse": sum(1 for x in d if x < -1e-9)}
+            return best
+        r = await asyncio.to_thread(evaluate)
+        if not r:
+            return ["卖出规则：回放了 " + str(len(trades)) + " 笔，相邻的几种改法都没有可信的改进"] if force else []
+        why = (f"卖出规则：{r['label']}。用最近 {r['n']} 笔真实入场回放 K 线，平均每笔 {r['old_avg'] * 100:+.1f}% → "
+               f"{r['new_avg'] * 100:+.1f}%（更好 {r['better']} 笔 / 更差 {r['worse']} 笔，前后两段都更好）")
+        if await self.mode() == "auto" and self.cfg.dry_run:
+            await self.apply(r["key"], r["new"], why)
+            return ["🧠 <b>自我调参</b>（模拟盘自动生效）\n" + html.escape(why) + "\n不满意可以发 /tune reset"]
+        await self.app.db.kv_set("tune_pending", {"key": r["key"], "new": r["new"], "why": why, "ts": time.time()})
+        return ["🧠 <b>调参建议</b>（不自动改）\n" + html.escape(why) + "\n同意就发 /tune apply"]
+
     async def status_text(self) -> str:
         db = self.app.db
         mode = await self.mode()
@@ -479,9 +569,11 @@ class Brain:
         tuned = await db.kv_get("tuned", {}) or {}
         base = await db.kv_get("tune_base", {}) or {}
         labels = {p.key: p.label for p in ENTRY_PARAMS + EARLY_PARAMS}
+        labels.update({"exit.stop_loss_pct": "止损线", "exit.runner.ladder": "强势长拿回撤档位",
+                       "exit.runner.floor_gain_pct": "强势长拿保底线"})
         if tuned:
             lines.append("学到的参数（覆盖配置文件）：")
-            lines += [f"  {labels.get(k, k)}：{base.get(k)} → {v}" for k, v in tuned.items()]
+            lines += [f"  {labels.get(k, k)}：{_fmt(base.get(k))} → {_fmt(v)}" for k, v in tuned.items()]
         else:
             lines.append("还没有改过参数（数据够多、结论可信才会改）")
         pend = await db.kv_get("tune_pending", None)
@@ -489,7 +581,7 @@ class Brain:
             lines.append("待确认的建议：" + html.escape(pend["why"]) + "（/tune apply 采纳）")
         for h in (await db.kv_get("tune_log", []) or [])[-5:][::-1]:
             lines.append(f"  {time.strftime('%m-%d %H:%M', time.localtime(h['ts']))} "
-                         f"{labels.get(h['key'], h['key'])} {h['old']} → {h['new']}")
+                         f"{labels.get(h['key'], h['key'])} {_fmt(h['old'])} → {_fmt(h['new'])}")
         n1 = await db.fetchone("SELECT COUNT(*) n FROM token_outcomes WHERE p60 IS NOT NULL AND p60>0 AND ts>?",
                                (time.time() - 4 * 86400,))
         n2 = await db.fetchone("SELECT COUNT(*) n FROM early_tok WHERE p240 IS NOT NULL AND p240>0 AND first_ts>?",

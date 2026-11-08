@@ -494,9 +494,9 @@ class PositionManager:
             usd = fill.native * npx
             await self.app.db.execute(
                 "INSERT INTO trades(ts,chain,token,side,position_id,native_amount,token_raw,price_usd,usd_value,tx,"
-                "dry_run,ok,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "dry_run,ok,error,quote_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), chain, p["token"], "sell", pid, fill.native, str(fill.token_raw), price_hint, usd,
-                 fill.tx, int(self.cfg.dry_run), int(fill.ok), fill.error))
+                 fill.tx, int(self.cfg.dry_run), int(fill.ok), fill.error, price_hint or fill.quote or None))
             if not fill.ok:
                 attempts = int(p["sell_attempts"] or 0) + 1
                 max_att = int(self.cfg.get("exit.max_sell_attempts", 5))

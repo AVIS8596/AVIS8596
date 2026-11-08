@@ -34,6 +34,7 @@ class Fill:
     native: float = 0.0       # 买入花费 / 卖出得到的原生币
     error: str = ""
     unknown: bool = False     # 状态未知（需要人工确认）
+    quote: float = 0.0        # 下单那一刻的报价（算真实成本用）
 
 
 # ====================================================================== 模拟盘
@@ -55,8 +56,10 @@ class DryRunExecutor:
         if px <= 0 or npx <= 0:
             return Fill(False, error="取不到价格，模拟买入失败")
         dec = await self._decimals(token)
-        ui = amount * npx / px * (1 - await self._cost(token, amount * npx))
-        return Fill(True, "DRYRUN", int(ui * 10 ** dec), dec, amount)
+        fixed = self._fixed()                      # 优先费 / Gas：固定的原生币，从花费里扣
+        net = max(amount - fixed, 0.0)
+        ui = net * npx / px * (1 - await self._cost(token, net * npx, "buy"))
+        return Fill(True, "DRYRUN", int(ui * 10 ** dec), dec, amount, quote=px)
 
     async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
         px = await self.app.data.price(self.chain, token)
@@ -64,19 +67,25 @@ class DryRunExecutor:
         if px <= 0 or npx <= 0:
             return Fill(False, error="取不到价格，模拟卖出失败")
         usd = raw / 10 ** decimals * px
-        native = usd / npx * (1 - await self._cost(token, usd))
-        return Fill(True, "DRYRUN", raw, decimals, native)
+        native = max(usd / npx * (1 - await self._cost(token, usd, "sell")) - self._fixed(), 0.0)
+        return Fill(True, "DRYRUN", raw, decimals, native, quote=px)
 
-    async def _cost(self, token: str, usd: float) -> float:
-        """单边成交成本 = 手续费（默认 1%）+ 价格冲击（约 2 × 金额 / 流动性，上限 30%）。
-        以前固定按滑点上限的 1/3（5%）扣，小单偏悲观、大单偏乐观。"""
+    def _fixed(self) -> float:
+        return float(self.app.cfg.per_chain("trading.sim_fixed_fee_native", self.chain, 0) or 0)
+
+    async def _cost(self, token: str, usd: float, side: str = "buy") -> float:
+        """单边成交成本 = max(公式估算, 实盘实测中位成本)。
+        公式 = 手续费（默认 1%）+ 价格冲击（约 2 × 金额 / 流动性，上限 30%）；
+        实测 = 实盘成交价比报价多花 / 少拿的中位数（至少 8 笔实盘成交才用，见 costs.py）。"""
         fee = float(self.app.cfg.get("trading.sim_fee_pct", 1)) / 100
         try:
             liq = float((await self.app.data.overview(self.chain, token)).get("liquidity") or 0)
         except Exception:  # noqa: BLE001
             liq = 0.0
         impact = min(2 * usd / liq, 0.3) if liq > 0 else 0.05
-        return fee + impact
+        from .costs import measured
+        m = measured(getattr(self.app, "live_costs", None), self.chain, side)
+        return max(fee + impact, m) if m is not None else fee + impact
 
 
 # ====================================================================== Solana
@@ -343,6 +352,12 @@ class GmgnExecutor:
         self.max_gwei = float(app.cfg.per_chain("trading.max_gas_gwei", chain, 50))
         self.timeout = 150 if chain == "ethereum" else 75
 
+    async def _quote_px(self, token: str) -> float:
+        try:
+            return float(await self.app.data.price(self.chain, token) or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     async def native_balance(self) -> float:
         if self.chain == "solana":
             return await self.app.sol.balance_lamports(self.addr, svc="helius_trade") / 1e9
@@ -426,6 +441,7 @@ class GmgnExecutor:
         if g:
             return Fill(False, error=g)
         before, dec = await self._token_balance(token)
+        quote = await self._quote_px(token)
         params = self._base_params(self.native, token, slippage_bps)
         params["input_amount"] = str(int(amount * 10 ** self.ndec))
         try:
@@ -442,7 +458,7 @@ class GmgnExecutor:
         dec2 = int(f(rep.get("output_token_decimals"))) or dec2 or dec
         spent = int(f(rep.get("input_amount"))) / 10 ** self.ndec if rep.get("input_amount") else amount
         if self._ok(r) or after > before:
-            return Fill(True, h, got, dec2, spent)
+            return Fill(True, h, got, dec2, spent, quote=quote)
         return Fill(False, h, error=f"GMGN: 订单状态 {self._st(r) or '未知'}，链上暂未看到到账", unknown=True)
 
     async def sell(self, token: str, raw: int, decimals: int, slippage_bps: int, urgent: bool = False) -> Fill:
