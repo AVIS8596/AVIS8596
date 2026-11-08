@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..chains import CHAINS, norm_addr
 from ..http import ApiError
-from ..utils import fmt_price, fmt_usd, short
+from ..utils import f, fmt_price, fmt_usd, short
 
 if TYPE_CHECKING:
     from ..app import App
@@ -45,7 +45,11 @@ HELP = """<b>命令列表</b>
 /delwallet 链 地址 拉黑地址
 /check 链 代币地址 立即分析一个币
 /tag 链 地址 查这个地址被标记过什么（捆绑/埋伏/dev）
-链名：solana / bsc / ethereum / base"""
+链名：solana / bsc / ethereum / base / robinhood（可简写 sol / eth / hood）
+/whynot、/learn token 也可以在地址前加链名，例：/whynot hood 0x...；0x 地址不写链名会自动识别"""
+
+
+CHAIN_ALIAS = {"sol": "solana", "eth": "ethereum", "bnb": "bsc", "hood": "robinhood", "rh": "robinhood"}
 
 
 class Telegram:
@@ -279,7 +283,7 @@ class Telegram:
     async def command(self, text: str) -> None:
         parts = text.split()
         cmd = parts[0].split("@")[0].lower()
-        args = parts[1:]
+        args = [CHAIN_ALIAS.get(a.lower(), a) for a in parts[1:]]
         db = self.app.db
         if cmd in ("/start", "/help"):
             await self.send(HELP)
@@ -395,7 +399,11 @@ class Telegram:
             await self.send(await feature_report(self.app, h))
         elif args[0].lower() == "token" and len(args) > 1:
             await self.send("拆解中：拉盈利前 20 名 → 逐个看入场时间/市值/标签 → 给能学的人生成画像，大约 1~2 分钟……")
-            await self.send(await ln.learn_token("solana", args[1]))
+            chain, rest = await self._pick_chain(args[1:])
+            if not rest:
+                await self.send("格式：/learn token [链] 代币地址")
+                return
+            await self.send(await ln.learn_token(chain, norm_addr(chain, rest[0])))
         elif args[0].lower() == "del" and len(args) > 1:
             await self.app.db.execute("DELETE FROM learn_wallets WHERE address=?", (args[1],))
             await self.send("已删除")
@@ -403,11 +411,25 @@ class Telegram:
             await self.send("分析中，大约需要 20~40 秒……")
             await self.send(await ln.learn("solana", args[0], " ".join(args[1:])))
 
-    async def _whynot(self, args: list[str]) -> None:
+    async def _pick_chain(self, args: list[str]) -> tuple[str, list[str]]:
+        """参数里写了链名就用它；0x 地址没写链名时，按启用的 EVM 链逐个查，哪条链上有这个币就是哪条。"""
         chains = self.app.cfg.enabled_chains
-        chain = "solana" if "solana" in chains else chains[0]
         if args and args[0].lower() in chains:
-            chain, args = args[0].lower(), args[1:]
+            return args[0].lower(), args[1:]
+        if args and args[0].lower().startswith("0x"):
+            evm = self.app.cfg.evm_chains
+            for c in evm:
+                try:
+                    if f((await self.app.data.overview(c, args[0].lower())).get("price")) > 0:
+                        return c, args
+                except Exception:  # noqa: BLE001
+                    continue
+            if evm:
+                return evm[0], args
+        return ("solana" if "solana" in chains else chains[0]), args
+
+    async def _whynot(self, args: list[str]) -> None:
+        chain, args = await self._pick_chain(args)
         if not args:
             await self.send("格式：/whynot 代币地址，例：/whynot 6NeJ...Loat（完整地址）")
             return

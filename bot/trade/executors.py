@@ -337,7 +337,7 @@ class GmgnExecutor:
         self.native = SOL_MINT if chain == "solana" else self.EVM_NATIVE
         self.ndec = CHAINS[chain].native_decimals
         g = app.cfg.get("gmgn", {}) or {}
-        self.anti_mev = bool(g.get("anti_mev", True)) and chain != "base"   # Base 不支持防夹
+        self.anti_mev = bool(g.get("anti_mev", True)) and chain not in ("base", "robinhood")   # Base / 罗宾汉链不支持防夹
         self.priority_fee = str(g.get("priority_fee_sol", "")) if chain == "solana" else ""
         self.tip_fee = str((g.get("tip_fee") or {}).get(chain, "") or "")
         self.max_gwei = float(app.cfg.per_chain("trading.max_gas_gwei", chain, 50))

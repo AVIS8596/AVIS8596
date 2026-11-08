@@ -1,6 +1,6 @@
 # Meme 扫链机器人 · 部署与使用指南（GMGN 版）
 
-支持 Solana、BSC、Ethereum、Base 四条链。**数据和下单都走 GMGN 官方 API**（openapi.gmgn.ai）。
+支持 Solana、BSC、Ethereum、Base、罗宾汉链（Robinhood Chain）五条链。**数据和下单都走 GMGN 官方 API**（openapi.gmgn.ai）。
 
 - **聪明钱发现**：数据来自 GMGN 的聪明钱/KOL 交易流和热门币顶级交易者，再逐个用 GMGN 钱包统计核实。核实标准是近 30 天已实现利润 ≥ 50 SOL（EVM 链按美元等值换算）、胜率 ≥ 60%，并排除高频机器人。
 - **实时监听**：同时用两路，互为备份，同一笔交易自动去重。
@@ -223,6 +223,15 @@ sudo systemctl restart memebot
 ```
 公共节点有限速，模拟盘够用；实盘或监听钱包多时建议换成 Alchemy 免费账号的节点（重新运行 `deploy/setup_env.py` 填入）。
 注意：模拟盘没有计算 EVM 的 Gas 费，ETH 主网小额交易的 Gas 可能占好几个百分点，模拟结果会偏乐观。
+
+### 罗宾汉链（Robinhood Chain）
+
+- 默认已启用（模拟盘），不用填任何节点：机器人内置免费公共节点 `rpc.nodeflare.app`。公共节点没有 WebSocket，聪明钱监听改成每 4 秒查一次新区块（比 WebSocket 慢几秒）；以后有自己的节点，在 `.env` 填 `ROBINHOOD_RPC_HTTP` / `ROBINHOOD_RPC_WSS` 就会自动换成实时推送。
+- GMGN 支持它的新币列表、热门榜、代币信息、安全检测、持币人、K 线、钱包记录和下单，但**还没有它的聪明钱 / KOL 交易流**。所以这条链的钱包靠两种方式找：每 3 小时从热门币盈利前排里核实聪明钱，每 2 小时从大涨币里挖精准钱包和早期发现者。刚开始几天能跟的钱包会比较少，主动建仓（早期、强叙事）不受影响。
+- GoPlus 不支持这条链，安全检测只用 GMGN 的。Gas 用 ETH，价格取不到时按主网 ETH 计。
+- 关闭：`python3 deploy/enable_evm.py off` 会连同罗宾汉链一起关；只开它：`python3 deploy/enable_evm.py robinhood`。
+- TG 命令里链名写 `robinhood` 或简写 `hood`；`/whynot`、`/learn token` 遇到 0x 地址会自动识别是哪条链。
+- 模拟盘同时持仓上限放宽到 30 个（`max_open_positions_dry`），5 条链一起跑也不会因为名额满而漏掉数据。
 
 ### 运维
 

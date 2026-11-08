@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from bot.app import App
-from bot.chains import CHAINS
+from bot.chains import CHAINS, NO_FEED_CHAINS
 from bot.config import ConfigError, load_config
 from bot.utils import run_forever, setup_logging
 
@@ -115,7 +115,7 @@ async def run_bot(cfg) -> None:
     for c in cfg.enabled_chains:
         if app.data.use_gmgn or c != "solana":
             jobs.append((f"{c}新币", lambda c=c: newtok.listings(c)))
-        if app.gmgn:
+        if app.gmgn and c not in NO_FEED_CHAINS:     # 罗宾汉链等 GMGN 还没有聪明钱交易流
             jobs.append((f"{c} GMGN交易流", GmgnFeed(app, c).run))
 
     tasks = [asyncio.create_task(run_forever(n, fn, err), name=n) for n, fn in jobs]

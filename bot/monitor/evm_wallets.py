@@ -1,4 +1,5 @@
-"""EVM 聪明钱实时监听：订阅 ERC20 Transfer 事件（钱包收币=买入，转出=卖出）。"""
+"""EVM 聪明钱实时监听：订阅 ERC20 Transfer 事件（钱包收币=买入，转出=卖出）。
+没有 WebSocket 地址的链（罗宾汉链用公共节点时）改成每几秒用 eth_getLogs 轮询。"""
 from __future__ import annotations
 
 import asyncio
@@ -50,7 +51,48 @@ class EvmWalletMonitor:
             if waiter not in done:
                 await asyncio.sleep(3)
 
+    def _on_log(self, lg: dict, wset: set[str]) -> None:
+        if lg.get("removed") or len(lg.get("topics", [])) < 3:
+            return   # 区块重组撤销的日志 / 非标准 Transfer（如 ERC721）
+        h = lg.get("transactionHash")
+        frm, to = topic_to_addr(lg["topics"][1]), topic_to_addr(lg["topics"][2])
+        wallet = to if to in wset else frm if frm in wset else None
+        if not wallet or not h or not self.seen.add_if_new(f"{h}:{wallet}"):
+            return
+        t = asyncio.create_task(self._handle(h, wallet))
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def _poll(self, wallets: list[str]) -> None:
+        """没有 WebSocket 的链：每隔几秒用 eth_getLogs 查新区块里这些钱包的转账。"""
+        wset = set(wallets)
+        every = float(self.app.cfg.get("gmgn.evm_poll_sec", 4))
+        last = await self.rpc.block_number()
+        fails = 0
+        while True:
+            await asyncio.sleep(every)
+            try:
+                head = await self.rpc.block_number()
+                if head <= last:
+                    continue
+                frm = max(last + 1, head - 2000)    # 断了很久只补最近 2000 个区块，避免单次查询过大
+                for i in range(0, len(wallets), PER_SUB):
+                    padded = ["0x" + pad_addr(w) for w in wallets[i:i + PER_SUB]]
+                    for topics in ([TRANSFER_TOPIC, None, padded], [TRANSFER_TOPIC, padded]):
+                        for lg in await self.rpc.logs({"fromBlock": hex(frm), "toBlock": hex(head), "topics": topics}):
+                            self._on_log(lg, wset)
+                last, fails = head, 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                fails += 1
+                if fails in (1, 10) or fails % 100 == 0:
+                    log.warning("%s 轮询监听出错（第 %d 次）：%s", self.chain, fails, e)
+                await asyncio.sleep(min(60, every * fails))
+
     async def _conn(self, wallets: list[str]) -> None:
+        if not self.wss:
+            return await self._poll(wallets)
         wset = set(wallets)
         backoff = 2
         while True:
@@ -72,17 +114,7 @@ class EvmWalletMonitor:
                             continue
                         if msg.get("method") != "eth_subscription":
                             continue
-                        lg = msg["params"]["result"]
-                        if lg.get("removed") or len(lg.get("topics", [])) < 3:
-                            continue   # 区块重组撤销的日志 / 非标准 Transfer（如 ERC721）
-                        h = lg.get("transactionHash")
-                        frm, to = topic_to_addr(lg["topics"][1]), topic_to_addr(lg["topics"][2])
-                        wallet = to if to in wset else frm if frm in wset else None
-                        if not wallet or not h or not self.seen.add_if_new(f"{h}:{wallet}"):
-                            continue
-                        t = asyncio.create_task(self._handle(h, wallet))
-                        self._tasks.add(t)
-                        t.add_done_callback(self._tasks.discard)
+                        self._on_log(msg["params"]["result"], wset)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

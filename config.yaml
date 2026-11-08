@@ -27,6 +27,7 @@ gmgn:
   tip_fee: {}                     # 小费，如 { solana: "0.001", bsc: "0.0001" }，留空用默认
 
 chains:
+  robinhood: { enabled: true }   # 罗宾汉链（Gas 用 ETH）：默认用免费公共节点 + 轮询监听；GMGN 暂无它的聪明钱交易流
   solana:   { enabled: true }
   bsc:      { enabled: true }
   ethereum: { enabled: true }
@@ -104,6 +105,7 @@ trading:
   max_liquidity_pct: 3            # 单笔不超过池子流动性的 3%，超过自动减少买入量
   regime: { cold: 0.5, normal: 1, hot: 1, cold_pause: false }   # 市场冷热：冷时仓位 ×0.5；cold_pause: true 则冷时暂停买入
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
+  max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
   # 过滤条件（任一不满足就不买）
   max_bundle_pct: 25              # 捆绑地址仍持有占比上限（%）
   max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
@@ -119,22 +121,26 @@ trading:
     bsc: 0.05
     ethereum: 0.01
     base: 0.005
+    robinhood: 0.01
   # 钱包里至少保留这么多原生币做手续费
   reserve_native:
     solana: 0.05
     bsc: 0.01
     ethereum: 0.01
     base: 0.002
+    robinhood: 0.002
   slippage_bps:                   # 滑点（100 = 1%）
     solana: 1500
     bsc: 1200
     ethereum: 800
     base: 1200
+    robinhood: 1500
   max_price_impact_pct: 15
   max_gas_gwei:                   # Gas 价格上限，超过就不交易
     bsc: 5
     ethereum: 40
     base: 1
+    robinhood: 1
   max_open_positions: 10
   max_daily_loss_usd: 200         # 当天累计亏损超过就自动暂停买入
   # 仅 executor=self 时使用：ETH 主网私密交易防夹

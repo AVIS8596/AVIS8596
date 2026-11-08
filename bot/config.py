@@ -9,13 +9,16 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-EVM_CHAINS = ("bsc", "ethereum", "base")
+from .chains import PUBLIC_RPC
+
+EVM_CHAINS = ("bsc", "ethereum", "base", "robinhood")
 ALL_CHAINS = ("solana",) + EVM_CHAINS
 
 _RPC_ENV = {
     "ethereum": ("ETH_RPC_HTTP", "ETH_RPC_WSS"),
     "bsc": ("BSC_RPC_HTTP", "BSC_RPC_WSS"),
     "base": ("BASE_RPC_HTTP", "BASE_RPC_WSS"),
+    "robinhood": ("ROBINHOOD_RPC_HTTP", "ROBINHOOD_RPC_WSS"),
 }
 
 
@@ -125,7 +128,7 @@ def load_config(base_dir: str | Path = ".", config_file: str = "config.yaml") ->
         gmgn_wallet_evm=env("GMGN_WALLET_EVM", "").strip().lower(),
     )
     for chain, (h, w) in _RPC_ENV.items():
-        s.rpc_http[chain] = env(h, "").strip()
+        s.rpc_http[chain] = env(h, "").strip() or PUBLIC_RPC.get(chain, "")
         s.rpc_wss[chain] = env(w, "").strip()
 
     cfg = Config(data, s, base)
@@ -155,6 +158,8 @@ def validate(cfg: Config) -> list[str]:
     if "solana" in chains and not s.helius_key:
         errors.append("启用了 Solana 但缺少 HELIUS_API_KEY（实时监听聪明钱要用）")
     for c in cfg.evm_chains:
+        if c in PUBLIC_RPC and s.rpc_http.get(c) and not s.rpc_wss.get(c):
+            continue   # 没有 WebSocket 的链：改用 HTTP 轮询监听
         if not s.rpc_http.get(c) or not s.rpc_wss.get(c):
             errors.append(f"启用了 {c} 但缺少它的 RPC_HTTP / RPC_WSS 地址")
         elif not s.rpc_wss[c].startswith("wss://"):

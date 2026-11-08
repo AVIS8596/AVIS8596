@@ -39,7 +39,11 @@ class App:
         if "solana" in cfg.enabled_chains:
             self.sol = SolanaRPC(self.http, s.helius_key, float(b.get("helius_rps", 6)),
                                  float(b.get("helius_trade_rps", 3)))
-        self.evm: dict[str, EvmRPC] = {c: EvmRPC(self.http, c, s.rpc_http[c]) for c in cfg.evm_chains}
+        from .chains import PUBLIC_RPC
+        # 用内置免费公共节点时限速低一些，免得被节点封
+        self.evm: dict[str, EvmRPC] = {
+            c: EvmRPC(self.http, c, s.rpc_http[c], 8 if s.rpc_http[c] == PUBLIC_RPC.get(c) else 25)
+            for c in cfg.evm_chains}
         self.wallets_changed: dict[str, asyncio.Event] = {c: asyncio.Event() for c in cfg.enabled_chains}
         self._native_px: dict[str, tuple[float, float]] = {}
         self.started_at = time.time()

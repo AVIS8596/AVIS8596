@@ -125,7 +125,7 @@ def test_plan_upgrade_disables_endpoint():
             c = gm.Gmgn("K", "", "free")
             with pytest.raises(gm.GmgnError):
                 await c.top_holders("solana", "M")
-            assert "/v1/market/token_top_holders" in c.disabled
+            assert "/v1/market/token_top_holders@sol" in c.disabled   # 按"接口@链"停用
             assert await c.top_holders("solana", "M") == []      # 之后直接跳过，不再请求
             await c.close()
         finally:

@@ -23,9 +23,11 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from ..chains import NO_FEED_CHAINS
+
 log = logging.getLogger("memebot.gmgn")
 HOST = "https://openapi.gmgn.ai"
-CHAIN_MAP = {"solana": "sol", "bsc": "bsc", "ethereum": "eth", "base": "base"}
+CHAIN_MAP = {"solana": "sol", "bsc": "bsc", "ethereum": "eth", "base": "base", "robinhood": "robinhood"}
 PLAN_RATE = {"free": 5, "plus": 20, "pro": 50}
 
 # 各接口权重（来自官方 gmgn-cli 1.7.1 文档）
@@ -138,7 +140,9 @@ class Gmgn:
 
     async def request(self, method: str, path: str, query: dict | None = None, body: Any = None,
                       retries: int = 2) -> Any:
-        if path in self.disabled:
+        # 停用按"接口@链"记：某条链不支持某接口，不能连带停掉其他链
+        dkey = f"{path}@{(query or {}).get('chain')}" if (query or {}).get("chain") else path
+        if path in self.disabled or dkey in self.disabled:
             return None
         signed = path in SIGNED
         trade = path.startswith("/v1/trade/")
@@ -202,8 +206,8 @@ class Gmgn:
                     self.trade_block_msg = up or "当前套餐不支持 API 交易"
                     log.error("GMGN 交易接口不可用（30 分钟后再试）：%s | 原始返回：%s", up, text[:500])
                 else:
-                    self.disabled.add(path)
-                    log.error("GMGN 接口 %s 当前套餐不可用，已停用：%s", path, up)
+                    self.disabled.add(dkey)
+                    log.error("GMGN 接口 %s 当前套餐不可用，已停用：%s", dkey, up)
                 msg = up or msg
             raise GmgnError(path, status, js.get("code"), err, msg, reset_at)
         return None
@@ -258,9 +262,13 @@ class Gmgn:
         return out
 
     async def smartmoney(self, chain: str, limit: int = 200) -> list[dict]:
+        if chain in NO_FEED_CHAINS:
+            return []
         return _rows(await self.request("GET", "/v1/user/smartmoney", {"chain": CHAIN_MAP[chain], "limit": limit}))
 
     async def kol(self, chain: str, limit: int = 200) -> list[dict]:
+        if chain in NO_FEED_CHAINS:
+            return []
         return _rows(await self.request("GET", "/v1/user/kol", {"chain": CHAIN_MAP[chain], "limit": limit}))
 
     async def wallet_stats(self, chain: str, wallet: str, period: str = "30d") -> dict:

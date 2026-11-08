@@ -73,7 +73,25 @@ CHAINS: dict[str, ChainInfo] = {
             "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",  # USDT
         }),
     ),
+    # 罗宾汉链：Arbitrum Orbit L2，chain id 4663，Gas 用 ETH；GoPlus 暂不支持（安全检测只用 GMGN）
+    "robinhood": ChainInfo(
+        key="robinhood", name="Robinhood", native_symbol="ETH", native_decimals=18, birdeye="robinhood",
+        wrapped="0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", chain_id=4663, goplus_id=None,
+        explorer_tx="https://robinhoodchain.blockscout.com/tx/{}",
+        explorer_token="https://gmgn.ai/robinhood/token/{}",
+        explorer_addr="https://gmgn.ai/robinhood/address/{}",
+        quote_tokens=frozenset(a.lower() for a in {
+            "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",  # WETH
+            "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",  # USDG
+            "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",  # USDe
+        }),
+    ),
 }
+
+# GMGN 聪明钱 / KOL 交易流还不支持的链：钱包只能靠自己从大涨币里挖
+NO_FEED_CHAINS = frozenset({"robinhood"})
+# 没有免费 WebSocket 的链默认用的公共 HTTP 节点（.env 里填了自己的就用自己的）
+PUBLIC_RPC = {"robinhood": "https://rpc.nodeflare.app/robinhood/public"}
 
 
 def norm_addr(chain: str, addr: str) -> str:

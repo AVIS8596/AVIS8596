@@ -452,7 +452,7 @@ class Analyzer:
             t_hi = int(b["timestamp"], 16)
             if ts >= t_hi:
                 return hi
-            bt = {"ethereum": 12.0, "bsc": 0.75, "base": 2.0}.get(chain, 2.0)
+            bt = {"ethereum": 12.0, "bsc": 0.75, "base": 2.0, "robinhood": 0.25}.get(chain, 2.0)
             lo = max(0, hi - int((t_hi - ts) / bt * 1.5) - 100)
             for _ in range(30):
                 if hi - lo <= 1:

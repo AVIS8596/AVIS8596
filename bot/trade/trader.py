@@ -139,7 +139,10 @@ class Trader:
                 dd = (1 - float(rep["price"]) / hi) * 100
                 if dd >= dd_max:
                     return f"从 2 小时内高点已经跌了 {dd:.0f}%，不接飞刀"
-        if len(await db.open_positions()) >= int(t.get("max_open_positions", 10)):
+        cap = int(t.get("max_open_positions", 10))
+        if self.cfg.dry_run and t.get("max_open_positions_dry"):
+            cap = int(t["max_open_positions_dry"])    # 模拟盘多条链一起跑，名额放宽，多积累数据
+        if len(await db.open_positions()) >= cap:
             return "持仓数量已满"
         cd = float(t.get("token_cooldown_min", 120)) * 60
         if time.time() - await db.last_closed_at(chain, token) < cd:

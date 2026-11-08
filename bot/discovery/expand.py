@@ -21,7 +21,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from ..chains import norm_addr
+from ..chains import NO_FEED_CHAINS, norm_addr
 from ..utils import f
 
 if TYPE_CHECKING:
@@ -210,8 +210,13 @@ class WalletExpander:
                                     ("k", 6 * 3600, self.refresh_kols)):
                 if now - last[name] >= every:
                     last[name] = now
-                    try:
-                        await fn("solana")
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("钱包扩充任务 %s 失败: %s", name, e)
+                    # Solana + 没有 GMGN 聪明钱交易流的链（罗宾汉链）：钱包只能靠挖大涨币
+                    chains = ["solana"] + ([] if name == "k" else
+                                           [c for c in self.app.cfg.enabled_chains if c in NO_FEED_CHAINS])
+                    for c in chains:
+                        if c != "solana" or "solana" in self.app.cfg.enabled_chains:
+                            try:
+                                await fn(c)
+                            except Exception as e:  # noqa: BLE001
+                                log.warning("钱包扩充任务 %s（%s）失败: %s", name, c, e)
             await asyncio.sleep(300)

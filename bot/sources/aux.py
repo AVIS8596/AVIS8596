@@ -20,6 +20,8 @@ class GoPlus:
 
     async def token_security(self, chain: str, token: str) -> dict:
         info = CHAINS[chain]
+        if chain != "solana" and not info.goplus_id:
+            return {}   # GoPlus 不支持这条链，只用 GMGN 的安全检测
         if chain == "solana":
             url = f"{self.BASE}/solana/token_security"
         else:

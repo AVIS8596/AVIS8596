@@ -71,8 +71,10 @@ class DataHub:
             p = await self.price(chain, info.wrapped if chain == "solana" else info.wrapped.lower())
             if p > 0:
                 return p
-        if self.app.birdeye.key:
+        if self.app.birdeye.key and chain != "robinhood":
             return await self.app.birdeye.price(chain, info.wrapped)
+        if info.native_symbol == "ETH" and chain != "ethereum":
+            return await self.native_usd("ethereum")   # L2 的 Gas 币就是 ETH，取不到就用主网 ETH 价格
         return 0.0
 
     # ================================================================ 代币
