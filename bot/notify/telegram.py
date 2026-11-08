@@ -188,6 +188,11 @@ class Telegram:
             if rules.get("stall_hours"):
                 plan += f" | {float(rules['stall_hours']):g} 小时涨不到 +{float(rules.get('stall_min_gain_pct', 0)):g}% 就卖"
             plan += f" | 最长拿 {float(rules.get('max_hold_hours', 24)):g} 小时\n"
+            tps = rules.get("take_profit") or []
+            if tps:
+                plan += "止盈：" + "，".join(f"+{float(t['gain_pct']):g}% 卖{float(t['sell_pct']):g}%" for t in tps)
+                plan += (f" | 涨过 +{float(rules.get('trailing_start_pct', 60)):g}% 后回撤 "
+                         f"{float(rules.get('trailing_drop_pct', 30)):g}% 先卖一半\n")
         await self.send(
             f"{self.mode()} ✅ <b>买入 #{pid}</b> {self.tok_link(chain, rep['address'], rep.get('symbol') or '?')}\n"
             f"原因：{e(reason)} | 评分 {rep['score']}\n"
