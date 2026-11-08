@@ -411,17 +411,23 @@ def test_bad_actor_memory(tmp_path):
 def test_wallet_audit_judge(tmp_path):
     from bot.discovery.audit import audit, judge
 
-    def P(tok, pnl=0.5, sym=None, age=5.0):
-        return {"token": tok, "pnl": pnl, "symbol": sym or tok, "entry_age_min": age}
-    sells = {t: 1.0 for t in "ABCDE"}
-    # 赚钱的 5 个币里 4 个在它卖出后跌了 90% 以上：割完即死
-    v, notes = judge([P(t) for t in "ABCDE"], sells, {"A": 0.01, "B": 0.05, "C": 0.0, "D": 0.09, "E": 0.8}, 0)
+    def P(tok, pnl=0.5, sym=None, age=5.0, hold=10.0):
+        return {"token": tok, "pnl": pnl, "symbol": sym or tok, "entry_age_min": age, "hold_min": hold}
+    sells = {t: 1.0 for t in "ABCDEF"}
+    # 赚钱的 6 个币里 5 个在它卖出后跌了 90% 以上、而且快进快出：割完即死
+    dead = {"A": 0.01, "B": 0.05, "C": 0.02, "D": 0.09, "E": 0.03, "F": 0.8}
+    v, notes = judge([P(t) for t in "ABCDEF"], sells, dead, 0)
     assert v == "suspect" and notes[0].startswith("割完即死")
-    # 同名多合约
-    v, notes = judge([P("A", sym="TAOLF"), P("B", sym="taolf"), P("C")], sells, {"A": 1, "B": 1, "C": 1}, 0)
-    assert v == "suspect" and "TAOLF×2" in notes[0]
-    # 被标记过
+    assert judge([P(t, hold=300) for t in "ABCDEF"], sells, dead, 0)[0] == "ok"      # 拿得久的不算
+    assert judge([P(t) for t in "ABCDEF"], sells, {"F": 0.8}, 0)[0] == "ok"           # 取不到价格不算归零
+    # 同名多合约：3 个，或 2 个且名字让我们亏光过
+    v, notes = judge([P("A", sym="TAOLF"), P("B", sym="taolf"), P("C", sym="$TAOLF")], sells, {}, 0)
+    assert v == "suspect" and "TAOLF×3" in notes[0]
+    assert judge([P("A", sym="PEPE"), P("B", sym="pepe")], sells, {}, 0)[0] == "ok"
+    assert judge([P("A", sym="PEPE"), P("B", sym="pepe")], sells, {}, 0, bad_symbols={"PEPE"})[0] == "suspect"
+    # 被标记过（3 次以上）
     assert judge([P("A")], sells, {"A": 1}, 3)[0] == "suspect"
+    assert judge([P("A")], sells, {"A": 1}, 2)[0] == "ok"
     # 开盘狙击（没有其他问题）
     v, notes = judge([P(t, age=0.1) for t in "ABCDE"], sells, {t: 1.0 for t in "ABCDE"}, 0)
     assert v == "sniper"
@@ -435,7 +441,7 @@ def test_wallet_audit_judge(tmp_path):
             await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana','W','active')")
             now = time.time()
             acts, holds = [], []
-            for i, t in enumerate("ABCDE"):
+            for i, t in enumerate("ABCDEF"):
                 acts += [{"event_type": "buy", "timestamp": now - 7200 + i, "price_usd": 0.1, "cost_usd": 10,
                           "token": {"address": t, "symbol": t}},
                          {"event_type": "sell", "timestamp": now - 3600 + i, "price_usd": 1.0, "cost_usd": 100,
@@ -475,8 +481,9 @@ def test_audit_token_roles_and_creator_affinity(tmp_path):
     # 好币大多最终也会归零：一半归零不算割完即死，要 70% 以上
     sells = {t: 1.0 for t in "ABCDEF"}
     pos = [{"token": t, "pnl": 0.5, "symbol": t, "entry_age_min": 5} for t in "ABCDEF"]
-    assert judge(pos, sells, {"A": 0, "B": 0, "C": 0, "D": 2, "E": 2, "F": 2}, 0)[0] == "ok"
-    assert judge(pos, sells, {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 2}, 0)[0] == "suspect"
+    pos = [dict(p, hold_min=10) for p in pos]
+    assert judge(pos, sells, {"A": 0.01, "B": 0.01, "C": 0.01, "D": 2, "E": 2, "F": 2}, 0)[0] == "ok"
+    assert judge(pos, sells, {"A": 0.01, "B": 0.01, "C": 0.01, "D": 0.01, "E": 0.01, "F": 2}, 0)[0] == "suspect"
 
     async def go():
         db = DB(tmp_path / "ca.db")
