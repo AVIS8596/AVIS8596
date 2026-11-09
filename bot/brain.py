@@ -22,7 +22,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
-from .utils import f, fmt_usd
+from .utils import f, fmt_usd, sane_ratio
 
 if TYPE_CHECKING:
     from .app import App
@@ -38,6 +38,8 @@ def proxy_return(price: float, p60: float | None, p240: float | None, p15: float
     """近似"止损 -35% + 拿 4 小时"的收益。数据不全返回 None。"""
     if not price or price <= 0:
         return None
+    if any(p and p > 0 and not sane_ratio(p / price) for p in (p15, p60, p240)):
+        return None          # 价格数据错误（单位不对 / 取到别的池子），不拿来学
     lows = [p for p in (p15, p60) if p and p > 0]
     if lows and min(lows) / price <= 1 + STOP:
         return STOP - COST
@@ -146,7 +148,7 @@ async def missed_winners(app: "App", days: float = 2, min_x: float = 3.0) -> dic
     winners, reasons = [], Counter()
     for k, d in toks.items():
         x = d["peak"] / f(d["first"]["price"])
-        if x < min_x:
+        if x < min_x or not sane_ratio(x):
             continue
         if d["bought"] or k in bought:
             continue
@@ -154,7 +156,7 @@ async def missed_winners(app: "App", days: float = 2, min_x: float = 3.0) -> dic
         why = await block_reason(app, k[0], k[1], f(d["first"]["ts"]), ft)
         reasons[why] += 1
         winners.append((x, d["first"]["symbol"] or "?", why))
-    n_x = sum(1 for d in toks.values() if d["peak"] / f(d["first"]["price"]) >= min_x)
+    n_x = sum(1 for d in toks.values() if min_x <= d["peak"] / f(d["first"]["price"]) < 200)
     return {"seen": seen, "n_x": n_x, "missed": sorted(winners, reverse=True), "reasons": reasons}
 
 
@@ -332,6 +334,18 @@ class Brain:
 
     # ---------------- 参数覆盖（学到的参数存在数据库里，重启后自动加载）
     async def load(self) -> None:
+        db = self.app.db
+        if not await db.kv_get("data_fix_v1", False):
+            # 11-09 发现少数币的价格数据错误（倍数几亿倍），之前学到的参数和模型可能被带偏：清掉，用干净数据重新学
+            n = await self.reset()
+            await db.kv_set("model_a", None)
+            await db.kv_set("model_b", None)
+            await db.kv_set("data_fix_v1", True)
+            log.warning("数据修正：恢复 %d 个学到的参数，选币模型重新训练", n)
+            tg = getattr(self.app, "tg", None)
+            if tg:
+                await tg.send(f"🧹 数据修正：发现少数币的价格数据错误（复盘里那些几亿 % 的数字），已经排除。"
+                              f"之前自动学到的 {n} 个参数先恢复成配置文件的值，选币模型用干净数据重新训练", low=True)
         tuned = await self.app.db.kv_get("tuned", {}) or {}
         for k, v in tuned.items():
             set_cfg(self.cfg.raw, k, v)

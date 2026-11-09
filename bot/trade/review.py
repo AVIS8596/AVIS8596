@@ -7,7 +7,7 @@ from collections import Counter
 import time
 from typing import TYPE_CHECKING
 
-from ..utils import fmt_usd
+from ..utils import fmt_usd, sane_ratio
 from .positions import URGENT, dyn_state, exit_rules
 
 if TYPE_CHECKING:
@@ -166,7 +166,9 @@ async def skipped_review(app: "App", start: float) -> str:
         return ""
     g: dict[str, list[float]] = {}
     for r in rows:
-        g.setdefault(r["cat"], []).append((float(r["px_1h"]) / float(r["price"]) - 1) * 100)
+        x = float(r["px_1h"]) / float(r["price"])
+        if sane_ratio(x):          # 价格数据错误的不算（否则平均值会变成几亿 %）
+            g.setdefault(r["cat"], []).append((x - 1) * 100)
     from .skipsim import summary as sim_summary
     sims = await sim_summary(app, start - 3600)
     lines = ["<b>被过滤的信号</b>（1 小时后涨跌；影子单 = 按真实卖出规则完整模拟，为负说明拦得对）"]

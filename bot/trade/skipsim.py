@@ -38,10 +38,12 @@ async def run_batch(app: "App", limit: int = 30) -> int:
             except Exception as e:  # noqa: BLE001
                 log.debug("影子单取 K 线失败 %s: %s", r["token"], e)
                 path = []
+            if len(path) >= 8 and not 0.1 < path[0][1] / float(r["price"]) < 10:
+                path = []            # 记录的价格和 K 线对不上（单位不对 / 别的池子）：不算
             if len(path) >= 8:
                 entry = float(r["price"]) * 1.01             # 买入滑点
                 m = simulate(entry, float(r["ts"]), path, dict(exit_rules(exit_cfg, "normal")), None, 100, cost)
-                ret = m - 1
+                ret = m - 1 if m < 200 else -9.0
             else:
                 ret = -9.0           # 取不到 K 线：标记跳过（不参与统计）
         await db.execute("UPDATE skipped SET sim_ret=? WHERE id=?", (ret, r["id"]))
@@ -51,7 +53,7 @@ async def run_batch(app: "App", limit: int = 30) -> int:
 
 async def summary(app: "App", start: float) -> dict[str, tuple[int, float, float]]:
     """各类拦截原因的影子单结果：类别 → (笔数, 每笔平均, 中位)。"""
-    rows = await app.db.fetchall("SELECT cat, sim_ret FROM skipped WHERE ts>=? AND sim_ret IS NOT NULL AND sim_ret>-5",
+    rows = await app.db.fetchall("SELECT cat, sim_ret FROM skipped WHERE ts>=? AND sim_ret BETWEEN -1 AND 199",
                                  (start,))
     g: dict[str, list[float]] = {}
     for r in rows:

@@ -9,7 +9,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from ..utils import f
+from ..utils import f, sane_ratio
 
 if TYPE_CHECKING:
     from ..app import App
@@ -54,7 +54,7 @@ def analyze_rows(rows: list[dict], horizon: str) -> dict:
     data = []
     for r in rows:
         p0, p1 = f(r.get("price")), f(r.get(horizon))
-        if p0 <= 0 or p1 <= 0:
+        if p0 <= 0 or p1 <= 0 or not sane_ratio(p1 / p0):
             continue
         feats = json.loads(r.get("features") or "{}")
         b, s = f(feats.get("buys_1h")), f(feats.get("sells_1h"))

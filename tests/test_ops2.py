@@ -560,3 +560,14 @@ def test_skip_shadow_sim(tmp_path, monkeypatch):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_sane_ratio_guards():
+    from bot.brain import proxy_return
+    from bot.trade.insight import analyze_rows
+    from bot.utils import sane_ratio
+    assert sane_ratio(3) and sane_ratio(0.01) and not sane_ratio(5e13) and not sane_ratio(1e-9)
+    assert proxy_return(1e-15, 1.0, 2.0) is None                    # 记录的价格错了：不拿来学
+    assert proxy_return(1.0, 1.2, 2.0) is not None
+    rows = [{"price": 1e-15, "p60": 1.0, "features": "{}"}] + [{"price": 1.0, "p60": 1.1, "features": "{}"}] * 3
+    assert analyze_rows(rows, "p60")["n"] == 3

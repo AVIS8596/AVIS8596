@@ -200,3 +200,8 @@ async def run_forever(name: str, factory: Callable[[], Awaitable[Any]],
             backoff = min_backoff  # 稳定运行过一段时间，重置退避
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
+
+
+def sane_ratio(x: float) -> bool:
+    """价格倍数是否可信：几小时内涨 200 倍以上、或跌到万分之五以下，基本是数据错误（价格单位不对、取到了别的池子）。"""
+    return 0.0005 < x < 200

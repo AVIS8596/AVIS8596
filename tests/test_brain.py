@@ -92,6 +92,7 @@ def test_brain_apply_reset_and_missed(tmp_path):
         assert app.cfg.get("trading.auto_min_score") == 70
         raw2 = {"trading": {"auto_min_score": 75}}
         app2 = SimpleNamespace(db=db, cfg=Cfg(raw2))
+        await db.kv_set("data_fix_v1", True)
         await Brain(app2).load()                                  # 重启后自动加载
         assert raw2["trading"]["auto_min_score"] == 70
         assert await br.reset() == 1 and app.cfg.get("trading.auto_min_score") == 75
