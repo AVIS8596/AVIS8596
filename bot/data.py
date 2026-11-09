@@ -204,6 +204,7 @@ class DataHub:
             n_feed = len(out)
             n_tok = int(self.app.cfg.get("smart_money.trending_tokens_per_chain", 20))
             toks: list[dict] = []
+            src = "GMGN 热门榜"
             for period in ("1h", "6h", "24h"):      # 冷门链 1 小时热门榜太少，就看 6 小时 / 24 小时
                 try:
                     toks = (await self.gm.rank(chain, period, n_tok))[:n_tok]
@@ -212,6 +213,14 @@ class DataHub:
                     toks = []
                 if len(toks) >= 5:
                     break
+            if len(toks) < 5:
+                # GMGN 热门榜在 Base / 罗宾汉链经常是空的：改用机器人自己分析过、之后涨得最好的币
+                rows = await self.app.db.fetchall(
+                    "SELECT token, symbol, MAX(MAX(COALESCE(p60,0), COALESCE(p240,0)) / price) x FROM token_outcomes "
+                    "WHERE chain=? AND ts>? AND price>0 GROUP BY token HAVING x>=1.5 ORDER BY x DESC LIMIT ?",
+                    (chain, time.time() - 2 * 86400, n_tok))
+                toks = [{"address": r["token"], "symbol": r["symbol"]} for r in rows]
+                src = "自己分析过的涨幅榜"
             for tok in toks:
                 ta = tok.get("address")
                 if not ta:
@@ -223,7 +232,7 @@ class DataHub:
                             out.setdefault(norm_addr(chain, a), f"top_trader:{tok.get('symbol', '?')}")
                 except GmgnError as e:
                     log.debug("GMGN 盈利前排 %s %s: %s", chain, ta, e)
-            log.info("%s 候选来源：交易流 %d 个，热门币 %d 个的盈利前排 %d 个", chain, n_feed, len(toks), len(out) - n_feed)
+            log.info("%s 候选来源：交易流 %d 个，%s %d 个币的盈利前排 %d 个", chain, n_feed, src, len(toks), len(out) - n_feed)
             return out
         return await self.app.smart.birdeye_candidates(chain)
 
