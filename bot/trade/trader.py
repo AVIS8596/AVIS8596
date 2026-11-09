@@ -27,6 +27,16 @@ SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱�
              ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过")]
 
 
+PROBE = "试探仓"
+STRUCT_PREFIX = ("捆绑地址持有", "埋伏地址持有", "前10持仓")
+PROBE_DEFAULTS = {"enabled": True, "size_mult": 0.25, "max_top10_pct": 65, "max_bundle_pct": 45,
+                  "max_insider_pct": 35, "min_smart": 2, "narrative_min_score": 80}
+
+
+def probe_cfg(cfg) -> dict:
+    return {**PROBE_DEFAULTS, **(cfg.get("trading.probe", {}) or {})}
+
+
 def norm_symbol(s) -> str:
     return str(s or "").strip().upper().lstrip("$")
 
@@ -89,9 +99,14 @@ class Trader:
             return f"连亏熔断，暂停买入到 {self.app.fmt_time(su)}"
         return ""
 
-    async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None, reason: str = "") -> str:
-        """返回拒绝原因；空字符串表示可以买。"""
+    async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None, reason: str = "",
+                    relax: bool = False) -> str:
+        """返回拒绝原因；空字符串表示可以买。relax=True：筹码结构按"试探仓"的宽松上限判断。"""
         t = self.cfg.get("trading", {}) or {}
+        if relax:
+            pb = probe_cfg(self.cfg)
+            t = {**t, "max_top10_pct": pb["max_top10_pct"], "max_bundle_pct": pb["max_bundle_pct"],
+                 "max_insider_pct": pb["max_insider_pct"]}
         if not t.get("enabled", False):
             return "交易总开关关闭"
         if chain not in self.exec:
@@ -268,11 +283,18 @@ class Trader:
                 rep = await self.fresh(chain, token, rep)
                 if rep is None:
                     return
-                why = await self.check(chain, token, rep, wallets, reason)
+                probe = PROBE in reason            # 主动建仓那边已经判定为试探仓
+                why = await self.check(chain, token, rep, wallets, reason, relax=probe)
+                if why and not probe and why.startswith(STRUCT_PREFIX) \
+                        and self.probe_ok(rep, wallets, reason):
+                    # 信号很强、只是筹码结构稍微超限（刚发币时前10 / 捆绑天然偏高）：小仓位先建仓，再观察
+                    if not await self.check(chain, token, rep, wallets, reason, relax=True):
+                        reason = f"{reason}（{PROBE}：{why}，先小仓位建仓再观察）"
+                        probe, why = True, ""
                 if why:
                     await self.skip(chain, token, rep, reason, why)
                     return
-                await self._buy(chain, token, rep, reason, wallets, tier)
+                await self._buy(chain, token, rep, reason, wallets, tier, probe=probe)
             finally:
                 self._buying.discard(key)
                 if len(self._locks) > 5000:
@@ -346,13 +368,27 @@ class Trader:
         m = self.cfg.get("trading.size_multiplier", {}) or {}
         return [base, base * float(m.get("good", 2)), base * float(m.get("best", 4))]
 
+    def probe_ok(self, rep: dict, wallets: list[str] | None, reason: str) -> bool:
+        """哪些信号够强、可以开试探仓：主动建仓 / 新币高评分 / 模型买入，或者 2 个以上还拿着的聪明钱一起买。"""
+        pb = probe_cfg(self.cfg)
+        if not pb["enabled"]:
+            return False
+        if reason.startswith(("强叙事", "早期建仓", "新币高评分", "模型买入")):
+            return True
+        from ..discovery.audit import token_roles
+        held = (set(wallets or []) | set(rep.get("smart_buyers") or [])) - set(token_roles(rep))
+        return len(held) >= int(pb["min_smart"])
+
     async def _buy(self, chain: str, token: str, rep: dict, reason: str, wallets: list[str],
-                   tier: str | None = None) -> None:
+                   tier: str | None = None, probe: bool = False) -> None:
         tier = tier or self.tier(rep, wallets)
         amount = (await self.sizes(chain))[{"normal": 0, "good": 1, "best": 2}[tier]]
         if amount <= 0:
             return
         reason = f"{reason} | {TIER_NAME[tier]}"
+        if probe:
+            amount = round(amount * float(probe_cfg(self.cfg)["size_mult"]), 4)
+            reason += f" | 试探仓 ×{float(probe_cfg(self.cfg)['size_mult']):g}"
         from .regime import regime
         rg = await regime(self.app)
         if rg.get("mult", 1) != 1:

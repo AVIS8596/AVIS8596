@@ -153,3 +153,25 @@ def test_explain_lines():
     out = st.explain("solana", "FRODO1")
     assert any("捆绑交易 30.4%，上限 30%" in x for x in out) and any("强叙事评分" in x for x in out)
     assert "不在 GMGN" in st.explain("solana", "NOPE")[0]
+
+
+def test_narrative_probe_when_top10_slightly_high():
+    """强叙事 95 分、刚发币前10 持仓 45%（叙事上限 40%）：开试探仓；前10 80% 还是不碰。"""
+    fired = []
+    app = SimpleNamespace(cfg=SimpleNamespace(get=lambda k, d=None: d), hub=SimpleNamespace(_tasks=set()),
+                          trader=SimpleNamespace(skip=lambda *a, **k: asyncio.sleep(0)))
+    st = Strategies(app)
+
+    async def go():
+        t0 = time.time()
+        base = {**CLEAN, "_stage": "已毕业", "symbol": "NB", "created_timestamp": t0 - 600, "renowned_count": 3,
+                "smart_degen_count": 3, "twitter": "x.com/nb", "telegram": "t.me/nb", "website": "nb.xyz",
+                "x_user_follower": 25000, "holder_count": 900, "volume_1h": 300000, "swaps_1h": 1500,
+                "top_10_holder_rate": 0.451}
+        bad = dict(base, address="BAD", symbol="ZZ", top_10_holder_rate=0.8)
+        for dt in (0, 100, 190):
+            out = await st.poll("solana", [dict(base, address="NB1"), bad], now=t0 + dt)
+            fired.extend(out)
+        await asyncio.sleep(0)
+        assert [o[0] for o in fired] == ["NB1"] and "试探仓" in fired[0][1] and "前10" in fired[0][1]
+    asyncio.run(go())

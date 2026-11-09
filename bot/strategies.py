@@ -295,6 +295,16 @@ class Strategies:
                     and int(f(it.get("holder_count"))) >= int(nc["min_holders"]) \
                     and volume(it) >= float(nc["min_volume"])
                 prob = structure_problem(it, nc) if ok_size else ""
+                probe = False
+                if prob:
+                    # 叙事分很高、结构只是稍微超限（刚发币时前10 / 捆绑天然偏高）：按试探仓的宽松上限再看一次
+                    from .trade.trader import probe_cfg
+                    pb = probe_cfg(self.cfg)
+                    msc0, _ = narrative_score(it, names.get(n, 0), True, now)
+                    loose = {**nc, "max_top10_rate": pb["max_top10_pct"] / 100, "max_bundler_rate": pb["max_bundle_pct"] / 100,
+                             "max_insider_rate": pb["max_insider_pct"] / 100}
+                    if pb["enabled"] and msc0 >= int(pb["narrative_min_score"]) and not structure_problem(it, loose):
+                        probe, prob0, prob = True, prob, ""
                 if prob and f"{chain}:{addr}" not in self.missed:
                     msc, _ = narrative_score(it, names.get(n, 0), True, now)
                     if msc >= int(nc["min_score"]):
@@ -314,6 +324,8 @@ class Strategies:
                         st["best_narr"] = (sc, str(it.get("symbol") or "?"))
                     if sc >= int(nc["min_score"]):
                         reason = f"{NARRATIVE}（{sc} 分：{'、'.join(notes[:4])}）"
+                        if probe:
+                            reason += f"（试探仓：{prob0}，先小仓位建仓再观察）"
             if reason:
                 pk = f"{chain}:{addr}"
                 holders = int(f(it.get("holder_count")))

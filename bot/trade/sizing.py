@@ -25,6 +25,8 @@ _cache: dict = {"t": 0.0, "dry": None, "v": {}}
 
 
 def source_of(reason: str | None) -> str:
+    if "试探仓" in (reason or ""):
+        return "试探仓"
     return re.split(r"[（(|、]", reason or "其他")[0].strip() or "其他"
 
 

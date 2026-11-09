@@ -257,3 +257,51 @@ def test_follow_sell_needs_majority(tmp_path):
         await db.close()
 
     asyncio.run(go())
+
+
+def test_probe_position(tmp_path):
+    """信号很强、只是筹码结构稍微超限：小仓位试探建仓；结构太差或信号一般还是不买。"""
+    async def go():
+        db = DB(tmp_path / "p.db")
+        await db.open()
+        try:
+            app = _app(db, [])
+            tr = Trader(app)
+            tr.exec = {"solana": object()}
+            hot = {**GOOD, "top10_pct": 52, "bundle_held_pct": 28}
+            assert "捆绑地址持有" in await tr.check("solana", "T", dict(hot))
+            assert await tr.check("solana", "T", dict(hot), relax=True) == ""
+            assert "前10持仓" in await tr.check("solana", "T", {**hot, "top10_pct": 80}, relax=True)
+            assert tr.probe_ok(hot, [], "早期建仓（持有人 3 分钟 +30%）")
+            assert tr.probe_ok(hot, ["a", "b"], "跟单（2 个聪明钱）")
+            assert not tr.probe_ok(hot, ["a"], "跟单（1 个聪明钱）")
+            assert not tr.probe_ok({**hot, "insider_wallets": ["b"]}, ["a", "b"], "跟单")   # 老鼠仓不算聪明钱
+            bought, skipped = [], []
+
+            async def fresh(chain, token, rep):
+                return rep
+
+            async def buy(chain, token, rep, reason, wallets, tier=None, probe=False):
+                bought.append((token, reason, probe))
+
+            async def skip(chain, token, rep, trigger, why):
+                skipped.append((token, why))
+            tr.fresh, tr._buy, tr.skip = fresh, buy, skip
+            await tr.consider("solana", "A", dict(hot), "跟单（2 个聪明钱）", ["a", "b"])
+            assert bought and bought[0][2] is True and "试探仓" in bought[0][1] and "捆绑地址持有" in bought[0][1]
+            await tr.consider("solana", "B", dict(hot), "跟单（1 个聪明钱）", ["a"])
+            assert skipped and skipped[0][0] == "B" and "捆绑地址持有" in skipped[0][1]
+            await tr.consider("solana", "C", {**hot, "top10_pct": 80}, "早期建仓", [])
+            assert skipped[-1][0] == "C"                                 # 宽松上限也超了：不买
+            await tr.consider("solana", "D", dict(hot), "强叙事（95 分）（试探仓：前10持仓 45%）", [])
+            assert bought[-1][0] == "D" and bought[-1][2] is True        # 主动建仓那边已经判定为试探仓
+            await tr.consider("solana", "E", dict(GOOD), "跟单（1 个聪明钱）", ["a"])
+            assert bought[-1] == ("E", "跟单（1 个聪明钱）", False)       # 结构正常：正常仓位
+            app.cfg.raw["trading"]["probe"]["enabled"] = False
+            assert not tr.probe_ok(hot, ["a", "b"], "早期建仓")
+            app.cfg.raw["trading"]["probe"]["enabled"] = True
+            from bot.trade.sizing import source_of
+            assert source_of(bought[0][1]) == "试探仓" and source_of("跟单（2 个）") == "跟单"
+        finally:
+            await db.close()
+    asyncio.run(go())
