@@ -172,7 +172,7 @@ class WalletExpander:
             added += 1
         if added:
             self.app.wallets_changed[chain].set()
-            log.info("大涨币挖矿：新增 %d 个钱包", added)
+            log.info("%s 大涨币挖矿：新增 %d 个钱包", chain, added)
         return added
 
     # ------------------------------------------------------------ KOL

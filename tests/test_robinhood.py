@@ -16,7 +16,7 @@ def test_chain_constants():
     rh = CHAINS["robinhood"]
     assert rh.chain_id == 4663 and rh.native_symbol == "ETH" and rh.goplus_id is None
     assert is_quote_token("robinhood", rh.wrapped) and is_quote_token("robinhood", rh.wrapped.upper().replace("0X", "0x"))
-    assert "robinhood" in NO_FEED_CHAINS and PUBLIC_RPC["robinhood"].startswith("https://")
+    assert "robinhood" not in NO_FEED_CHAINS and PUBLIC_RPC["robinhood"].startswith("https://")
 
 
 def test_config_uses_public_rpc(tmp_path, monkeypatch):
@@ -41,7 +41,6 @@ def test_feed_short_circuit_and_per_chain_disable():
     g = Gmgn("k" * 12)
 
     async def go():
-        assert await g.smartmoney("robinhood") == [] and await g.kol("robinhood") == []
         g.disabled.add("/v1/user/smartmoney@robinhood")          # 只停罗宾汉链
         assert await g.request("GET", "/v1/user/smartmoney", {"chain": "robinhood"}) is None
         await g.close()

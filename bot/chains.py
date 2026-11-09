@@ -88,8 +88,9 @@ CHAINS: dict[str, ChainInfo] = {
     ),
 }
 
-# GMGN 聪明钱 / KOL 交易流还不支持的链：钱包只能靠自己从大涨币里挖
-NO_FEED_CHAINS = frozenset({"robinhood"})
+# GMGN 聪明钱 / KOL 交易流还不支持的链：钱包只能靠自己从大涨币里挖。
+# 罗宾汉链：GMGN 文档已经把它列进 kol / smartmoney 支持的链，先试着用；接口真不支持时交易流会自动退避（见 gmgn_feed.py）
+NO_FEED_CHAINS: frozenset[str] = frozenset()
 # 没有免费 WebSocket 的链默认用的公共 HTTP 节点（.env 里填了自己的就用自己的）
 PUBLIC_RPC = {"robinhood": "https://rpc.nodeflare.app/robinhood/public"}
 

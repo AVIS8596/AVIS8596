@@ -45,6 +45,8 @@ class GmgnFeed:
         interval = float(g.get("feed_poll_sec", 3))
         eval_every = float(g.get("candidate_eval_min", 10)) * 60
         n = 0
+        fails: dict[str, int] = {}
+        off_until: dict[str, float] = {}
         while True:
             await self._refresh_watch()
             feeds = [("smart", self.app.gmgn.smartmoney)]
@@ -52,11 +54,20 @@ class GmgnFeed:
                 feeds.append(("kol", self.app.gmgn.kol))
             n += 1
             for name, fn in feeds:
+                if time.time() < off_until.get(name, 0):
+                    continue
                 try:
                     trades = await fn(self.chain, 200)
                 except GmgnError as e:
-                    log.warning("GMGN %s 交易流 %s: %s", name, self.chain, e)
+                    fails[name] = fails.get(name, 0) + 1
+                    if fails[name] >= 3:        # 连续失败（比如这条链不支持）：暂停 30 分钟再试，不刷屏
+                        off_until[name] = time.time() + 1800
+                        log.warning("GMGN %s 交易流 %s 连续失败 %d 次，暂停 30 分钟：%s", name, self.chain, fails[name], e)
+                        fails[name] = 0
+                    else:
+                        log.debug("GMGN %s 交易流 %s: %s", name, self.chain, e)
                     continue
+                fails[name] = 0
                 await self._handle(trades, name)
             if time.time() - self.last_eval > eval_every and self.new_makers:
                 batch = dict(list(self.new_makers.items())[:200])
