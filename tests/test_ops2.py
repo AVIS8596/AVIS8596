@@ -420,9 +420,10 @@ def test_wallet_audit_judge(tmp_path):
     assert v == "suspect" and notes[0].startswith("割完即死")
     assert judge([P(t, hold=300) for t in "ABCDEF"], sells, dead, 0)[0] == "ok"      # 拿得久的不算
     assert judge([P(t) for t in "ABCDEF"], sells, {"F": 0.8}, 0)[0] == "ok"           # 取不到价格不算归零
-    # 同名多合约：3 个，或 2 个且名字让我们亏光过
-    v, notes = judge([P("A", sym="TAOLF"), P("B", sym="taolf"), P("C", sym="$TAOLF")], sells, {}, 0)
+    # 同名多合约：只认让我们亏光过的名字
+    v, notes = judge([P("A", sym="TAOLF"), P("B", sym="taolf"), P("C", sym="$TAOLF")], sells, {}, 0, bad_symbols={"TAOLF"})
     assert v == "suspect" and "TAOLF×3" in notes[0]
+    assert judge([P("A", sym="PUSSY"), P("B", sym="pussy"), P("C", sym="PUSSY")], sells, {}, 0)[0] == "ok"
     assert judge([P("A", sym="PEPE"), P("B", sym="pepe")], sells, {}, 0)[0] == "ok"
     assert judge([P("A", sym="PEPE"), P("B", sym="pepe")], sells, {}, 0, bad_symbols={"PEPE"})[0] == "suspect"
     # 被标记过（3 次以上）
@@ -477,7 +478,8 @@ def test_audit_token_roles_and_creator_affinity(tmp_path):
     from bot.discovery.audit import creator_affinity, judge, token_roles
     rep = {"creator": "DEV", "bundle_wallets": [{"wallet": "B1"}], "insider_wallets": [{"wallet": "I1"}],
            "sniper_wallets": [{"wallet": "S1"}]}
-    assert token_roles(rep) == {"B1": "捆绑", "I1": "老鼠仓", "S1": "开盘狙击", "DEV": "项目方"}
+    assert token_roles(rep) == {"I1": "老鼠仓", "S1": "开盘狙击", "DEV": "项目方"}
+    assert token_roles(rep, include_bundle=True)["B1"] == "捆绑"
     # 好币大多最终也会归零：一半归零不算割完即死，要 70% 以上
     sells = {t: 1.0 for t in "ABCDEF"}
     pos = [{"token": t, "pnl": 0.5, "symbol": t, "entry_age_min": 5} for t in "ABCDEF"]

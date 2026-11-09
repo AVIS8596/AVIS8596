@@ -3,9 +3,9 @@
 GMGN 的聪明钱标签只看胜率和利润，割人的号胜率往往最高。体检看它的真实交易：
 1. 割完即死：它赚钱的币（至少 6 个取得到现价），80% 以上在它卖出之后跌掉 90% 以上，而且中位只拿 1 小时以内
    → 它赚的是撤池子 / 砸盘的钱（项目方 / 老鼠仓）；取不到现价的币不算（不等于归零）
-2. 同名多合约：买了 3 个以上同名的不同合约，或 2 个且这个名字让我们亏光过 → 跟着同一伙人反复发币
+2. 同名多合约：买了 2 个以上同名的不同合约，而且这个名字让我们亏光过 → 跟着同一伙人反复发币
 3. 被标记过：机器人分析过的币里，3 次以上被认定为捆绑 / 埋伏 / dev
-4. 跟项目方走得近：买了同一个项目方发的 2 个以上的币，而且这个项目方让我们亏光过、或发了 3 个以上
+4. 跟项目方走得近：买了同一个项目方发的 2 个以上的币且这个项目方让我们亏光过，或者买了它发的 4 个以上
 5. 开盘狙击：大多数币在发币 30 秒内就买 → 跟单时早已晚了（狙击机器人或内部号）
 有 1~4 任意一条 → 标为"可疑"：不再监听、不计入聪明钱人数、不能当买入理由；7 天后自动复查。
 另外每次跟单时还会看：带单钱包是不是就是这个币的项目方 / 捆绑 / 老鼠仓 / 开盘狙击（这次的筹码分析），是就不跟。
@@ -67,8 +67,9 @@ def judge(pos: list[dict], sells: dict[str, float], now_px: dict[str, float], ta
                      f"中位只拿 {holds[len(holds) // 2]:.0f} 分钟")
     syms = Counter(str(p.get("symbol") or "").strip().upper().lstrip("$") for p in pos if p.get("symbol"))
     bad_symbols = bad_symbols or set()
-    # 同名跟风盘很常见（好几个 PEPE / TRUMP），要 3 个以上同名合约，或 2 个且这个名字让我们亏光过
-    dup = [(s, n) for s, n in syms.items() if s and s != "?" and (n >= 3 or (n >= 2 and s in bad_symbols))]
+    # 同名跟风盘很常见（好几个 PEPE / TRUMP / PUSSY），只认"这个名字让我们亏光过"的同名多合约
+    # （影子单数据：泛泛的"3 个以上同名"拦下的币平均 +202%，拦错了；亏光过的名字拦下的平均 -21% ~ -83%）
+    dup = [(s, n) for s, n in syms.items() if s and s != "?" and n >= 2 and s in bad_symbols]
     if dup:
         bad = True
         notes.append("同名多合约：" + "、".join(f"{s}×{n}" for s, n in dup[:3]))
@@ -127,18 +128,22 @@ async def creator_affinity(app: "App", chain: str, tokens: list[str]) -> str:
                              (chain, *tokens))
     for r in rows:
         black = await db.fetchone("SELECT 1 FROM bad_actors WHERE chain=? AND kind='creator' AND key=?", (chain, r["creator"]))
-        if black or r["n"] >= 3:
+        # 影子单数据：同一项目方 3 个的拦下平均 +2%（没用），4 个以上 -38% ~ -55%（拦得对）
+        if black or r["n"] >= 4:
             return (f"跟项目方走得近：买了同一个项目方发的 {r['n']} 个币"
                     + ("（这个项目方让我们亏光过）" if black else ""))
     return ""
 
 
-def token_roles(rep: dict | None) -> dict[str, str]:
-    """这个币里的可疑身份（来自这次的筹码分析）：地址 → 项目方 / 捆绑 / 老鼠仓 / 开盘狙击。"""
+def token_roles(rep: dict | None, include_bundle: bool = False) -> dict[str, str]:
+    """这个币里的可疑身份（来自这次的筹码分析）：地址 → 项目方 / 老鼠仓 / 开盘狙击（/ 捆绑）。
+    "捆绑"默认不算：快手聪明钱和别人同一区块买入也会被判成捆绑（影子单数据：因为"它是捆绑"拦下的平均 +133%，拦错了）；
+    开盘狙击拦下的平均 -100%，拦得对。"""
     out: dict[str, str] = {}
     if not rep:
         return out
-    for cls, name in (("bundle", "捆绑"), ("insider", "老鼠仓"), ("sniper", "开盘狙击")):
+    classes = (("bundle", "捆绑"),) if include_bundle else ()
+    for cls, name in classes + (("insider", "老鼠仓"), ("sniper", "开盘狙击")):
         for w in rep.get(f"{cls}_wallets") or []:
             a = w.get("wallet") if isinstance(w, dict) else w
             if a:
@@ -160,11 +165,11 @@ class Auditor:
     def __init__(self, app: "App"):
         self.app = app
 
-    async def recheck_v1(self) -> int:
-        """一次性：第一版体检太严（取不到价格当归零、同名 2 个就算），把它标的可疑钱包恢复，按新规则重新体检。
+    async def recheck_v1(self, key: str = "audit_recheck_v1", why: str = "钱包体检第一版太严，误伤了不少（比如取不到价格的币被当成归零）") -> int:
+        """一次性：体检规则放宽后，把旧规则标的可疑钱包恢复，按新规则重新体检。
         因为"带机器人买进亏光的币"被标的不恢复。"""
         db = self.app.db
-        if await db.kv_get("audit_recheck_v1", False):
+        if await db.kv_get(key, False):
             return 0
         rows = await db.fetchall("SELECT chain, address, audit_notes FROM wallets WHERE status='suspect'")
         n = 0
@@ -174,17 +179,18 @@ class Auditor:
             await db.execute("UPDATE wallets SET status='active', audit_at=NULL, audit_verdict=NULL WHERE chain=? "
                              "AND address=?", (r["chain"], r["address"]))
             n += 1
-        await db.kv_set("audit_recheck_v1", True)
+        await db.kv_set(key, True)
         if n:
             log.warning("钱包体检规则放宽：%d 个可疑钱包恢复，按新规则重新体检", n)
-            await self.app.tg.send(f"🩺 钱包体检第一版太严，误伤了不少（比如取不到价格的币被当成归零）。"
-                                   f"已恢复 {n} 个钱包，按新规则重新体检：跟单前会先体检，后台每 10 分钟审 20 个", low=True)
+            await self.app.tg.send(f"🩺 {why}。已恢复 {n} 个钱包，按新规则重新体检："
+                                   f"跟单前会先体检，后台每 10 分钟审 20 个", low=True)
         return n
 
     async def run(self) -> None:
         import asyncio
         try:
             await self.recheck_v1()
+            await self.recheck_v1("audit_recheck_v2", "按影子单数据调整了钱包体检（同名跟风、同一项目方 3 个、同区块买入的捆绑判定拦错了钱）")
         except Exception as e:  # noqa: BLE001
             log.warning("体检恢复失败: %s", e)
         await asyncio.sleep(600)
