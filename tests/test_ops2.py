@@ -737,3 +737,162 @@ def test_funnel_shows_where_volume_goes(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_solana_monitor_health_and_watchdog(tmp_path):
+    """Solana 监听连不上会被看见：/status 有状态、断 10 分钟报警（6 小时一次）、恢复后说一声；某条链信号骤降也报警。"""
+    from bot.monitor.solana_wallets import SolanaWalletMonitor, ws_error
+    from bot.monitor.watchdog import Watchdog
+
+    class Resp:
+        status_code, body = 429, b'{"jsonrpc":"2.0","error":{"code":-32429,"message":"max usage reached"}}'
+
+    class Rejected(Exception):
+        response = Resp()
+
+        def __str__(self):
+            return "server rejected WebSocket connection: HTTP 429"
+    assert ws_error(Rejected()) == ("server rejected WebSocket connection: HTTP 429："
+                                    '{"jsonrpc":"2.0","error":{"code":-32429,"message":"max usage reached"}}')
+    assert ws_error(ConnectionError("boom")) == "boom" and ws_error(TimeoutError()) == "TimeoutError"
+
+    async def go():
+        db = DB(tmp_path / "w.db")
+        await db.open()
+        try:
+            app = SimpleNamespace(db=db, cfg=SimpleNamespace(enabled_chains=["solana", "base"], get=lambda k, d=None: d))
+            sm = SolanaWalletMonitor(app)
+            app.solmon = sm
+            sm.wanted = 300
+            now = time.time()
+            dog = Watchdog(app)
+            sm.down_since = now - 120                              # 刚断 2 分钟：不报警
+            sm._down(0, ws_error(Rejected()))
+            assert await dog.check(now) == [] and "❌ 连不上" in sm.status_text()
+            sm.down_since = now - 1500                             # 断了 25 分钟
+            msgs = await dog.check(now)
+            assert len(msgs) == 1 and "Solana 聪明钱监听断了" in msgs[0] and "max usage reached" in msgs[0]
+            assert "额度用完" in msgs[0]
+            assert await dog.check(now + 600) == []                # 6 小时内不重复
+            assert len(await dog.check(now + 7 * 3600)) == 1       # 还没好：6 小时后再提醒一次
+            sm._up(0, 300)                                         # 连上了
+            assert "✅ 已订阅 300/300" in sm.status_text()
+            assert await dog.check(now + 7 * 3600 + 300) == ["✅ Solana 聪明钱监听恢复了"]
+            # 连上了但取不到交易（HTTP 接口被限流）
+            sm.notes, sm.failed, sm.last_tx_err = 100, 80, "helius HTTP 429: max usage reached"
+            m2 = await dog.check(now + 8 * 3600)
+            assert len(m2) == 1 and "取不到交易内容" in m2[0] and "80/100" in m2[0]
+            sm.notes, sm.failed = 1000, 3
+            # Base：前两天每 3 小时 ~60 条，最近 3 小时 0 条 → 骤降；Solana 一直很少（不到门槛）→ 不报
+            n = 0
+            for i in range(960):
+                n += 1
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (now - 2 * 86400 - 3 * 3600 + i * 180, "base", "W", f"T{i}", "buy", f"b{n}"))
+            for i in range(20):
+                n += 1
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (now - 86400 + i * 3600, "solana", "W", f"S{i}", "buy", f"s{n}"))
+            probs = await dog.problems(now)
+            assert list(probs) == ["quiet_base"] and "Base 的聪明钱信号骤降" in probs["quiet_base"]
+            for i in range(30):                                    # Base 恢复了
+                n += 1
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (now - 600 + i, "base", "W", f"R{i}", "buy", f"r{n}"))
+            assert "quiet_base" not in await dog.problems(now)
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_solana_monitor_does_not_reconnect_for_every_wallet_change(monkeypatch):
+    """钱包名单没变不重连；变了也要等够间隔才换；300 个钱包只用 1 条连接。"""
+    from bot.monitor import solana_wallets as sw
+
+    async def go():
+        wallets = [f"W{i}" for i in range(300)]
+        ev = asyncio.Event()
+
+        async def active_wallets(chain, n):
+            return [{"address": w} for w in wallets]
+        app = SimpleNamespace(db=SimpleNamespace(active_wallets=active_wallets), wallets_changed={"solana": ev},
+                              cfg=SimpleNamespace(get=lambda k, d=None: 0.2 if k.endswith("resubscribe_min_sec") else d))
+        sm = sw.SolanaWalletMonitor(app)
+        started = []
+
+        async def conn(cid, ws):
+            started.append((cid, len(ws)))
+            await asyncio.sleep(3600)
+        sm._conn = conn
+        task = asyncio.create_task(sm.run())
+        await asyncio.sleep(0.05)
+        assert started == [(0, 300)] and sm.wanted == 300          # 1 条连接
+        ev.set()                                                   # 名单其实没变：不重连
+        await asyncio.sleep(0.4)
+        assert started == [(0, 300)]
+        wallets.append("NEW")
+        ev.set()
+        await asyncio.sleep(0.05)
+        assert started == [(0, 300)]                               # 还没到间隔：先不换
+        await asyncio.sleep(3.6)
+        assert started[-1] == (0, 301) and len(started) == 2
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(go())
+
+
+def test_solana_monitor_real_websocket_roundtrip(monkeypatch):
+    """用本地 WebSocket 服务跑一遍真实流程：第一次连接被 429 拒绝（记下节点给的原因）→ 重连成功 → 订阅 → 收到通知。"""
+    import json as _json
+    from http import HTTPStatus
+
+    import websockets
+    from bot.monitor import solana_wallets as sw
+
+    async def go():
+        seen = {"conns": 0, "subs": 0}
+
+        def gate(connection, request):
+            seen["conns"] += 1
+            if seen["conns"] == 1:                                 # 第一次：像 Helius 那样拒绝
+                r = connection.respond(HTTPStatus.TOO_MANY_REQUESTS, '{"error":"max usage reached"}')
+                return r
+            return None
+
+        async def handler(ws):
+            async for raw in ws:
+                m = _json.loads(raw)
+                if m.get("method") == "logsSubscribe":
+                    seen["subs"] += 1
+                    await ws.send(_json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": 1000 + m["id"]}))
+                    if m["id"] == 3:                               # 订阅完了，推一条 W1 的交易通知 + 一条失败交易（应忽略）
+                        await ws.send(_json.dumps({"method": "logsNotification", "params": {
+                            "subscription": 1002, "result": {"value": {"signature": "SIG1", "err": None}}}}))
+                        await ws.send(_json.dumps({"method": "logsNotification", "params": {
+                            "subscription": 1003, "result": {"value": {"signature": "SIG2", "err": {"x": 1}}}}}))
+
+        async with websockets.serve(handler, "127.0.0.1", 0, process_request=gate) as server:
+            port = server.sockets[0].getsockname()[1]
+            app = SimpleNamespace(sol=SimpleNamespace(wss=f"ws://127.0.0.1:{port}"))
+            sm = sw.SolanaWalletMonitor(app)
+            sm.wanted = 3
+            got = []
+
+            async def handle(sig, wallet):
+                got.append((sig, wallet))
+            sm._handle = handle
+            monkeypatch.setattr(sw.random, "random", lambda: 0.0)   # 退避 2 × 0.7 = 1.4 秒
+            task = asyncio.create_task(sm._conn(0, ["W0", "W1", "W2"]))
+            await asyncio.sleep(0.4)
+            assert not sm.live and "HTTP 429" in sm.last_err and "max usage reached" in sm.last_err
+            assert "❌ 连不上" in sm.status_text()
+            for _ in range(40):
+                if got:
+                    break
+                await asyncio.sleep(0.1)
+            assert got == [("SIG1", "W1")] and seen["subs"] == 3 and seen["conns"] == 2
+            assert sm.live == {0: 3} and sm.health()["ok"] and sm.last_err == "" and "✅ 已订阅 3/3" in sm.status_text()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            assert not sm.live and sm.down_since > 0
+    asyncio.run(go())

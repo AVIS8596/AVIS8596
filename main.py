@@ -118,6 +118,9 @@ async def run_bot(cfg) -> None:
     for c in cfg.evm_chains:
         m = EvmWalletMonitor(app, c)
         jobs.append((f"{c}聪明钱监听", m.run))
+    from bot.monitor.watchdog import Watchdog
+    app.watchdog = Watchdog(app)
+    jobs.append(("信号源体检", app.watchdog.run))
     if app.gmgn:
         from bot.strategies import Strategies
         strat = Strategies(app)

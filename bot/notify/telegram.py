@@ -687,10 +687,26 @@ class Telegram:
         pnl = await db.realized_today_usd(self.app.day_start(), self.app.cfg.dry_run)
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
         r = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>?", (time.time() - 3600,))
-        lines.append(f"近1小时信号 {r['n']} 条")
+        by = await db.fetchall("SELECT chain, COUNT(*) n FROM signals WHERE ts>? GROUP BY chain ORDER BY n DESC",
+                               (time.time() - 3600,))
+        lines.append(f"近1小时信号 {r['n']} 条" + ("（" + "、".join(f"{CHAINS[x['chain']].name} {x['n']}" for x in by
+                                                              if x["chain"] in CHAINS) + "）" if by else ""))
         sm = getattr(self.app, "solmon", None)
-        if sm and sm.dropped:
-            lines.append(f"⚠️ Solana 链上监听因节点额度不够丢弃了 {sm.dropped} 条通知（启动以来；多了说明 Helius 额度跟不上）")
+        if sm:
+            lines.append(sm.status_text())
+            try:      # Helius 节点本身通不通（区分"连接被拒"是额度用完还是别的）
+                await asyncio.wait_for(self.app.sol.call("getSlot", retries=0), 8)
+                lines.append("Helius 节点（HTTP）：✅ 正常")
+            except Exception as ex:  # noqa: BLE001
+                lines.append(f"Helius 节点（HTTP）：❌ {e(str(ex)[:220])}")
+        dog = getattr(self.app, "watchdog", None)
+        if dog:
+            try:
+                for k, text in (await dog.problems()).items():
+                    if k.startswith("quiet_"):
+                        lines.append(text.split("\n")[0])
+            except Exception as ex:  # noqa: BLE001
+                log.debug("信号源体检失败: %s", ex)
         from ..trade.regime import regime, text as rg_text
         lines.append(rg_text(await regime(self.app)))
         sk = await db.fetchone("SELECT COUNT(*) n FROM skipped WHERE ts>?", (time.time() - 3600,))
