@@ -394,6 +394,26 @@ class PositionManager:
             self._spawn(self.sell(p, 100, "取不到价格超过 30 分钟，尝试清仓", 0.0, urgent=True))
         self._px_ok_at[p["id"]] = now   # 30 分钟后再试
 
+    # ================================================================ 池子被撤（跑路）
+    async def _pool_gone(self, p: dict, entry: dict, cur: dict) -> str:
+        """池子被撤空了没有。不管动态管理开没开、模拟还是实盘都查（11-11 FOMOCAT、Gang Dog、Horned cat 池子撤空后，
+        没人能交易，报价停在最后一笔的高位，持仓一直显示 +474% / +195%，止损永远不会触发）。
+        判断：买入时池子有 $5,000 以上，现在只剩不到 $1,000 且不到买入时的 10%；再换数据源（GMGN 重新取 + DexScreener）
+        确认一次，两边取大的仍然这么少才算（防止一次读数出错把持仓清掉）。"""
+        l0, l1 = float(entry.get("liquidity") or 0), float(cur.get("liquidity") or 0)
+        if l0 < 5000 or l1 >= max(1000.0, l0 * 0.1):
+            return ""
+        check = getattr(self.app.data, "liquidity_check", None)
+        if check:
+            try:
+                l2 = float(await asyncio.wait_for(check(p["chain"], p["token"]), 15) or 0)
+            except Exception:  # noqa: BLE001
+                return ""                   # 确认不了就先不动，2 分钟后下次复查再看
+            if l2 >= max(1000.0, l0 * 0.1):
+                return ""
+            l1 = max(l1, l2)
+        return f"池子被撤（跑路）：流动性 ${l0:,.0f} → ${l1:,.0f}"
+
     # ================================================================ 健康分复查
     async def _check_health(self, p: dict, mode: str) -> None:
         db = self.app.db
@@ -419,6 +439,14 @@ class PositionManager:
                     "health_emergency=?, health_at=? WHERE id=?",
                     (json.dumps(entry), json.dumps(cur), h, json.dumps(notes, ensure_ascii=False), streak,
                      emerg, now, pid))
+                if p.get("status") == "open" and p["id"] not in self._selling:
+                    gone = await self._pool_gone(p, entry, cur)
+                    if gone:
+                        from .executors import POOL_GONE
+                        POOL_GONE.add((p["chain"], p["token"]))
+                        await self.app.tg.send(f"🚨 #{pid} {p['symbol']} {gone}，立即全部卖出")
+                        self._spawn(self.sell(p, 100, f"{URGENT}{gone}", float(cur.get("price") or 0), urgent=True))
+                        return
                 if mode == "live" and p.get("status") == "open":
                     if emerg and not p.get("health_emergency"):
                         await self.app.tg.send(f"🚨 #{pid} {p['symbol']} {emerg}，立即全部卖出")

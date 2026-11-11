@@ -40,6 +40,7 @@ class Fill:
 
 
 RECHECK_SEC = 3.0             # 池子看起来被抽干时，隔几秒换数据源再确认一次
+POOL_GONE: set[tuple[str, str]] = set()   # 已确认池子被撤空的币（持仓管理确认过）：模拟卖出直接按池子里剩的钱算
 IMPACT_CAP = 0.3
 
 
@@ -119,8 +120,12 @@ class DryRunExecutor:
         except Exception:  # noqa: BLE001
             liq = 0.0
         impact = pool_impact(usd, liq) if liq > 0 else 0.05
+        if side == "sell" and (self.chain, token) in POOL_GONE:
+            impact = pool_impact(usd, liq) if liq > 0 else 1.0      # 池子已确认被撤空：没钱可卖
         if side == "buy":
             impact = min(impact, IMPACT_CAP)
+        elif impact > IMPACT_CAP and (self.chain, token) in POOL_GONE:
+            pass                 # 已经确认池子被撤空：就按池子里剩的那点钱成交（报价停在高位是假的）
         elif impact > IMPACT_CAP:
             again = 0.0
             check = getattr(self.app.data, "liquidity_check", None)

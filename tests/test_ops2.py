@@ -639,6 +639,11 @@ def test_dryrun_sell_in_drained_pool(tmp_path, monkeypatch):
             st.update(liq=200.0, again=200.0)                      # 池子被抽走大半：卖 $100 只能拿回一半
             f6 = await ex.sell("T", raw, 6, 1000)
             assert abs(f6.native * 100 - 49) < 0.01 and "实际只能卖回约 49%" in f6.note
+            st.update(liq=0.0, again=0.0)                          # 池子已确认被撤空：不按"确认不了扣 30%"，按剩的钱成交
+            executors.POOL_GONE.add(("solana", "T"))
+            fg = await ex.sell("T", raw, 6, 1000)
+            executors.POOL_GONE.discard(("solana", "T"))
+            assert fg.native * 100 < 0.01 and "池子只剩" in fg.note
             st.update(liq=2.0, again=2.0)                          # 买入沿用 30% 封顶
             assert abs(await ex._cost("T", 100, "buy") - 0.31) < 1e-6
 
@@ -1413,3 +1418,30 @@ def test_busy_wallets_dropped_without_spending_quota():
     assert not any(hits[:-1]) and hits[-1] and "BOT" in sm.busy_out and ev.is_set()
     assert sm._busy("BOT", t0 + 9999)
     assert not any(sm._busy("SLOW", t0 + i * 200) for i in range(40))       # 40 条但分散在 2 小时多：不算
+
+
+def test_pool_gone_detected_even_without_dynamic_mode():
+    """池子被撤空：报价停在高位也要认出来（换数据源确认）；读数一次出错、池子只是变小，不算。"""
+    from bot.trade.positions import PositionManager
+
+    async def go():
+        st = {"liq": 0.0, "fail": False}
+
+        async def check(chain, token):
+            if st["fail"]:
+                raise RuntimeError("timeout")
+            return st["liq"]
+        pm = PositionManager.__new__(PositionManager)
+        pm.app = SimpleNamespace(data=SimpleNamespace(liquidity_check=check))
+        p = {"chain": "solana", "token": "T"}
+        entry = {"liquidity": 36353, "price": 1.0}
+        gone = await pm._pool_gone(p, entry, {"liquidity": 0, "price": 5.7})
+        assert gone == "池子被撤（跑路）：流动性 $36,353 → $0"
+        st["liq"] = 30000.0                                                   # 另一个数据源说池子还在：不算
+        assert await pm._pool_gone(p, entry, {"liquidity": 0, "price": 5.7}) == ""
+        st["fail"] = True                                                     # 确认不了：先不动
+        assert await pm._pool_gone(p, entry, {"liquidity": 0, "price": 5.7}) == ""
+        st["fail"] = False
+        assert await pm._pool_gone(p, entry, {"liquidity": 12000, "price": 0.5}) == ""   # 只是变小
+        assert await pm._pool_gone(p, {"liquidity": 3000}, {"liquidity": 0}) == ""        # 买入时池子就很小：不判断
+    asyncio.run(go())
