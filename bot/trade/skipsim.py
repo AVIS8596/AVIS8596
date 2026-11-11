@@ -40,6 +40,14 @@ async def run_batch(app: "App", limit: int = 30) -> int:
                 path = []
             if len(path) >= 8 and not 0.1 < path[0][1] / float(r["price"]) < 10:
                 path = []            # 记录的价格和 K 线对不上（单位不对 / 别的池子）：不算
+            if len(path) >= 8 and min(now, float(r["ts"]) + 24 * 3600) - path[-1][0] >= 2 * 3600:
+                # K 线提前断了：现在也取不到价格 = 池子被撤 / 归零，按归零算（不能按最后一笔的高价算）
+                try:
+                    px = (await app.data.prices(r["chain"], [r["token"]])).get(r["token"])
+                except Exception:  # noqa: BLE001
+                    px = 1.0
+                from .sampler import dead_tail
+                path = dead_tail(path, float(r["ts"]), now, not px)
             if len(path) >= 8:
                 entry = float(r["price"]) * 1.01             # 买入滑点
                 m = simulate(entry, float(r["ts"]), path, dict(exit_rules(exit_cfg, "normal")), None, 100, cost)

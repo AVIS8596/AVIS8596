@@ -153,6 +153,8 @@ async def run_bot(cfg) -> None:
         from bot.trade.skipsim import SkipSim
         jobs.append(("阴谋团伙识别", GangWatch(app).run))
         jobs.append(("影子单", SkipSim(app).run))
+        from bot.trade.sampler import Sampler
+        jobs.append(("影子采样", Sampler(app).run))
     from bot.safety import Safety
     app.safety = Safety(app)
     jobs.append(("安全与成本校准", app.safety.run))

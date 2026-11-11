@@ -69,3 +69,70 @@ def test_early_report_separates_winners_and_scams(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_sampler_simulates_eligible_tokens(tmp_path, monkeypatch):
+    """影子采样：只采通过防收割检查的；按真实卖出规则模拟；K 线断了又取不到价格按归零算；每天有上限。"""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    from bot.db import DB
+    from bot.trade import sampler as sp
+
+    class Cfg:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def get(self, k, d=None):
+            cur = self.raw
+            for p in k.split("."):
+                if not isinstance(cur, dict) or p not in cur:
+                    return d
+                cur = cur[p]
+            return cur
+
+    good = {"risks": 0, "liquidity": 30000, "bundle_held_pct": 2, "insider_held_pct": 1, "top10_pct": 20, "cabal_pct": 0,
+            "lp_pullable": 0, "score": 70}
+    cfg = Cfg({"trading": {"min_liquidity_usd": 8000, "max_bundle_pct": 15, "max_insider_pct": 20, "max_top10_pct": 45,
+                           "max_cabal_pct": 3}, "exit": {"stop_loss_pct": -30, "shadow_cost_pct": 2},
+               "learning": {"sample_per_day": 3}})
+    assert sp.eligible(good, cfg) and not sp.eligible({**good, "lp_pullable": 1}, cfg)
+    assert not sp.eligible({**good, "cabal_pct": 5}, cfg) and not sp.eligible({**good, "risks": 1}, cfg)
+    path = [(100.0 + i * 300, 1.0 + i * 0.1) for i in range(10)]
+    assert sp.dead_tail(path, 100, 100 + 6 * 3600, True)[-1][1] < 0.01         # 断了 2 小时以上 + 取不到价格：归零
+    assert sp.dead_tail(path, 100, 100 + 6 * 3600, False) == path
+
+    async def go():
+        db = DB(tmp_path / "s.db")
+        await db.open()
+        try:
+            now = time.time()
+            t0 = now - 5 * 3600
+            rows = [("UP", good, 2.0), ("RUG", good, -1), ("BAD", {**good, "bundle_held_pct": 40}, 2.0),
+                    ("UP2", good, 2.0), ("UP3", good, 2.0)]
+            for i, (tk, ft, p240) in enumerate(rows):
+                await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features,p240) "
+                                 "VALUES(?,?,?,?,?,?,?,?)", (t0 + i, "solana", tk, tk, "x", 1.0, json.dumps(ft), p240))
+
+            async def fake_candles(app, chain, token, ts):
+                if token == "RUG":    # 涨到 2 倍后 K 线断了
+                    return [{"time": ts + i * 300, "open": 1 + i * 0.1, "high": 1 + i * 0.1, "low": 1 + i * 0.1,
+                             "close": 1 + i * 0.1} for i in range(10)]
+                return [{"time": ts + i * 300, "open": 1 + i * 0.4, "high": 1 + i * 0.4, "low": 1 + i * 0.4,
+                         "close": 1 + i * 0.4} for i in range(48)]
+            monkeypatch.setattr(sp, "candles", fake_candles)
+            monkeypatch.setattr(sp.asyncio, "sleep", lambda s: asyncio.sleep(0) if False else _noop())
+            app = SimpleNamespace(db=db, cfg=cfg)
+            n = await sp.run_batch(app, limit=10)
+            got = {r["token"]: r["sim_ret"] for r in await db.fetchall("SELECT token, sim_ret FROM token_outcomes")}
+            assert n == 3 and got["BAD"] == sp.SKIP                                   # 每天上限 3 个
+            assert got["RUG"] is not None and got["RUG"] < 0.5                          # 断了按归零：出本后剩下的归零
+            assert got["UP3"] > 1.0 and got["UP"] is None                             # 新的先采；UP 等明天
+            assert await sp.run_batch(app, limit=10) == 0                              # 今天的额度用完了
+        finally:
+            await db.close()
+
+    async def _noop():
+        return None
+    asyncio.run(go())
