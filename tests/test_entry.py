@@ -268,6 +268,10 @@ def test_probe_position(tmp_path):
             app = _app(db, [])
             tr = Trader(app)
             tr.exec = {"solana": object()}
+            assert not tr.probe_ok({}, ["a", "b", "c"], "早期建仓")             # 11-11 起默认关闭
+            app.cfg.raw = {**app.cfg.raw, "trading": {**app.cfg.raw["trading"],
+                                                      "probe": {**app.cfg.raw["trading"]["probe"], "enabled": True},
+                                                      "max_bundle_pct": 25}}
             hot = {**GOOD, "top10_pct": 52, "bundle_held_pct": 28}
             assert "捆绑地址持有" in await tr.check("solana", "T", dict(hot))
             assert await tr.check("solana", "T", dict(hot), relax=True) == ""

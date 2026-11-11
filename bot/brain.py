@@ -186,7 +186,7 @@ ENTRY_PARAMS = (
     Param("trading.auto_min_cluster", (1, 2, 3), 2, "新币买入要几个聪明钱"),
     Param("trading.max_change_1h_pct", (150, 200, 300, 500, 800), 300, "1 小时涨幅上限（不追高）"),
     Param("trading.min_holders", (50, 80, 120, 200), 80, "最少持有人"),
-    Param("trading.max_bundle_pct", (15, 20, 25, 30, 40), 25, "捆绑地址持仓上限"),
+    Param("trading.max_bundle_pct", (10, 12, 15), 15, "捆绑地址持仓上限"),   # 结果档案：15% 以上明显偏向砸盘，不往上放
     Param("trading.max_insider_pct", (10, 15, 20, 30), 20, "埋伏地址持仓上限"),
     Param("trading.max_top10_pct", (35, 40, 45, 55), 45, "前10持仓上限"),
 )
@@ -348,6 +348,12 @@ class Brain:
                 await tg.send(f"🧹 数据修正：发现少数币的价格数据错误（复盘里那些几亿 % 的数字），已经排除。"
                               f"之前自动学到的 {n} 个参数先恢复成配置文件的值，选币模型用干净数据重新训练", low=True)
         tuned = await self.app.db.kv_get("tuned", {}) or {}
+        # 11-11 按结果档案手动收紧了捆绑上限（25 → 15）：以前自动学到的捆绑上限作废，以配置文件为准
+        if not await db.kv_get("pin_bundle_1111", False):
+            if tuned.pop("trading.max_bundle_pct", None) is not None:
+                await db.kv_set("tuned", tuned)
+                log.info("捆绑上限改为以配置文件为准（之前自动学到的值作废）")
+            await db.kv_set("pin_bundle_1111", True)
         for k, v in tuned.items():
             set_cfg(self.cfg.raw, k, v)
         if tuned:
