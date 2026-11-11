@@ -776,6 +776,9 @@ def test_solana_monitor_health_and_watchdog(tmp_path):
         await db.open()
         try:
             app = SimpleNamespace(db=db, cfg=SimpleNamespace(enabled_chains=["solana", "base"], get=lambda k, d=None: d))
+            for c in ("solana", "base"):                           # 每条链都有足够的钱包（"钱包太少"另有测试）
+                for i in range(6):
+                    await db.execute("INSERT INTO wallets(chain,address,status) VALUES(?,?,'active')", (c, f"{c}{i}"))
             sm = SolanaWalletMonitor(app)
             app.solmon = sm
             sm.wanted = 300
@@ -1275,5 +1278,81 @@ def test_diag_splits_by_chain_and_shows_failures(tmp_path):
             txt = await diag_text(app, 2)
             assert "Solana 模拟买入失败 3 次" in txt and "去掉它们 -$97" in txt and "min_holders 80→50" in txt
         finally:
+            await db.close()
+    asyncio.run(go())
+
+
+
+def test_watchdog_reports_any_problem(tmp_path, monkeypatch):
+    """体检：EVM 监听断了、钱包太少、节点额度用太快、GMGN 限流、长时间没买入、连续亏损、硬盘快满、日志报错——都主动提醒。"""
+    import logging as _logging
+    from collections import namedtuple
+    from bot.monitor import watchdog as wd
+
+    async def go():
+        db = DB(tmp_path / "p.db")
+        await db.open()
+        pl = wd.ProblemLog(["SECRETKEY123"])
+        root = _logging.getLogger()
+        root.addHandler(pl)
+        try:
+            now = time.time()
+            cfg = SimpleNamespace(enabled_chains=["solana", "base"], get=lambda k, d=None: d, dry_run=True)
+            app = SimpleNamespace(db=db, cfg=cfg, started_at=now - 10 * 3600, fmt_time=lambda ts: "20:30")
+            for i in range(6):
+                await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana',?,'active')", (f"S{i}",))
+            await db.execute("INSERT INTO wallets(chain,address,status) VALUES('base','B0','active')")
+            Du = namedtuple("Du", "total used free")
+            monkeypatch.setattr(wd.shutil, "disk_usage", lambda p: Du(100 * 1024 ** 3, 99 * 1024 ** 3, 1 * 1024 ** 3))
+            # EVM 监听断了 20 分钟
+            from bot.monitor.evm_wallets import EvmWalletMonitor
+            m = EvmWalletMonitor.__new__(EvmWalletMonitor)
+            m.wanted, m.ok, m.down_since, m.last_err = 135, False, now - 1200, "server rejected WebSocket connection: HTTP 429"
+            app.evmmons = {"base": m}
+            # Solana 节点：Chainstack 照今天的速度会超预算
+            from bot.sources.solana_rpc import Endpoint
+            ep = Endpoint("Chainstack", "https://x", "wss://x", "solrpc1")
+            ep.day, ep.today = int(now // 86400), 10 ** 9
+            app.sol = SimpleNamespace(eps=[ep], out=False)
+            app.gmgn = SimpleNamespace(paused_until=now + 900, bans=3)
+            # 10 小时前买过最后一笔；最近 8 笔全亏
+            for i in range(8):
+                await db.execute("INSERT INTO positions(status,dry_run,cost_usd,realized_usd,opened_at,closed_at) "
+                                 "VALUES('closed',1,50,30,?,?)", (now - 10 * 3600, now - 3600 + i))
+            await db.execute("INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) "
+                             "VALUES(?,?,?,?,?,?,?,?)", (now - 3600, "base", "T", "T", "跟单", "快手/战绩差钱包", "x", 1.0))
+            # 日志：一条报错（带密钥，要打码）、一条反复出现的警告、一条已有专门体检项的警告（不重复）
+            lg = _logging.getLogger("memebot.review")
+            lg.error("每日复盘失败: key=%s", "SECRETKEY123")
+            for _ in range(25):
+                _logging.getLogger("memebot.data").warning("取价格失败 %s", "TOKEN")
+            for _ in range(30):
+                _logging.getLogger("memebot.solmon").warning("Solana WS 断开（%s），%ds 后重连", "x", 2)
+            _logging.getLogger("other.lib").error("不是机器人自己的日志")
+            if now % 86400 < 2 * 3600:                             # UTC 当天刚开始 2 小时内不估算额度
+                ep.day = -1
+            dog = wd.Watchdog(app)
+            probs = await dog.problems(now)
+            for k in ("evm_base", "gmgn", "few_base", "no_buys", "streak", "disk"):
+                assert k in probs, (k, list(probs))
+            assert "few_solana" not in probs and "Base 聪明钱监听断了" in probs["evm_base"]
+            assert "QuickNode" in probs["evm_base"] and "快手/战绩差钱包 1" in probs["no_buys"]
+            if ep.day != -1:
+                assert "Chainstack 额度用得太快" in probs["budget_Chainstack"]
+            msgs = await dog.check(now)
+            logmsg = [x for x in msgs if "机器人日志里有问题" in x]
+            assert len(logmsg) == 1 and "每日复盘失败" in logmsg[0] and "SECRETKEY123" not in logmsg[0]
+            assert "取价格失败 TOKEN" in logmsg[0] and "Solana WS 断开" not in logmsg[0] and "不是机器人" not in logmsg[0]
+            assert not [x for x in await dog.check(now + 300) if "机器人日志" in x]     # 6 小时内不重复
+            # 恢复：EVM 连上、GMGN 解除
+            m.ok, m.down_since = True, 0.0
+            app.gmgn.paused_until = 0
+            again = await dog.check(now + 600)
+            assert "✅ Base 聪明钱监听恢复了" in again and "✅ GMGN 限流结束，恢复正常" in again
+            # /problems：现在所有问题，包括已经提醒过的
+            rep = await dog.report()
+            assert "只监听 1 个聪明钱" in rep and "每日复盘失败" in rep
+        finally:
+            root.removeHandler(pl)
             await db.close()
     asyncio.run(go())

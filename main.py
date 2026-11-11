@@ -117,8 +117,10 @@ async def run_bot(cfg) -> None:
         jobs.append(("Solana聪明钱监听", sm.run))
         if cfg.get("discovery.pumpportal_new_tokens", True):
             jobs.append(("pump新币", newtok.pumpportal))
+    app.evmmons = {}
     for c in cfg.evm_chains:
         m = EvmWalletMonitor(app, c)
+        app.evmmons[c] = m         # 信号源体检看它连没连着
         jobs.append((f"{c}聪明钱监听", m.run))
     from bot.monitor.watchdog import Watchdog
     app.watchdog = Watchdog(app)
@@ -377,6 +379,9 @@ def main() -> None:
         print(e)
         sys.exit(1)
     setup_logging(cfg.path(cfg.get("general.log_dir", "logs")), cfg.get("general.log_level", "INFO"), _secrets(cfg))
+    from bot.monitor.watchdog import ProblemLog
+    problem_log = ProblemLog(_secrets(cfg))       # 收集日志里的报错 / 反复出现的警告，体检时推到 Telegram
+    logging.getLogger().addHandler(problem_log)
 
     if a.cmd == "check":
         sys.exit(0 if asyncio.run(check(cfg)) else 1)

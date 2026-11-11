@@ -30,6 +30,22 @@ class EvmWalletMonitor:
         self.wss = app.cfg.secrets.rpc_wss[chain]
         self.seen = TTLSet(3600)
         self._tasks: set[asyncio.Task] = set()
+        self.wanted = 0                     # 应该监听的钱包数
+        self.ok = False                     # 现在连着（WS 订阅成功 / 最近一次轮询成功）
+        self.down_since = time.time()       # 断开的开始时间（0 = 连着）
+        self.last_err = ""
+
+    def _up(self) -> None:
+        self.ok, self.down_since, self.last_err = True, 0.0, ""
+
+    def _down(self, why: str) -> None:
+        self.ok, self.last_err = False, why
+        if not self.down_since:
+            self.down_since = time.time()
+
+    def health(self) -> dict:
+        return {"ok": self.ok, "wanted": self.wanted, "err": self.last_err,
+                "down_min": (time.time() - self.down_since) / 60 if self.down_since and not self.ok else 0.0}
 
     async def run(self) -> None:
         ev = self.app.wallets_changed[self.chain]
@@ -37,6 +53,7 @@ class EvmWalletMonitor:
         while True:
             ev.clear()
             wallets = [w["address"].lower() for w in await self.app.db.active_wallets(self.chain, n)]
+            self.wanted = len(wallets)
             if not wallets:
                 log.info("%s 暂无聪明钱地址，等待发现……", self.chain)
                 await ev.wait()
@@ -82,10 +99,12 @@ class EvmWalletMonitor:
                         for lg in await self.rpc.logs({"fromBlock": hex(frm), "toBlock": hex(head), "topics": topics}):
                             self._on_log(lg, wset)
                 last, fails = head, 0
+                self._up()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 fails += 1
+                self._down(str(e)[:200] or type(e).__name__)
                 if fails in (1, 10) or fails % 100 == 0:
                     log.warning("%s 轮询监听出错（第 %d 次）：%s", self.chain, fails, e)
                 await asyncio.sleep(min(60, every * fails))
@@ -107,6 +126,7 @@ class EvmWalletMonitor:
                             await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "eth_subscribe",
                                                       "params": ["logs", {"topics": topics}]}))
                     backoff = 2
+                    self._up()
                     async for raw in ws:
                         msg = json.loads(raw)
                         if "error" in msg:
@@ -118,7 +138,9 @@ class EvmWalletMonitor:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                log.warning("%s WS 断开（%s），%ds 后重连", self.chain, e, backoff)
+                from .solana_wallets import ws_error
+                self._down(ws_error(e))
+                log.warning("%s WS 断开（%s），%ds 后重连", self.chain, ws_error(e), backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
