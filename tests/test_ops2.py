@@ -896,3 +896,85 @@ def test_solana_monitor_real_websocket_roundtrip(monkeypatch):
             await asyncio.gather(task, return_exceptions=True)
             assert not sm.live and sm.down_since > 0
     asyncio.run(go())
+
+
+def test_helius_quota_out_fails_fast_and_paper_buys_still_work(monkeypatch):
+    """Helius 额度用完（429 max usage reached）：不重试、10 分钟内直接报错不敲节点；模拟盘买 Solana 币照常（精度用 GMGN 的）。"""
+    from bot.http import Http, QuotaError
+    from bot.sources import solana_rpc as sr
+    from bot.trade.executors import DryRunExecutor
+
+    calls = {"n": 0}
+
+    class Resp:
+        def __init__(self, status, text):
+            self.status, self._t, self.headers = status, text, {}
+
+        async def text(self, errors=None):
+            return self._t
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    state = {"status": 429, "text": '{"jsonrpc":"2.0","error":{"code":-32429,"message":"max usage reached"}}'}
+
+    class Sess:
+        closed = False
+
+        def request(self, method, url, **kw):
+            calls["n"] += 1
+            return Resp(state["status"], state["text"])
+
+    async def go():
+        http = Http()
+        http._session = Sess()
+        rpc = sr.SolanaRPC(http, "KEY", 100, 100)
+        t0 = time.time()
+        try:
+            await rpc.call("getSlot")
+            raise AssertionError("应该报错")
+        except sr.QuotaOut as e:
+            assert isinstance(e.__cause__, QuotaError)
+        assert calls["n"] == 1 and time.time() - t0 < 1 and rpc.out          # 没有重试、没有等
+        for _ in range(5):                                                   # 10 分钟内直接报错，不敲节点
+            try:
+                await rpc.call("getBalance", ["x"])
+            except sr.QuotaOut as e:
+                assert "分钟后再试" in str(e)
+        assert calls["n"] == 1
+        rpc.out_until = 0                                                    # 10 分钟到了：放一个请求过去
+        state.update(status=200, text='{"jsonrpc":"2.0","result":123}')
+        assert await rpc.call("getSlot") == 123 and not rpc.out and rpc.out_since == 0
+        state.update(status=429, text='{"error":"Too many requests"}')       # 普通限流：照常重试
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr("bot.http.asyncio.sleep", lambda s: real_sleep(0))
+        n0 = calls["n"]
+        try:
+            await rpc.call("getSlot", retries=2)
+        except Exception as e:  # noqa: BLE001
+            assert not isinstance(e, sr.QuotaOut)
+        assert calls["n"] - n0 == 3 and not rpc.out
+
+        # 模拟盘：节点查不到精度 → 用 GMGN 的；GMGN 也没有 → Solana 按 6
+        rpc.out_until = time.time() + 600
+        ov = {"decimals": 9}
+
+        async def overview(chain, token):
+            return ov
+
+        async def price(chain, token):
+            return 0.001
+
+        async def native_price(chain):
+            return 100.0
+        app = SimpleNamespace(sol=rpc, cfg=PCfg({"trading": {"sim_fee_pct": 1}}), live_costs=None,
+                              native_price=native_price, data=SimpleNamespace(overview=overview, price=price))
+        ex = DryRunExecutor(app, "solana")
+        f1 = await ex.buy("T", 1.0, 1000)
+        assert f1.ok and f1.decimals == 9 and f1.token_raw > 0
+        ov.clear()
+        assert (await ex.buy("T", 1.0, 1000)).decimals == 6
+    asyncio.run(go())

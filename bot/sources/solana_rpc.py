@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
-from ..http import Http
+from ..http import Http, QuotaError
 from ..utils import f
 
 log = logging.getLogger("memebot.solana")
@@ -20,6 +21,13 @@ class RpcError(Exception):
     pass
 
 
+OUT_SEC = 600      # Helius 额度用完后，多久再试一次
+
+
+class QuotaOut(RpcError):
+    """Helius 这个月的额度用完了：直接报错，不去敲节点（每 10 分钟放一个请求过去试试恢复没有）。"""
+
+
 class SolanaRPC:
     def __init__(self, http: Http, helius_key: str, rps: float, trade_rps: float = 3):
         self.http = http
@@ -29,11 +37,29 @@ class SolanaRPC:
         http.set_rate("helius", rps)
         http.set_rate("helius_trade", trade_rps)
         self._id = 0
+        self.out_until = 0.0        # 额度用完：这个时间之前直接报错
+        self.out_since = 0.0
+
+    @property
+    def out(self) -> bool:
+        return time.time() < self.out_until
 
     async def call(self, method: str, params: list | None = None, retries: int = 3, svc: str = "helius") -> Any:
+        if self.out:
+            raise QuotaOut(f"Helius 额度用完（max usage reached），{(self.out_until - time.time()) / 60:.0f} 分钟后再试")
         self._id += 1
         body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or []}
-        r = await self.http.post(svc, self.url, json_body=body, retries=retries)
+        try:
+            r = await self.http.post(svc, self.url, json_body=body, retries=retries)
+        except QuotaError as e:
+            if not self.out_since:
+                self.out_since = time.time()
+                log.warning("Helius 额度用完（max usage reached）：Solana 节点请求先停 %d 分钟，分析改用 GMGN 数据", OUT_SEC // 60)
+            self.out_until = time.time() + OUT_SEC
+            raise QuotaOut("Helius 额度用完（max usage reached）") from e
+        if self.out_since:
+            log.info("Helius 节点恢复（停了 %.0f 分钟）", (time.time() - self.out_since) / 60)
+            self.out_since = 0.0
         if isinstance(r, dict) and r.get("error"):
             raise RpcError(f"{method}: {r['error']}")
         return r.get("result") if isinstance(r, dict) else None

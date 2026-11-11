@@ -75,6 +75,7 @@
 免费版每月只有 100 万额度（每取一笔交易 1 额度，WebSocket 每推送 0.1 MB 数据 2 额度），聪明钱多的时候几天就用完；用完后节点直接拒绝连接（HTTP 429），Solana 的聪明钱信号会几乎归零（11-10 就是这样：一天 1.5 万条 → 几百条，买入从 15 笔掉到 1 笔）。
 - 机器人会在 Telegram 报警（见下面"信号源体检"），`/status` 里也能看到 Solana 监听是否连上、Helius 节点是否正常、被拒绝时节点给的原因。
 - 到 Helius 后台 dashboard.helius.dev 的 Usage 页能看到这个月额度用了多少。
+- 额度用完期间：Solana 节点请求不再重试（每 10 分钟试一次恢复没有），代币分析的权限数据改用 GMGN 的，模拟盘照常买卖 Solana 币。**实盘必须有可用的 Helius 额度**（查余额、确认成交都靠它）。
 
 ### 4. QuickNode（ETH / BSC / Base 节点）
 注册后分别创建 Ethereum、BNB Smart Chain、Base 三个主网节点。把每个节点的 HTTP 和 WSS 地址填入 `.env` 里对应的 `*_RPC_HTTP` 和 `*_RPC_WSS`。

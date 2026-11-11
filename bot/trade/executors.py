@@ -55,9 +55,21 @@ class DryRunExecutor:
         self.app, self.chain = app, chain
 
     async def _decimals(self, token: str) -> int:
-        if self.chain == "solana":
-            return (await self.app.sol.mint_info(token)).get("decimals", 6)
-        return await self.app.evm[self.chain].erc20_decimals(token)
+        """模拟盘只要买卖用同一个精度就行：节点查不到（比如 Helius 额度用完）就用 GMGN 的数据，再不行按 6。"""
+        try:
+            if self.chain == "solana":
+                mi = await self.app.sol.mint_info(token)
+                if mi.get("found"):
+                    return int(mi.get("decimals", 6))
+            else:
+                return await self.app.evm[self.chain].erc20_decimals(token)
+        except Exception as e:  # noqa: BLE001
+            log.debug("模拟盘查精度失败 %s: %s", token, e)
+        try:
+            d = int((await asyncio.wait_for(self.app.data.overview(self.chain, token), 5)).get("decimals") or 0)
+        except Exception:  # noqa: BLE001
+            d = 0
+        return d if 0 < d <= 18 else (6 if self.chain == "solana" else 18)
 
     async def native_balance(self) -> float:
         return 1e9
