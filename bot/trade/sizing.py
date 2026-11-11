@@ -8,7 +8,9 @@
 | 0 ~ +8% | ×1 |
 | +8% ~ +20%（去掉最赚的一笔仍为正） | ×1.25 |
 | ≥ +20%（去掉最赚的一笔仍为正） | ×1.5 |
-来源和档位的倍数相乘，最终限制在 ×0.25 ~ ×1.5。样本不够 15 笔按 ×1。
+来源、档位、链三个倍数相乘，最终限制在 ×0.25 ~ ×1.5。样本不够 15 笔按 ×1。
+（按链：11-10 起 Solana 断线，机器人只能在 BSC 上交易，BSC 21 笔每笔约 -30%；
+ 这种时候应该自动缩小那条链的仓位，而不是照常下单。）
 """
 from __future__ import annotations
 
@@ -51,28 +53,31 @@ async def evidence(app: "App") -> dict:
     if time.time() - _cache["t"] < 600 and _cache["dry"] == dry:
         return _cache["v"]
     rows = await app.db.fetchall(
-        "SELECT reason, tier, cost_usd, realized_usd FROM positions WHERE status='closed' AND dry_run=? AND closed_at>? "
+        "SELECT reason, tier, chain, cost_usd, realized_usd FROM positions WHERE status='closed' AND dry_run=? AND closed_at>? "
         "AND cost_usd>0", (dry, time.time() - 7 * 86400))
     src: dict[str, list[float]] = {}
     tier: dict[str, list[float]] = {}
+    chain: dict[str, list[float]] = {}
     for r in rows:
         ret = f(r["realized_usd"]) / f(r["cost_usd"]) - 1
         src.setdefault(source_of(r["reason"]), []).append(ret)
         tier.setdefault(r["tier"] or "?", []).append(ret)
-    v = {"src": src, "tier": tier}
+        chain.setdefault(r["chain"] or "?", []).append(ret)
+    v = {"src": src, "tier": tier, "chain": chain}
     _cache.update(t=time.time(), dry=dry, v=v)
     return v
 
 
-async def size_mult(app: "App", reason: str, tier: str) -> tuple[float, str]:
+async def size_mult(app: "App", reason: str, tier: str, chain: str | None = None) -> tuple[float, str]:
     if not bool(app.cfg.get("trading.evidence_sizing", True)):
         return 1.0, ""
     n_min = int(app.cfg.get("trading.evidence_min_trades", 15))
     ev = await evidence(app)
     s = source_of(reason)
     rs, rt = ev["src"].get(s, []), ev["tier"].get(tier, [])
-    ms, mt = mult(rs, n_min), mult(rt, n_min)
-    m = max(0.25, min(1.5, ms * mt))
+    rc = ev.get("chain", {}).get(chain, []) if chain else []
+    ms, mt, mc = mult(rs, n_min), mult(rt, n_min), mult(rc, n_min)
+    m = max(0.25, min(1.5, ms * mt * mc))
     if m == 1.0:
         return 1.0, ""
     parts = []
@@ -80,6 +85,10 @@ async def size_mult(app: "App", reason: str, tier: str) -> tuple[float, str]:
         parts.append(f"{s}近 7 天 {len(rs)} 笔每笔 {sum(rs) / len(rs) * 100:+.0f}%")
     if mt != 1:
         parts.append(f"该档 {len(rt)} 笔每笔 {sum(rt) / len(rt) * 100:+.0f}%")
+    if mc != 1:
+        from ..chains import CHAINS
+        name = CHAINS[chain].name if chain in CHAINS else chain
+        parts.append(f"{name}近 7 天 {len(rc)} 笔每笔 {sum(rc) / len(rc) * 100:+.0f}%")
     return m, f"按战绩仓位 ×{m:g}（" + "，".join(parts) + "）"
 
 

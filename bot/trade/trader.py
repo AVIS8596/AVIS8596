@@ -390,7 +390,7 @@ class Trader:
             amount = round(amount * rg["mult"], 4)
             reason += f" | 市场{ {'cold': '冷', 'hot': '热'}.get(rg['state'], '一般') }，仓位 ×{rg['mult']:g}"
         from .sizing import exposure_ok, size_mult
-        sm, why = await size_mult(self.app, reason, tier)       # 仓位按各买入来源 / 档位的真实战绩调整
+        sm, why = await size_mult(self.app, reason, tier, chain)   # 仓位按各买入来源 / 档位 / 链的真实战绩调整
         if sm != 1:
             amount = round(amount * sm, 4)
             reason += f" | {why}"

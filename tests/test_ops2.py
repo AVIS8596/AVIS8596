@@ -67,6 +67,12 @@ def test_evidence_sizing_and_exposure(tmp_path):
     async def go():
         db = DB(tmp_path / "s.db")
         await db.open()
+        try:
+            await body(db)
+        finally:
+            await db.close()
+
+    async def body(db):
         app = SimpleNamespace(db=db, cfg=Cfg({"trading": {"max_exposure_usd_dry": 1000}}))
         now = time.time()
         for i in range(20):    # 跟单 20 笔每笔 -20%；早期建仓 20 笔每笔 +30%
@@ -80,12 +86,21 @@ def test_evidence_sizing_and_exposure(tmp_path):
         m2, _ = await sizing.size_mult(app, "早期建仓（快毕业）", "normal")
         assert m2 == 1.5
         assert sizing.mult([0.5] + [-0.01] * 14) == 1.0          # 只靠一笔大赚：不加仓
+        # 按链：BSC 20 笔每笔 -30% → BSC 上的单子缩到 ×0.25，Solana 不受影响
+        for i in range(20):
+            await db.execute("INSERT INTO positions(status,dry_run,chain,reason,tier,cost_usd,realized_usd,closed_at) "
+                             "VALUES('closed',1,'bsc','新币高评分','best',100,70,?)", (now,))
+        sizing._cache["t"] = 0
+        m3, why3 = await sizing.size_mult(app, "新币高评分", "normal", "bsc")
+        assert m3 == 0.25 and "BSC近 7 天 20 笔每笔 -30%" in why3
+        m4, _ = await sizing.size_mult(app, "强叙事（90 分）", "x", "solana")
+        m5, why5 = await sizing.size_mult(app, "强叙事（90 分）", "x", "bsc")
+        assert m4 == 1.0 and m5 == 0.25 and "BSC" in why5
         await db.execute("INSERT INTO positions(status,dry_run,cost_usd,amount_raw,remaining_raw) "
                          "VALUES('open',1,900,'100','50')")       # 卖掉一半，剩 $450
         assert (await sizing.exposure_ok(app, 500))[0]
         ok, why = await sizing.exposure_ok(app, 600)
         assert not ok and "超过上限" in why
-        await db.close()
     asyncio.run(go())
 
 
