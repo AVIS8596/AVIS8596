@@ -39,6 +39,8 @@ log = logging.getLogger("memebot.solmon")
 PER_CONN = 500
 REBUILD_MIN_SEC = 600
 FETCH_DELAY = 1.0
+SUB_GAP = 0.12          # 订阅请求之间隔多久：每秒约 8 个（Chainstack 免费版每秒 25 次，还要留给取交易）
+SUB_RETRY = 3.0         # 订阅被节点拒绝（超频）后多久重发
 MENTION_MIN, MENTION_OWN = 40, 0.1
 MENTION_SEC = 86400
 INVOKE_RE = re.compile(r"^Program (\w{32,44}) invoke \[\d+\]")
@@ -97,6 +99,7 @@ class SolanaWalletMonitor:
         self.fails = 0                       # 连续连接失败次数
         self.notes = 0                       # 收到并去处理的通知数
         self.failed = 0                      # 处理失败（取不到交易）的通知数
+        self.sub_errors = 0                  # 订阅被节点拒绝的次数（会自动重发）
         self.skipped = 0                     # 看日志就知道不是买卖、没去取的通知数
         self.noisy = 0                       # 扫盘型、不监听的钱包数
         self.wstat: dict[str, list[int]] = {}   # 钱包 → [收到的通知数, 其中它自己发起的]
@@ -220,50 +223,91 @@ class SolanaWalletMonitor:
                     async with websockets.connect(ep.wss if ep else sol.wss, ping_interval=20, ping_timeout=30,
                                                   max_size=10_000_000, open_timeout=15) as ws:
                         pending: dict[int, str] = {}
-                        for i, w in enumerate(wallets):
-                            rid = i + 1
-                            pending[rid] = w
-                            await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "logsSubscribe",
-                                                      "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
-                            if rid % 50 == 0:
-                                await asyncio.sleep(0.3)   # 订阅请求分批发，不一口气灌给节点
                         subs: dict[int, str] = {}
-                        self._up(cid, len(wallets))
+                        queue: list[str] = list(wallets)
+                        rid_box = [0]
+                        sending = [False]
+
+                        async def sender() -> None:
+                            # 订阅请求慢慢发（每秒约 8 个）：一口气灌过去会超出节点每秒请求数，大部分订阅被拒，
+                            # 那些钱包其实没在监听（11-11 Chainstack：1 小时 500 次 "exceeded the RPS limit"）
+                            if sending[0]:
+                                return
+                            sending[0] = True
+                            try:
+                                while queue:
+                                    w = queue.pop(0)
+                                    rid_box[0] += 1
+                                    pending[rid_box[0]] = w
+                                    await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid_box[0], "method": "logsSubscribe",
+                                                              "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
+                                    await asyncio.sleep(SUB_GAP)
+                            finally:
+                                sending[0] = False
+
+                        async def resend() -> None:
+                            await asyncio.sleep(SUB_RETRY)
+                            await sender()
+
+                        helpers: set[asyncio.Task] = set()
+
+                        def spawn(coro) -> None:
+                            t = asyncio.create_task(coro)
+                            helpers.add(t)
+                            t.add_done_callback(helpers.discard)
+
+                        spawn(sender())
+                        self._up(cid, 0)
                         if ep:
                             sol.ws_ok(ep)
                             self.node = ep.name
                         backoff = 2.0
-                        async for raw in ws:
-                            msg = json.loads(raw)
-                            if "id" in msg and "result" in msg and msg["id"] in pending:
-                                subs[msg["result"]] = pending.pop(msg["id"])
-                                continue
-                            if "error" in msg:
-                                log.warning("Solana 订阅错误: %s", msg["error"])
-                                continue
-                            if msg.get("method") != "logsNotification":
-                                continue
-                            p = msg["params"]
-                            wallet = subs.get(p.get("subscription"))
-                            val = (p.get("result") or {}).get("value") or {}
-                            sig = val.get("signature")
-                            if not wallet or not sig or val.get("err") is not None:
-                                continue
-                            if not worth_fetching(val.get("logs")):
-                                self.skipped += 1            # 只是转账 / 建账户之类：不花额度去取
-                                continue
-                            if not self.seen.add_if_new(f"{sig}:{wallet}"):
-                                continue
-                            if len(self._tasks) >= 15:
-                                # 节点额度跟不上时丢弃，GMGN 交易流那一路还能补上；排队等下去信号也过时了
-                                self.dropped += 1
-                                if self.dropped % 100 == 1:
-                                    log.warning("Solana 监听积压，已丢弃 %d 条通知（Helius 额度不够，考虑升级）", self.dropped)
-                                continue
-                            self.notes += 1
-                            t = asyncio.create_task(self._handle(sig, wallet))
-                            self._tasks.add(t)
-                            t.add_done_callback(self._tasks.discard)
+                        try:
+                            async for raw in ws:
+                                msg = json.loads(raw)
+                                if "id" in msg and msg.get("id") in pending:
+                                    w = pending.pop(msg["id"])
+                                    if "result" in msg:
+                                        subs[msg["result"]] = w
+                                        self.live[cid] = len(subs)
+                                    else:                        # 被拒（多半是超频）：过几秒重发
+                                        self.sub_errors += 1
+                                        if self.sub_errors % 200 == 1:
+                                            log.info("Solana 订阅被节点拒绝 %d 次（%s），会自动重发",
+                                                     self.sub_errors, str(msg.get("error"))[:120])
+                                        queue.append(w)
+                                        if not sending[0]:
+                                            spawn(resend())
+                                    continue
+                                if "error" in msg:
+                                    log.warning("Solana 订阅错误: %s", msg["error"])
+                                    continue
+                                if msg.get("method") != "logsNotification":
+                                    continue
+                                p = msg["params"]
+                                wallet = subs.get(p.get("subscription"))
+                                val = (p.get("result") or {}).get("value") or {}
+                                sig = val.get("signature")
+                                if not wallet or not sig or val.get("err") is not None:
+                                    continue
+                                if not worth_fetching(val.get("logs")):
+                                    self.skipped += 1            # 只是转账 / 建账户之类：不花额度去取
+                                    continue
+                                if not self.seen.add_if_new(f"{sig}:{wallet}"):
+                                    continue
+                                if len(self._tasks) >= 15:
+                                    # 节点额度跟不上时丢弃，GMGN 交易流那一路还能补上；排队等下去信号也过时了
+                                    self.dropped += 1
+                                    if self.dropped % 100 == 1:
+                                        log.warning("Solana 监听积压，已丢弃 %d 条通知（Helius 额度不够，考虑升级）", self.dropped)
+                                    continue
+                                self.notes += 1
+                                t = asyncio.create_task(self._handle(sig, wallet))
+                                self._tasks.add(t)
+                                t.add_done_callback(self._tasks.discard)
+                        finally:
+                            for t in list(helpers):
+                                t.cancel()
                     raise ConnectionError("连接被节点关闭")
                 except asyncio.CancelledError:
                     raise

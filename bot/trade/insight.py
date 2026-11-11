@@ -29,6 +29,9 @@ BUCKETS = [
     ("top10_pct", "前10持仓%", [15, 25, 40]),
     ("cabal_pct", "阴谋地址持仓%", [0.01, 3, 10]),
     ("early_finder_pct", "早期发现者持仓%", [0.01, 1, 5]),
+    ("winner_pct", "精准钱包持仓%", [0.01, 10, 25]),
+    ("liq_mcap", "池子/市值", [0.3, 0.6, 0.85]),       # 池子相对市值特别深：常见于"先放大池子装安全、再撤池子"
+    ("lp_burned", "池子已烧（1=是）", [1]),
 ]
 
 
@@ -59,6 +62,8 @@ def analyze_rows(rows: list[dict], horizon: str) -> dict:
         feats = json.loads(r.get("features") or "{}")
         b, s = f(feats.get("buys_1h")), f(feats.get("sells_1h"))
         feats["buy_sell"] = b / s if s > 0 else (3.0 if b > 0 else 0.0)
+        if f(feats.get("mcap")) > 0 and feats.get("liquidity") is not None:
+            feats["liq_mcap"] = f(feats.get("liquidity")) / f(feats.get("mcap"))
         data.append((feats, p1 / p0 - 1, int(r.get("bought") or 0), str(r.get("source") or "")))
     if not data:
         return {"n": 0}

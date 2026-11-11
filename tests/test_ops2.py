@@ -1197,7 +1197,7 @@ def test_solana_ws_switches_node_when_rejected(monkeypatch):
             sm.wanted = 2
             task = asyncio.create_task(sm._conn(0, ["W0", "W1"]))
             for _ in range(50):
-                if sm.live:
+                if sm.live.get(0) == 2:
                     break
                 await asyncio.sleep(0.1)
             assert sm.live == {0: 2} and sm.node == "127.0.0.1"
@@ -1355,4 +1355,46 @@ def test_watchdog_reports_any_problem(tmp_path, monkeypatch):
         finally:
             root.removeHandler(pl)
             await db.close()
+    asyncio.run(go())
+
+
+
+def test_solana_subscriptions_paced_and_retried(monkeypatch):
+    """订阅请求慢慢发；被节点拒绝（超频）的过几秒重发；"已订阅"只算节点真正确认的。"""
+    import json as _json
+
+    import websockets
+    from bot.monitor import solana_wallets as sw
+
+    monkeypatch.setattr(sw, "SUB_GAP", 0.01)
+    monkeypatch.setattr(sw, "SUB_RETRY", 0.2)
+
+    async def go():
+        seen = {"n": 0, "w": []}
+
+        async def handler(ws):
+            async for raw in ws:
+                m = _json.loads(raw)
+                w = m["params"][0]["mentions"][0]
+                seen["n"] += 1
+                seen["w"].append(w)
+                if w in ("W1", "W3") and seen["w"].count(w) == 1:     # 第一次订阅 W1、W3 被拒（超频）
+                    await ws.send(_json.dumps({"jsonrpc": "2.0", "id": m["id"], "error": {
+                        "code": -32005, "message": "You've exceeded the RPS limit available on the current plan."}}))
+                else:
+                    await ws.send(_json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": 900 + m["id"]}))
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            sm = sw.SolanaWalletMonitor(SimpleNamespace(sol=SimpleNamespace(wss=f"ws://127.0.0.1:{port}")))
+            sm.wanted = 5
+            task = asyncio.create_task(sm._conn(0, [f"W{i}" for i in range(5)]))
+            for _ in range(30):
+                if sm.live.get(0) == 5:
+                    break
+                await asyncio.sleep(0.05)
+            assert sm.live.get(0) == 5 and seen["n"] == 7 and sm.sub_errors == 2   # 被拒的 2 个重发后订阅上
+            assert "已订阅 5/5" in sm.status_text() and sm.fails == 0             # 没有断线重连
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     asyncio.run(go())
