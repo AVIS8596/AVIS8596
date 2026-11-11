@@ -267,6 +267,7 @@ tail -f logs/memebot.log
 ```
 python3 deploy/enable_evm.py bsc base ethereum   # 用 PublicNode 免费公共节点（不用注册），已填过自己节点的链保留不动
 python3 deploy/enable_evm.py off                 # 全部关闭
+python3 deploy/enable_evm.py only sol bsc        # 只跑这几条链，其他都关（节点地址保留；要关的链上还有持仓会拒绝并提示）
 sudo systemctl restart memebot
 ```
 公共节点有限速，模拟盘够用；实盘或监听钱包多时建议换成 Alchemy 免费账号的节点（重新运行 `deploy/setup_env.py` 填入）。
