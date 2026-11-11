@@ -61,10 +61,12 @@ async def diag(app: "App", days: int = 4) -> dict:
     out["n"], out["pnl"] = len(closed), sum(pnl)
     out["top3"] = sum(pnl[:3])
     out["wins"] = sum(1 for x in pnl if x > 0)
-    stops = [p for p in closed if "止损" in (p["close_reason"] or "")]
+    stops = [p for p in closed if "止损" in (p["close_reason"] or "") and float(p["cost_usd"] or 0) > 0]
     out["stops"] = len(stops)
     out["stop_avg"] = sum(_ret(p) for p in stops) / len(stops) if stops else 0.0
-    out["stop_back"] = sum(1 for p in stops if p["post_max"] and float(p["post_max"]) >= 1 / (1 + _ret(p)))
+    # post_max = 平仓后 4 小时最高价 / 平均卖出价；卖出价 ≈ 成本 × (1 + 收益)，涨回成本 = post_max × (1 + 收益) ≥ 1
+    # （写成乘法：归零的单子收益 -100%，用除法会除以 0）
+    out["stop_back"] = sum(1 for p in stops if p["post_max"] and float(p["post_max"]) * (1 + _ret(p)) >= 1)
     out["stop_known"] = sum(1 for p in stops if p["post_max"])
     out["tune"] = [h for h in (await db.kv_get("tune_log", []) or []) if h.get("ts", 0) >= start]
     return out

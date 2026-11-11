@@ -1237,7 +1237,9 @@ def test_diag_splits_by_chain_and_shows_failures(tmp_path):
             y = day0 - 86400 + 3600
             rows = [("solana", "跟单", 100, 300, "止盈", None), ("solana", "早期建仓", 100, 62, "止损 -35%", 2.0),
                     ("base", "跟单", 50, 31, "止损 -35%", 1.1), ("base", "跟单", 50, 30, "止损 -35%", None),
-                    ("bsc", "强叙事", 50, 70, "止盈", None)]
+                    ("bsc", "强叙事", 50, 70, "止盈", None),
+                    ("bsc", "跟单", 0, 0, "止损 -35%", 3.0),             # 成本记成 0 的老单子
+                    ("bsc", "跟单", 20, 0, "止损（池子被撤空）", 5.0)]     # 归零的单子：收益 -100%，不能除以 0
             for c, r, cost, real, why, pm in rows:
                 await db.execute("INSERT INTO positions(chain,symbol,reason,status,dry_run,cost_usd,realized_usd,opened_at,"
                                  "closed_at,close_reason,post_max) VALUES(?,?,?,?,1,?,?,?,?,?,?)",
@@ -1250,13 +1252,13 @@ def test_diag_splits_by_chain_and_shows_failures(tmp_path):
             await db.kv_set("tune_log", [{"ts": y, "key": "strategies.early.min_holders", "old": 80, "new": 50, "why": "x"}])
             d = await diag(app, 2)
             yd, td = d["days"]
-            assert yd["opened"] == {"solana": 2, "base": 2, "bsc": 1}
+            assert yd["opened"] == {"solana": 2, "base": 2, "bsc": 3}
             assert yd["chains"]["base"][0] == 2 and abs(yd["chains"]["base"][1] - (-39)) < 1e-9
             assert td["fails"]["solana"]["helius HTTP 429: max usage reached"] == 3 and td["open_now"] == 1
-            assert d["n"] == 5 and abs(d["pnl"] - 143) < 1e-9 and abs(d["top3"] - 201) < 1e-9
-            assert d["stops"] == 3 and d["stop_known"] == 2 and d["stop_back"] == 1     # 2.0 倍回到成本以上，1.1 倍没有
+            assert d["n"] == 7 and abs(d["pnl"] - 123) < 1e-9 and abs(d["top3"] - 220) < 1e-9
+            assert d["stops"] == 4 and d["stop_known"] == 3 and d["stop_back"] == 1     # 2.0 倍回到成本以上，1.1 倍、归零的没有
             txt = await diag_text(app, 2)
-            assert "Solana 模拟买入失败 3 次" in txt and "去掉它们 -$58" in txt and "min_holders 80→50" in txt
+            assert "Solana 模拟买入失败 3 次" in txt and "去掉它们 -$97" in txt and "min_holders 80→50" in txt
         finally:
             await db.close()
     asyncio.run(go())
