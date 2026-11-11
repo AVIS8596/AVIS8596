@@ -1,8 +1,0 @@
-.env
-.venv/
-data/
-logs/
-__pycache__/
-*.pyc
-.pytest_cache/
-*.pem
