@@ -40,6 +40,7 @@ HELP = """<b>命令列表</b>
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
+/diag [天数] 自检：按链拆开每天的买入和盈亏、模拟买入失败的次数和原因、成绩靠不靠运气、止损情况、自我学习改过的参数（默认 4 天）
 /funnel [天数] 漏斗：每天进来多少信号、被拦在哪、买了多少、赚没赚（回答"为什么买得少 / 条件是不是太严"，默认 4 天）
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
 /alerts off | on 关闭 / 打开聪明钱和新币提醒（交易、风控、复盘照常推送）
@@ -64,6 +65,7 @@ CHAIN_ALIAS = {"sol": "solana", "eth": "ethereum", "bnb": "bsc", "hood": "robinh
 MENU = [
     ("help", "全部命令和用法"), ("status", "运行状态"), ("positions", "当前持仓"), ("review", "今日复盘"),
     ("funnel", "[天数]：每天信号 → 被拦 → 买入的漏斗"),
+    ("diag", "[天数]：自检（按链盈亏、买入失败、止损、参数变化）"),
     ("history", "代币地址：这个币的时间线（为什么买 / 没买）"), ("whynot", "代币地址：这个币为什么没买"),
     ("why", "编号：持仓的健康分和卖出规则"), ("sell", "编号 [百分比]：手动卖出"),
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
@@ -463,6 +465,10 @@ class Telegram:
         elif cmd == "/review":
             from ..trade.review import daily_review
             await self.send(await daily_review(self.app, self.app.day_start()))
+        elif cmd == "/diag":
+            from ..trade.diag import diag_text
+            days = int(args[0]) if args and args[0].isdigit() else 4
+            await self.send(await diag_text(self.app, min(max(days, 1), 10)))
         elif cmd == "/funnel":
             from ..trade.review import funnel_text
             days = int(args[0]) if args and args[0].isdigit() else 4

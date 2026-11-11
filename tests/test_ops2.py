@@ -1219,3 +1219,44 @@ def test_solana_handle_waits_then_dispatches_separately(monkeypatch):
         await asyncio.sleep(0.05)
         assert got == ["S1"] and not sm._sig_tasks
     asyncio.run(go())
+
+
+def test_diag_splits_by_chain_and_shows_failures(tmp_path):
+    """自检：按开仓日期、按链拆盈亏；模拟买入失败的原因；去掉最赚的 3 笔还剩多少；止损后又涨回来的；参数变化。"""
+    from bot.trade.diag import diag, diag_text
+
+    async def go():
+        db = DB(tmp_path / "g.db")
+        await db.open()
+        try:
+            tz = ZoneInfo("Asia/Phnom_Penh")
+            from datetime import datetime
+            day0 = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            app = SimpleNamespace(db=db, cfg=PCfg({}), tz=tz, day_start=lambda: day0)
+            app.cfg.dry_run = True
+            y = day0 - 86400 + 3600
+            rows = [("solana", "跟单", 100, 300, "止盈", None), ("solana", "早期建仓", 100, 62, "止损 -35%", 2.0),
+                    ("base", "跟单", 50, 31, "止损 -35%", 1.1), ("base", "跟单", 50, 30, "止损 -35%", None),
+                    ("bsc", "强叙事", 50, 70, "止盈", None)]
+            for c, r, cost, real, why, pm in rows:
+                await db.execute("INSERT INTO positions(chain,symbol,reason,status,dry_run,cost_usd,realized_usd,opened_at,"
+                                 "closed_at,close_reason,post_max) VALUES(?,?,?,?,1,?,?,?,?,?,?)",
+                                 (c, "S", r, "closed", cost, real, y, y + 600, why, pm))
+            await db.execute("INSERT INTO positions(chain,symbol,reason,status,dry_run,cost_usd,realized_usd,opened_at) "
+                             "VALUES('base','S','跟单','open',1,50,0,?)", (day0 + 60,))
+            for i in range(3):
+                await db.execute("INSERT INTO trades(ts,chain,token,side,dry_run,ok,error) VALUES(?,?,?,?,1,0,?)",
+                                 (day0 + 100 + i, "solana", "T", "buy", "helius HTTP 429: max usage reached"))
+            await db.kv_set("tune_log", [{"ts": y, "key": "strategies.early.min_holders", "old": 80, "new": 50, "why": "x"}])
+            d = await diag(app, 2)
+            yd, td = d["days"]
+            assert yd["opened"] == {"solana": 2, "base": 2, "bsc": 1}
+            assert yd["chains"]["base"][0] == 2 and abs(yd["chains"]["base"][1] - (-39)) < 1e-9
+            assert td["fails"]["solana"]["helius HTTP 429: max usage reached"] == 3 and td["open_now"] == 1
+            assert d["n"] == 5 and abs(d["pnl"] - 143) < 1e-9 and abs(d["top3"] - 201) < 1e-9
+            assert d["stops"] == 3 and d["stop_known"] == 2 and d["stop_back"] == 1     # 2.0 倍回到成本以上，1.1 倍没有
+            txt = await diag_text(app, 2)
+            assert "Solana 模拟买入失败 3 次" in txt and "去掉它们 -$58" in txt and "min_holders 80→50" in txt
+        finally:
+            await db.close()
+    asyncio.run(go())
