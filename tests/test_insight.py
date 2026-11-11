@@ -63,6 +63,9 @@ def test_early_report_separates_winners_and_scams(tmp_path):
             assert "捆绑交易%" in txt and "10 分钟持有人增长%" in txt
             best = txt.split("最能提前认出赢家的几档")[1].split("\n")[0]
             assert "捆绑交易% ＜5" in best or "10 分钟持有人增长% ≥80" in best
+            assert "候选的早期埋伏规则" in txt and "全部有 10 分钟快照的（对照）：200 个" in txt
+            assert "10 分钟持有人涨 ≥80% + 老鼠仓 ＜15% + 前10 ＜40%：100 个，翻倍 100%，归零 0%" in txt
+            assert "全部有 10 分钟快照的（对照）：200 个，翻倍 50%，归零 50%" in txt
         finally:
             await db.close()
     asyncio.run(go())

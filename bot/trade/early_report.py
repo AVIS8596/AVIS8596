@@ -39,7 +39,7 @@ def _pct(x: float) -> float:
     return x * 100 if 0 < x <= 1 else x
 
 
-def outcome(p0: float, p60: float | None, p240: float | None) -> str:
+def outcome(p0: float, p60: float | None, p240: float | None, win_x: float = WIN_X) -> str:
     """win / dead / mid / ""（还没结果）。"""
     vals = [p for p in (p60, p240) if p is not None]
     if not vals or p0 <= 0:
@@ -50,7 +50,7 @@ def outcome(p0: float, p60: float | None, p240: float | None) -> str:
     if not priced:
         return ""
     best, last = max(priced) / p0, priced[-1] / p0
-    if best >= WIN_X:
+    if best >= win_x:
         return "win"
     if last <= DEAD_X or (p240 is not None and p240 == -1):
         return "dead"
@@ -70,6 +70,37 @@ def features(snaps: list[dict]) -> dict:
         s1 = later[0]
         out["h_growth"] = (f(s1["holders"]) / f(s0["holders"]) - 1) * 100
         out["p_change"] = (f(s1["price"]) / f(s0["price"]) - 1) * 100 if f(s1["price"]) > 0 else None
+        out["p10"] = f(s1["price"])
+    return out
+
+
+# 候选的"早期埋伏"规则：都在发现后 10 分钟、按当时的价格买（结果也按这个价格算，不占"发现价"的便宜）
+RULES = [
+    ("10 分钟涨 ≥100%", lambda x: x.get("p_change", -999) >= 100),
+    ("10 分钟涨 ≥100% + 老鼠仓 ＜15% + 前10 ＜40%",
+     lambda x: x.get("p_change", -999) >= 100 and x["insider"] < 15 and x["top10"] < 40),
+    ("10 分钟涨 20~100% + 持有人涨 ≥30% + 老鼠仓 ＜15% + 前10 ＜40%",
+     lambda x: 20 <= x.get("p_change", -999) < 100 and x.get("h_growth", 0) >= 30 and x["insider"] < 15
+     and x["top10"] < 40),
+    ("10 分钟持有人涨 ≥80% + 老鼠仓 ＜15% + 前10 ＜40%",
+     lambda x: x.get("h_growth", 0) >= 80 and x["insider"] < 15 and x["top10"] < 40),
+    ("全部有 10 分钟快照的（对照）", lambda x: "p10" in x),
+]
+
+
+def rule_stats(rows: list[tuple[dict, float | None, float | None]]) -> list[tuple]:
+    """rows：(特征, 1 小时价, 4 小时价)。按 10 分钟时的价格入场：翻倍率、归零率、1 小时后中位涨跌。"""
+    out = []
+    for name, ok in RULES:
+        sel = [(x, p60, p240) for x, p60, p240 in rows if "p10" in x and x["p10"] > 0 and ok(x)]
+        res = [outcome(x["p10"], p60, p240, win_x=2.0) for x, p60, p240 in sel]
+        res = [o for o in res if o]
+        if len(res) < 10:
+            out.append((name, len(res), None, None, None))
+            continue
+        r60 = sorted(p60 / x["p10"] - 1 for x, p60, _ in sel if p60 and p60 > 0)
+        med = r60[len(r60) // 2] if r60 else None
+        out.append((name, len(res), sum(o == "win" for o in res) / len(res), sum(o == "dead" for o in res) / len(res), med))
     return out
 
 
@@ -122,13 +153,16 @@ async def early_report(app: "App", days: float = 4) -> str:
     for r in rows:
         snaps.setdefault((r["chain"], r["token"]), []).append(dict(r))
     data = []
+    rows10 = []
     for t in toks:
         ss = snaps.get((t["chain"], t["token"]))
         if not ss:
             continue
         p0 = f(ss[0]["price"])
         o = outcome(p0, None if t["p60"] is None else f(t["p60"]), None if t["p240"] is None else f(t["p240"]))
-        data.append((features(ss), o))
+        ft = features(ss)
+        data.append((ft, o))
+        rows10.append((ft, None if t["p60"] is None else f(t["p60"]), None if t["p240"] is None else f(t["p240"])))
     res = analyze(data)
     if res["n"] < 50:
         return f"早期快照里有结果的币只有 {res['n']} 个，至少 50 个才有统计意义，过几个小时再看"
@@ -144,5 +178,14 @@ async def early_report(app: "App", days: float = 4) -> str:
     spread.sort(reverse=True)
     L.append("\n<b>最能提前认出赢家的几档</b>：" + "；".join(s for _, s in spread[:4]))
     L.append("<b>最像骗局的几档</b>：" + "；".join(s for _, s in spread[::-1][:4]))
+    L.append("⚠️ 上面「10 分钟」那两项的赢家是按发现价算的：10 分钟已经涨了一倍的币，离 3 倍只差一点，会显得特别好。"
+             "真要在 10 分钟时买，得按那时的价格算——见下面：")
+    L.append("\n<b>候选的早期埋伏规则</b>（发现后 10 分钟按当时价格买；翻倍 = 之后最高涨到买入价 2 倍，归零同上）")
+    for name, n, w, d, med in rule_stats(rows10):
+        if w is None:
+            L.append(f"  {name}：只有 {n} 个，样本不够")
+        else:
+            L.append(f"  {name}：{n} 个，翻倍 {w * 100:.0f}%，归零 {d * 100:.0f}%"
+                     + (f"，1 小时后中位 {med * 100:+.0f}%" if med is not None else ""))
     L.append("（只是相关，不一定是原因；样本越多越可靠。新记录的 GMGN 数据（新钱包、蓝筹、钓鱼钱包……）看 /learn data）")
     return "\n".join(L)
