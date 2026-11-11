@@ -111,7 +111,7 @@ async def audit(app: "App", chain: str, wallet: str, force: bool = False) -> dic
     if row:
         if verdict == "suspect" and row["status"] == "active":
             await db.execute("UPDATE wallets SET status='suspect' WHERE chain=? AND address=?", (chain, wallet))
-            log.warning("钱包体检不过，标为可疑：%s %s %s", chain, wallet, notes)
+            log.info("钱包体检不过，标为可疑：%s %s %s", chain, wallet, notes)   # 正常工作，不是故障（不推到体检提醒）
         elif verdict != "suspect" and row["status"] == "suspect":
             await db.execute("UPDATE wallets SET status='active' WHERE chain=? AND address=?", (chain, wallet))
     return {"verdict": verdict, "notes": notes, "cached": False, "n": len(pos)}

@@ -22,11 +22,27 @@ TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
 # 这些拒绝原因和标的好坏无关（开关、持仓满、冷却……），不记入"被过滤的信号"统计
 NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期",
                "市场冷", "总敞口")
-SKIP_CATS = [("论证：叙事分", "强叙事结构不过关"), ("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
+SKIP_CATS = [("池子没烧", "池子能被撤"), ("论证：叙事分", "强叙事结构不过关"), ("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
              ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过")]
+
+
+CURVE_WORDS = ("dbc", "launchlab", "bonding", "curve", "moonshot", "boop", "bonk")
+CURVE_NAMES = ("pump", "pumpfun", "pump_fun", "pump.fun")
+
+
+def pullable_pool(rep: dict) -> str:
+    """池子能不能被项目方撤走：Solana 币的主池子是普通交易池（不是发射平台的联合曲线），而且 GMGN 说池子没烧。
+    能撤返回说明，不能 / 不知道返回空。11-11 晚上 Horned cat、FOMOCAT 都是买入几分钟后池子被撤空（$74K → $0、$36K → $0），
+    Gang Dog 也是同一种：项目方把 100% 的币和一笔 SOL 直接建池子、池子不烧，想撤随时能撤。"""
+    if rep.get("chain") != "solana" or rep.get("lp_burn") != "":
+        return ""                          # 已烧，或者不知道（GMGN 没返回）
+    ex = str(rep.get("exchange") or "").lower()
+    if not ex or ex in CURVE_NAMES or any(w in ex for w in CURVE_WORDS):
+        return ""                          # 还在发射平台的联合曲线上：没有池子可撤；交易所不知道也不拦
+    return f"池子没烧（{ex}），项目方随时能把池子撤走"
 
 
 def norm_symbol(s) -> str:
@@ -112,6 +128,10 @@ class Trader:
             return "市场冷，暂停买入（最近买入 1 小时后大多在跌）"
         if rep.get("risks"):
             return "致命风险：" + "；".join(rep["risks"])
+        if bool(t.get("block_pullable_pool", True)):
+            pull = pullable_pool(rep)
+            if pull:
+                return pull
         if rep["liquidity"] < float(t.get("min_liquidity_usd", 8000)):
             return f"流动性 ${rep['liquidity']:.0f} 太低"
         if rep["bundle_held_pct"] > float(t.get("max_bundle_pct", 25)):

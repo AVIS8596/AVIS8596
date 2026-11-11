@@ -186,6 +186,7 @@ class Analyzer:
         except Exception as e:  # noqa: BLE001
             log.debug("团伙查询失败: %s", e)
             rep["gang_n"] = 0
+        rep["exchange"] = ov.get("exchange", "")
         dev = ov.get("dev") or {}
         rep["dev_launches"] = int(f(dev.get("creator_open_count")))           # 项目方以前发过几个币
         rep["dev_sold"] = int(str(dev.get("creator_token_status") or "").lower() in ("sell", "creator_close"))
@@ -329,7 +330,8 @@ class Analyzer:
         self._apply(res, facts, gsec)
         facts.age_hours = (time.time() - launch_ts) / 3600 if launch_ts else 0
         ex = self._extra(res, creator, launch_ts)
-        ex["lp_burn"] = str((gsec or {}).get("burn_status") or "")
+        # GMGN：burn_status "burn" = 池子已烧，"" = 没烧；GMGN 没返回安全数据时记成 None（不知道）
+        ex["lp_burn"] = str(gsec.get("burn_status") or "") if gsec else None
         # 已知"阴谋地址"/早期发现者现在的持仓（来自大涨币挖矿）：先只记录，让结果档案告诉我们它们在场时是涨是跌
         if g_hold and supply:
             ks = list(g_hold)

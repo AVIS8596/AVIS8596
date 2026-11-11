@@ -182,6 +182,7 @@ class DataHub:
             "decimals": int(f(d.get("decimals"))),
             "total_supply": f(d.get("total_supply")),
             "launchpad": d.get("launchpad_platform") or d.get("launchpad") or "",
+            "exchange": str(dig(d, "pool.exchange", default="") or ""),     # 主池子在哪个交易所（raydium / meteora_dlmm / pump_amm …）
             "dev": d.get("dev") or {}, "stat": d.get("stat") or {}, "tags_stat": d.get("wallet_tags_stat") or {},
         }
 

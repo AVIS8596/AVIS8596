@@ -190,6 +190,13 @@ class Telegram:
             L.append("｜".join(marks))
         if c != "solana":
             L.append(f"税 买{rep.get('buy_tax', 0):.1f}% 卖{rep.get('sell_tax', 0):.1f}%")
+        else:
+            from ..trade.trader import pullable_pool
+            lp = rep.get("lp_burn")
+            pool = e(rep.get("exchange") or "?")
+            L.append(f"🔥 池子已烧（{pool}）" if lp == "burn" else
+                     (f"⚠️ {e(pullable_pool(rep))}" if pullable_pool(rep) else
+                      (f"池子没烧（{pool}，还在发射平台曲线上 / 交易所不明）" if lp == "" else "池子烧没烧：不知道（GMGN 没返回）")))
         if rep.get("risks"):
             L.append("⛔ " + e("；".join(rep["risks"])))
         if rep.get("warnings"):

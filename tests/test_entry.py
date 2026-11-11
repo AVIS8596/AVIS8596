@@ -309,3 +309,32 @@ def test_probe_position(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_pullable_pool_blocked(tmp_path):
+    """Solana：主池子是普通交易池、GMGN 说池子没烧 → 项目方随时能撤池子，不买；已烧 / 还在曲线上 / 不知道 → 不拦。"""
+    from bot.trade.trader import pullable_pool, skip_cat
+
+    base = {"chain": "solana"}
+    assert "项目方随时能把池子撤走" in pullable_pool({**base, "lp_burn": "", "exchange": "meteora_dlmm"})
+    assert pullable_pool({**base, "lp_burn": "", "exchange": "pump_amm"})          # 自己在 PumpSwap 建的池子、没烧
+    assert pullable_pool({**base, "lp_burn": "burn", "exchange": "raydium"}) == ""
+    assert pullable_pool({**base, "lp_burn": None, "exchange": "raydium"}) == ""    # GMGN 没返回：不知道，不拦
+    assert pullable_pool({**base, "lp_burn": "", "exchange": "pump"}) == ""          # 还在 pump.fun 曲线上
+    assert pullable_pool({**base, "lp_burn": "", "exchange": "meteora_dbc"}) == ""
+    assert pullable_pool({**base, "lp_burn": "", "exchange": ""}) == ""
+    assert pullable_pool({"chain": "bsc", "lp_burn": "", "exchange": "pancake"}) == ""
+    assert skip_cat(pullable_pool({**base, "lp_burn": "", "exchange": "raydium"})) == "池子能被撤"
+
+    async def go():
+        db = DB(tmp_path / "lp.db")
+        await db.open()
+        try:
+            tr = Trader(_app(db, []))
+            tr.exec = {"solana": object()}
+            rep = {**GOOD, "chain": "solana", "lp_burn": "", "exchange": "raydium_cpmm"}
+            assert "池子没烧" in await tr.check("solana", "T", rep)
+            assert "池子没烧" not in await tr.check("solana", "T", {**rep, "lp_burn": "burn"})
+        finally:
+            await db.close()
+    asyncio.run(go())
