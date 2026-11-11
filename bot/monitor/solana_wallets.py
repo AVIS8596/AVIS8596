@@ -9,7 +9,11 @@
 
 省节点额度（免费版每月几百万次，取一笔交易就扣一次）：
 - 通知里带着交易日志：日志里只有转账 / 建账户 / 设手续费这类程序（没碰任何交易所、聚合器）的，直接跳过不去取交易；
-- 每天平均买 150 次以上的刷单型钱包不监听（单独跟会被"快手"规则拦掉，凑共振也是噪音）。
+- 平均每天买 50 个以上不同币的扫盘型钱包不监听（和找聪明钱时"每天 50 个币基本是扫盘机器人"同一个标准）；
+- 只是被别人的交易提到、自己很少买卖的钱包（比如收返佣 / 手续费的地址）不监听：每条通知都要花一次额度去取交易，
+  取回来发现不是它自己发起的，白花；收到 40 条以上通知、其中自己发起的不到 10% 就停 24 小时；
+- 取交易前等 1 秒（节点刚收到的交易常常还查不到，查不到再查又要花一次额度）；
+- 取交易和后面的分析分开排队：分析慢不会让新通知被丢掉。
 """
 from __future__ import annotations
 
@@ -34,6 +38,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.solmon")
 PER_CONN = 500
 REBUILD_MIN_SEC = 600
+FETCH_DELAY = 1.0
+MENTION_MIN, MENTION_OWN = 40, 0.1
+MENTION_SEC = 86400
 INVOKE_RE = re.compile(r"^Program (\w{32,44}) invoke \[\d+\]")
 # 这些程序本身不做买卖：一笔交易只碰了它们 = 转账 / 建关账户 / 设手续费 / 备注 / 投票质押，没必要去取交易内容
 NON_SWAP = {
@@ -91,7 +98,12 @@ class SolanaWalletMonitor:
         self.notes = 0                       # 收到并去处理的通知数
         self.failed = 0                      # 处理失败（取不到交易）的通知数
         self.skipped = 0                     # 看日志就知道不是买卖、没去取的通知数
-        self.noisy = 0                       # 刷单型、不监听的钱包数
+        self.noisy = 0                       # 扫盘型、不监听的钱包数
+        self.wstat: dict[str, list[int]] = {}   # 钱包 → [收到的通知数, 其中它自己发起的]
+        self.mention_out: dict[str, float] = {}  # 只是被提到的钱包 → 停止监听的时间
+        self._sig_tasks: set[asyncio.Task] = set()
+        self._sig_sem = asyncio.Semaphore(8)
+        self.sig_dropped = 0
         self.node = ""                       # 现在连的是哪个节点
         self.last_tx_err = ""
 
@@ -107,13 +119,15 @@ class SolanaWalletMonitor:
         if not h["wanted"]:
             return "Solana 链上监听：还没有要监听的钱包"
         if h["ok"]:
-            tail = f"，丢弃了 {h['dropped']} 条通知（节点额度跟不上）" if h["dropped"] else ""
+            tail = f"，丢弃了 {h['dropped']} 条通知（处理不过来）" if h["dropped"] else ""
             bad = (f"，{h['failed']}/{h['notes']} 条取交易失败" if h["notes"] >= 20 and h["failed"] * 5 > h["notes"] else "")
             node = f"（{self.node}）" if self.node else ""
             save = ""
             if self.skipped + self.notes:
                 save = f"，看日志跳过非买卖通知 {self.skipped / (self.skipped + self.notes) * 100:.0f}%"
-            noisy = f"，{self.noisy} 个刷单型钱包不监听" if self.noisy else ""
+            noisy = f"，{self.noisy} 个扫盘型钱包不监听" if self.noisy else ""
+            if self.mention_out:
+                noisy += f"，{len(self.mention_out)} 个只是被别人交易提到的钱包不监听"
             return f"Solana 链上监听{node}：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{bad}{save}{noisy}{tail}"
         return (f"Solana 链上监听：❌ 连不上，已断 {h['down_min']:.0f} 分钟（{h['err'] or '还在连接'}）"
                 f"——这期间 Solana 只剩 GMGN 交易流那一点信号")
@@ -160,18 +174,26 @@ class SolanaWalletMonitor:
                 await asyncio.sleep(3)              # 连接任务意外退出，稍等重建
 
     async def pick_wallets(self, n: int) -> list[str]:
-        """要监听的钱包：按评分取前 n 个，跳过刷单型（最近 7 天里有信号的日子平均每天买 150 次以上；手动加的不跳过）。"""
-        cap = float(self.app.cfg.get("smart_money.sol_max_daily_buys", 150) or 0)
-        rows = await self.app.db.active_wallets("solana", n * 2 if cap else n)
+        """要监听的钱包：按评分取前 n 个，跳过（手动加的不跳过）：
+        - 扫盘型：最近 7 天里有信号的日子，平均每天买 50 个以上不同的币；
+        - 只是被别人交易提到的（见 _handle），停 24 小时。"""
+        cap = float(self.app.cfg.get("smart_money.sol_max_daily_tokens", 50) or 0)
+        now = time.time()
+        for w, t in list(self.mention_out.items()):
+            if now - t >= MENTION_SEC:          # 24 小时到了：重新给它一次机会
+                self.mention_out.pop(w, None)
+                self.wstat.pop(w, None)
+        rows = await self.app.db.active_wallets("solana", n * 2)
         noisy: set[str] = set()
         if cap:
             for r in await self.app.db.fetchall(
-                    "SELECT wallet, COUNT(*) n, COUNT(DISTINCT CAST(ts / 86400 AS INTEGER)) d FROM signals "
+                    "SELECT wallet, COUNT(DISTINCT token) n, COUNT(DISTINCT CAST(ts / 86400 AS INTEGER)) d FROM signals "
                     "WHERE chain='solana' AND side='buy' AND ts>=? GROUP BY wallet HAVING n>?",
-                    (time.time() - 7 * 86400, cap)):
+                    (now - 7 * 86400, cap)):
                 if r["n"] / max(r["d"], 1) > cap:
                     noisy.add(r["wallet"])
-        keep = [w["address"] for w in rows if w.get("status") == "manual" or w["address"] not in noisy][:n]
+        skip = noisy | set(self.mention_out)
+        keep = [w["address"] for w in rows if w.get("status") == "manual" or w["address"] not in skip][:n]
         self.noisy = sum(1 for w in rows[:n] if w["address"] in noisy and w.get("status") != "manual")
         return keep
 
@@ -264,13 +286,43 @@ class SolanaWalletMonitor:
             if not self.live and not self.down_since:
                 self.down_since = time.time()
 
+    def _seen_tx(self, wallet: str, own: bool) -> None:
+        """记一笔：这条通知是不是钱包自己发起的。老是被别人的交易提到、自己很少发起的钱包，停止监听 24 小时。"""
+        st = self.wstat.setdefault(wallet, [0, 0])
+        st[0] += 1
+        st[1] += int(own)
+        if st[0] >= MENTION_MIN and st[1] < st[0] * MENTION_OWN and wallet not in self.mention_out:
+            self.mention_out[wallet] = time.time()
+            log.info("Solana 钱包 %s 收到 %d 条通知，只有 %d 条是它自己发起的（多半是收返佣 / 手续费的地址），停止监听 24 小时",
+                     wallet, st[0], st[1])
+            ev = getattr(self.app, "wallets_changed", {}).get("solana")
+            if ev:
+                ev.set()
+
+    async def _dispatch(self, s: Signal) -> None:
+        async with self._sig_sem:
+            try:
+                await self.app.hub.on_signal(s)
+            except Exception as e:  # noqa: BLE001
+                log.warning("处理 Solana 信号 %s 失败: %s", s.tx, e)
+
     async def _handle(self, sig: str, wallet: str) -> None:
         try:
+            await asyncio.sleep(FETCH_DELAY)    # 节点刚收到的交易常常还查不到：等一下再查，省掉"查不到再查"的额度
             tx = await self.app.sol.get_transaction(sig)
-            if not tx or signer(tx) != wallet:   # 只认钱包自己发起的交易，过滤空投/别人转账
+            if not tx:
+                return
+            own = signer(tx) == wallet
+            self._seen_tx(wallet, own)
+            if not own:                          # 只认钱包自己发起的交易，过滤空投/别人转账/被提到
                 return
             for s in parse_swaps(tx, wallet, sig):
-                await self.app.hub.on_signal(s)
+                if len(self._sig_tasks) >= 300:  # 分析排队太长：新信号先不分析（已经过时了）
+                    self.sig_dropped += 1
+                    continue
+                t = asyncio.create_task(self._dispatch(s))
+                self._sig_tasks.add(t)
+                t.add_done_callback(self._sig_tasks.discard)
         except Exception as e:  # noqa: BLE001
             self.failed += 1
             self.last_tx_err = str(e)[:200]

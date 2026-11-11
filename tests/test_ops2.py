@@ -1034,7 +1034,7 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
         assert rpc.eps[0].out and not rpc.out
         hits.clear()
         assert await rpc.call("getSlot") == 7 and hits == ["chainstack"]              # 10 分钟内不再敲 Helius
-        assert "额度用完" in await rpc.probe(rpc.eps[0]) and await rpc.probe(rpc.eps[1]) == "✅ 正常"
+        assert "额度用完" in await rpc.probe(rpc.eps[0]) and (await rpc.probe(rpc.eps[1])).startswith("✅ 正常，今天已用约")
         # Chainstack 也用完了（JSON 里报错的那种）→ 全部用不了：马上报错，不重试不等待
         state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"Monthly capacity limit exceeded"}}')
         try:
@@ -1130,8 +1130,21 @@ def test_worth_fetching_and_noisy_wallets(tmp_path):
                                          (now - day * 86400 - k * 10, "solana", w, f"T{k}", "buy", f"t{n}"))
             app = SimpleNamespace(db=db, cfg=SimpleNamespace(get=lambda k, d=None: d))
             sm = SolanaWalletMonitor(app)
-            assert await sm.pick_wallets(3) == ["MAN", "A", "B"] and sm.noisy == 1    # NOISY 每天 400 次：跳过
-            app.cfg = SimpleNamespace(get=lambda k, d=None: 0 if k.endswith("sol_max_daily_buys") else d)
+            assert await sm.pick_wallets(3) == ["MAN", "A", "B"] and sm.noisy == 1    # NOISY 每天买 200 多个币：跳过
+            # 只是被别人交易提到的钱包：40 条通知只有 2 条是自己发起的 → 停 24 小时
+            ev = asyncio.Event()
+            app.wallets_changed = {"solana": ev}
+            for i in range(40):
+                sm._seen_tx("B", i < 2)
+                sm._seen_tx("A", i % 2 == 0)                                          # A 一半是自己发起的：正常
+            assert set(sm.mention_out) == {"B"} and ev.is_set()
+            assert await sm.pick_wallets(3) == ["MAN", "A", "C"]
+            sm.wanted = 3
+            sm._up(0, 3)
+            assert "1 个只是被别人交易提到的钱包不监听" in sm.status_text()
+            sm.mention_out["B"] = time.time() - 86401                                # 24 小时到了：重新监听
+            assert await sm.pick_wallets(3) == ["MAN", "A", "B"] and "B" not in sm.wstat
+            app.cfg = SimpleNamespace(get=lambda k, d=None: 0 if k.endswith("sol_max_daily_tokens") else d)
             assert await sm.pick_wallets(3) == ["MAN", "NOISY", "A"]                 # 设成 0 = 不跳过
         finally:
             await db.close()
@@ -1174,4 +1187,35 @@ def test_solana_ws_switches_node_when_rejected(monkeypatch):
             assert rpc.ws_pick() is rpc.eps[1]
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(go())
+
+
+
+def test_solana_handle_waits_then_dispatches_separately(monkeypatch):
+    """取交易前等一下；分析放到单独的队列里（分析慢不占取交易的名额）；不是钱包自己发起的不算信号。"""
+    from bot.monitor import solana_wallets as sw
+
+    monkeypatch.setattr(sw, "FETCH_DELAY", 0.05)
+
+    async def go():
+        got, gate = [], asyncio.Event()
+
+        async def on_signal(s):
+            await gate.wait()                  # 分析很慢
+            got.append(s.tx)
+
+        async def get_transaction(sig):
+            return {"sig": sig}
+        monkeypatch.setattr(sw, "signer", lambda tx: "W" if tx["sig"] != "OTHER" else "X")
+        monkeypatch.setattr(sw, "parse_swaps", lambda tx, w, sig: [SimpleNamespace(tx=sig)])
+        app = SimpleNamespace(sol=SimpleNamespace(get_transaction=get_transaction), hub=SimpleNamespace(on_signal=on_signal))
+        sm = sw.SolanaWalletMonitor(app)
+        t0 = time.time()
+        await sm._handle("S1", "W")
+        await sm._handle("OTHER", "W")
+        assert time.time() - t0 >= 0.1                                        # 每次都先等了一下
+        assert len(sm._sig_tasks) == 1 and got == [] and sm.wstat["W"] == [2, 1]   # _handle 已经返回，分析还在排队
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert got == ["S1"] and not sm._sig_tasks
     asyncio.run(go())

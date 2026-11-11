@@ -81,6 +81,8 @@ class Endpoint:
     calls: int = 0               # 成功的请求数（启动以来）
     blocked: dict = None         # 这个节点不让用的方法 → (到什么时候, 原因)；密钥有效但套餐不含这个方法时
     key_ok_at: float = 0.0       # 上次确认密钥有效（getSlot 成功）的时间
+    day: int = 0                 # 今天（UTC 日期编号）
+    today: int = 0               # 今天发了多少次请求（大致等于用掉的额度）
 
     def __post_init__(self) -> None:
         self.blocked = {}
@@ -179,6 +181,10 @@ class SolanaRPC:
 
     async def _post(self, ep: Endpoint, body: dict, retries: int, trade: bool) -> Any:
         method = str(body.get("method"))
+        d = int(time.time() // 86400)
+        if ep.day != d:
+            ep.day, ep.today = d, 0
+        ep.today += 1
         try:
             r = await self.http.post(ep.svc + ("_trade" if trade else ""), ep.http, json_body=body, retries=retries)
         except QuotaError:
@@ -247,7 +253,8 @@ class SolanaRPC:
                 return f"❌ {str(r['error'])[:150]}"
             now = time.time()
             no = [m for m, (until, _) in ep.blocked.items() if until > now]
-            return "✅ 正常" + (f"（套餐不含：{'、'.join(no)}，这些改用别的节点 / GMGN）" if no else "")
+            used = f"，今天已用约 {ep.today:,} 次" if ep.today else ""
+            return "✅ 正常" + used + (f"（套餐不含：{'、'.join(no)}，这些改用别的节点 / GMGN）" if no else "")
         except Exception as e:  # noqa: BLE001
             return f"❌ {ep.out_why or str(e)[:150] or type(e).__name__}"
 
