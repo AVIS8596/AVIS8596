@@ -1445,3 +1445,14 @@ def test_pool_gone_detected_even_without_dynamic_mode():
         assert await pm._pool_gone(p, entry, {"liquidity": 12000, "price": 0.5}) == ""   # 只是变小
         assert await pm._pool_gone(p, {"liquidity": 3000}, {"liquidity": 0}) == ""        # 买入时池子就很小：不判断
     asyncio.run(go())
+
+
+def test_gm_extra_keys_do_not_clobber_report_lists():
+    """新记录的 GMGN 字段不能和报告里已有的字段重名（11-12：sniper_wallets 被写成数字，分析全部报错）。"""
+    from bot.analysis.analyzer import gm_extra, gsec_extra
+    keys = set(gm_extra({"stat": {"fresh_wallet_rate": 0.3}, "tags_stat": {"sniper_wallets": 4}, "link": {}})) | \
+        set(gsec_extra({"rug_ratio": 0.1, "sniper_count": 3}))
+    reserved = {f"{c}_wallets" for c in ("bundle", "insider", "sniper", "smart")} | {
+        "smart_buyers", "risks", "warnings", "reasons", "clusters", "price", "liquidity", "holders", "score"}
+    assert not keys & reserved, keys & reserved
+    assert gm_extra({"stat": {}, "tags_stat": {"sniper_wallets": 4}, "link": {}})["sniper_tag_n"] == 4

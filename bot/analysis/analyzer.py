@@ -55,7 +55,7 @@ def gm_extra(ov: dict) -> dict:
             "bluechip_pct": round(_pct(st.get("bluechip_owner_percentage")), 2),
             "entrap_pct": round(_pct(st.get("top_entrapment_trader_percentage")), 2),
             "rat_top_pct": round(_pct(st.get("top_rat_trader_percentage")), 2),
-            "fresh_n": int(f(tg.get("fresh_wallets"))), "sniper_wallets": int(f(tg.get("sniper_wallets"))),
+            "fresh_n": int(f(tg.get("fresh_wallets"))), "sniper_tag_n": int(f(tg.get("sniper_wallets"))),
             "has_x": int(bool(link.get("twitter_username"))), "has_web": int(bool(link.get("website"))),
             "has_tg": int(bool(link.get("telegram")))}
 
@@ -655,7 +655,7 @@ class Analyzer:
             feats["dev_sold"] = rep.get("dev_sold", 0)
             feats["lp_burned"] = int(rep.get("lp_burn") == "burn")
             feats["gang_n"] = rep.get("gang_n", 0)
-            for k in ("fresh_pct", "bot_pct", "bluechip_pct", "entrap_pct", "rat_top_pct", "fresh_n", "sniper_wallets",
+            for k in ("fresh_pct", "bot_pct", "bluechip_pct", "entrap_pct", "rat_top_pct", "fresh_n", "sniper_tag_n",
                       "has_x", "has_web", "has_tg", "rug_ratio_pct", "rat_trade_pct", "bundler_trade_pct", "wash",
                       "sniper_n", "exchange"):
                 if k in rep:
