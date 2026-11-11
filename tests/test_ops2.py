@@ -1053,6 +1053,32 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
         state["helius"] = (502, "bad gateway")
         state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"result":11}')
         assert await rpc.call("getSlot", retries=0) == 11 and not rpc.eps[0].out
+        # 密钥有效、只是套餐不含某个方法（403）：只有这个方法改用别的节点，其他照常用 Helius
+        bodies = []
+        orig_request = Sess.request
+
+        def picky(self, method, url, **kw):
+            who = "helius" if "helius" in url else "chainstack"
+            m = (kw.get("json") or {}).get("method")
+            bodies.append((who, m))
+            if who == "helius" and m == "getTokenAccountsByOwner":
+                return Resp(403, "Method not available on your plan")
+            if who == "helius":
+                return Resp(200, '{"jsonrpc":"2.0","id":1,"result":5}')
+            return Resp(200, '{"jsonrpc":"2.0","id":1,"result":11}')
+        Sess.request = picky
+        rpc.eps[0].key_ok_at = 0                                                     # 1 分钟内没确认过密钥
+        try:
+            assert await rpc.call("getTokenAccountsByOwner", ["w"], retries=0) == 11
+            assert not rpc.eps[0].out and not rpc.eps[0].can("getTokenAccountsByOwner")
+            assert ("helius", "getSlot") in bodies                                   # 先验了一下密钥
+            bodies.clear()
+            assert await rpc.call("getTokenAccountsByOwner", ["w"], retries=0) == 11
+            assert bodies == [("chainstack", "getTokenAccountsByOwner")]              # 1 小时内直接用别的节点
+            assert await rpc.call("getAccountInfo", ["x"], retries=0) == 5            # 别的方法照常用 Helius
+            assert "套餐不含：getTokenAccountsByOwner" in await rpc.probe(rpc.eps[0])
+        finally:
+            Sess.request = orig_request
         # key 无效：1 小时内不用它
         state["helius"] = (401, "unauthorized")
         assert await rpc.call("getSlot", retries=0) == 11 and rpc.eps[0].out

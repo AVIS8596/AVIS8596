@@ -79,6 +79,15 @@ class Endpoint:
     ws_out_until: float = 0.0    # WebSocket 被拒到什么时候
     ws_why: str = ""
     calls: int = 0               # 成功的请求数（启动以来）
+    blocked: dict = None         # 这个节点不让用的方法 → (到什么时候, 原因)；密钥有效但套餐不含这个方法时
+    key_ok_at: float = 0.0       # 上次确认密钥有效（getSlot 成功）的时间
+
+    def __post_init__(self) -> None:
+        self.blocked = {}
+
+    def can(self, method: str) -> bool:
+        b = self.blocked.get(method)
+        return not b or time.time() >= b[0]
 
     @property
     def out(self) -> bool:
@@ -154,20 +163,46 @@ class SolanaRPC:
                         f"先用 {rest[0]}" if rest else "没有别的节点了，分析改用 GMGN 数据")
         ep.out_until, ep.out_why = time.time() + sec, why
 
+    async def _key_ok(self, ep: Endpoint) -> bool:
+        """密钥本身有没有效（getSlot 能不能成功）。1 分钟内确认过就不再问。"""
+        if time.time() - ep.key_ok_at < 60:
+            return True
+        try:
+            r = await asyncio.wait_for(self.http.post(ep.svc, ep.http, json_body={
+                "jsonrpc": "2.0", "id": 0, "method": "getSlot", "params": []}, retries=1), 10)
+        except Exception:  # noqa: BLE001
+            return False
+        if isinstance(r, dict) and "result" in r:
+            ep.key_ok_at = time.time()
+            return True
+        return False
+
     async def _post(self, ep: Endpoint, body: dict, retries: int, trade: bool) -> Any:
+        method = str(body.get("method"))
         try:
             r = await self.http.post(ep.svc + ("_trade" if trade else ""), ep.http, json_body=body, retries=retries)
         except QuotaError:
             self._mark_out(ep, "额度用完")
             raise
-        except PlanError:
-            self._mark_out(ep, "地址里的密钥无效（401 / 403）：没复制全，或者在节点后台换过密钥", BAD_KEY_SEC)
+        except PlanError as e:
+            msg = " ".join(str(e.body or "").split())[:120]
+            # 401 / 403 可能是密钥无效（整个节点不能用），也可能只是套餐不含这个方法：用 getSlot 验一下密钥
+            if method != "getSlot" and await self._key_ok(ep):
+                if ep.can(method):
+                    log.warning("Solana 节点 %s 不让用 %s（HTTP %s：%s），1 小时内这个方法改用别的节点",
+                                ep.name, method, e.status, msg)
+                ep.blocked[method] = (time.time() + BAD_KEY_SEC, f"HTTP {e.status}：{msg}")
+            else:
+                self._mark_out(ep, f"地址里的密钥无效（HTTP {e.status}：{msg}）：没复制全，或者在节点后台换过密钥",
+                               BAD_KEY_SEC)
             raise
         err = r.get("error") if isinstance(r, dict) else None
         if err and is_quota_text(str(err)):
             self._mark_out(ep, "额度用完")
             raise QuotaError(ep.svc, 429, str(err))
         ep.calls += 1
+        if method == "getSlot" or not err:
+            ep.key_ok_at = time.time()
         if ep.out_since:
             log.info("Solana 节点 %s 恢复（停了 %.0f 分钟）", ep.name, (time.time() - ep.out_since) / 60)
             ep.out_since, ep.out_why = 0.0, ""
@@ -178,7 +213,7 @@ class SolanaRPC:
         last: Exception | None = None
         tried = 0
         for ep in self.eps:
-            if ep.out:
+            if ep.out or not ep.can(method):
                 continue
             tried += 1
             self._id += 1
@@ -195,7 +230,8 @@ class SolanaRPC:
                 raise RpcError(f"{method}: {r['error']}")
             return r.get("result") if isinstance(r, dict) else None
         if not tried or isinstance(last, (QuotaError, PlanError)):
-            whys = "；".join(f"{ep.name} {ep.out_why or '用不了'}" for ep in self.eps) or "没有配置 Solana 节点"
+            whys = "；".join(f"{ep.name} {ep.out_why or (ep.blocked.get(method) or (0, '用不了'))[1]}"
+                            for ep in self.eps) or "没有配置 Solana 节点"
             wait = max(0.0, self.out_until - time.time()) / 60
             raise QuotaOut(f"Solana 节点都用不了（{whys}），{wait:.0f} 分钟后再试") from last
         raise last or RpcError(f"{method}: 没有可用的 Solana 节点")
@@ -209,7 +245,9 @@ class SolanaRPC:
                                                   0, False), 8)
             if isinstance(r, dict) and r.get("error"):
                 return f"❌ {str(r['error'])[:150]}"
-            return "✅ 正常"
+            now = time.time()
+            no = [m for m, (until, _) in ep.blocked.items() if until > now]
+            return "✅ 正常" + (f"（套餐不含：{'、'.join(no)}，这些改用别的节点 / GMGN）" if no else "")
         except Exception as e:  # noqa: BLE001
             return f"❌ {ep.out_why or str(e)[:150] or type(e).__name__}"
 
