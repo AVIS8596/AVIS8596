@@ -23,6 +23,7 @@ import logging
 import random
 import re
 import time
+from collections import deque
 from typing import TYPE_CHECKING
 
 import websockets
@@ -43,6 +44,7 @@ SUB_GAP = 0.12          # 订阅请求之间隔多久：每秒约 8 个（Chains
 SUB_RETRY = 3.0         # 订阅被节点拒绝（超频）后多久重发
 MENTION_MIN, MENTION_OWN = 40, 0.1
 MENTION_SEC = 86400
+BUSY_PER_H = 30         # 一个钱包 1 小时推来 30 条以上通知：交易机器人，不监听 24 小时（看通知数就知道，不用花额度）
 INVOKE_RE = re.compile(r"^Program (\w{32,44}) invoke \[\d+\]")
 # 这些程序本身不做买卖：一笔交易只碰了它们 = 转账 / 建关账户 / 设手续费 / 备注 / 投票质押，没必要去取交易内容
 NON_SWAP = {
@@ -104,6 +106,8 @@ class SolanaWalletMonitor:
         self.noisy = 0                       # 扫盘型、不监听的钱包数
         self.wstat: dict[str, list[int]] = {}   # 钱包 → [收到的通知数, 其中它自己发起的]
         self.mention_out: dict[str, float] = {}  # 只是被提到的钱包 → 停止监听的时间
+        self.busy_out: dict[str, float] = {}     # 通知太频繁的钱包（交易机器人）→ 停止监听的时间
+        self.wrate: dict[str, deque] = {}        # 钱包 → 最近的通知时间
         self._sig_tasks: set[asyncio.Task] = set()
         self._sig_sem = asyncio.Semaphore(8)
         self.sig_dropped = 0
@@ -131,6 +135,8 @@ class SolanaWalletMonitor:
             noisy = f"，{self.noisy} 个扫盘型钱包不监听" if self.noisy else ""
             if self.mention_out:
                 noisy += f"，{len(self.mention_out)} 个只是被别人交易提到的钱包不监听"
+            if self.busy_out:
+                noisy += f"，{len(self.busy_out)} 个交易太频繁（1 小时 {BUSY_PER_H} 条以上）的钱包不监听"
             return f"Solana 链上监听{node}：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{bad}{save}{noisy}{tail}"
         return (f"Solana 链上监听：❌ 连不上，已断 {h['down_min']:.0f} 分钟（{h['err'] or '还在连接'}）"
                 f"——这期间 Solana 只剩 GMGN 交易流那一点信号")
@@ -186,6 +192,10 @@ class SolanaWalletMonitor:
             if now - t >= MENTION_SEC:          # 24 小时到了：重新给它一次机会
                 self.mention_out.pop(w, None)
                 self.wstat.pop(w, None)
+        for w, t in list(self.busy_out.items()):
+            if now - t >= MENTION_SEC:
+                self.busy_out.pop(w, None)
+                self.wrate.pop(w, None)
         rows = await self.app.db.active_wallets("solana", n * 2)
         noisy: set[str] = set()
         if cap:
@@ -195,7 +205,7 @@ class SolanaWalletMonitor:
                     (now - 7 * 86400, cap)):
                 if r["n"] / max(r["d"], 1) > cap:
                     noisy.add(r["wallet"])
-        skip = noisy | set(self.mention_out)
+        skip = noisy | set(self.mention_out) | set(self.busy_out)
         keep = [w["address"] for w in rows if w.get("status") == "manual" or w["address"] not in skip][:n]
         self.noisy = sum(1 for w in rows[:n] if w["address"] in noisy and w.get("status") != "manual")
         return keep
@@ -288,7 +298,11 @@ class SolanaWalletMonitor:
                                 wallet = subs.get(p.get("subscription"))
                                 val = (p.get("result") or {}).get("value") or {}
                                 sig = val.get("signature")
-                                if not wallet or not sig or val.get("err") is not None:
+                                if not wallet or not sig:
+                                    continue
+                                if self._busy(wallet):          # 交易机器人：通知太多，不取
+                                    continue
+                                if val.get("err") is not None:
                                     continue
                                 if not worth_fetching(val.get("logs")):
                                     self.skipped += 1            # 只是转账 / 建账户之类：不花额度去取
@@ -329,6 +343,23 @@ class SolanaWalletMonitor:
             self.live.pop(cid, None)
             if not self.live and not self.down_since:
                 self.down_since = time.time()
+
+    def _busy(self, wallet: str, now: float | None = None) -> bool:
+        """这个钱包是不是交易机器人：1 小时推来 BUSY_PER_H 条以上通知。是的话停止监听 24 小时。
+        11-12：订阅真正生效后 1 小时 4 万多条通知处理不过来，大头是少数交易机器人——数通知不花额度，取交易才花。"""
+        if wallet in self.busy_out:
+            return True
+        now = now or time.time()
+        q = self.wrate.setdefault(wallet, deque(maxlen=BUSY_PER_H))
+        q.append(now)
+        if len(q) >= BUSY_PER_H and now - q[0] < 3600:
+            self.busy_out[wallet] = now
+            log.info("Solana 钱包 %s 1 小时内推来 %d 条以上通知（交易机器人），停止监听 24 小时", wallet, BUSY_PER_H)
+            ev = getattr(self.app, "wallets_changed", {}).get("solana")
+            if ev:
+                ev.set()
+            return True
+        return False
 
     def _seen_tx(self, wallet: str, own: bool) -> None:
         """记一笔：这条通知是不是钱包自己发起的。老是被别人的交易提到、自己很少发起的钱包，停止监听 24 小时。"""

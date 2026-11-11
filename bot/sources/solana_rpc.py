@@ -83,6 +83,7 @@ class Endpoint:
     key_ok_at: float = 0.0       # 上次确认密钥有效（getSlot 成功）的时间
     day: int = 0                 # 今天（UTC 日期编号）
     today: int = 0               # 今天发了多少次请求（大致等于用掉的额度）
+    since: float = 0.0           # today 从什么时候开始数（启动 / 换日）
 
     def __post_init__(self) -> None:
         self.blocked = {}
@@ -183,7 +184,7 @@ class SolanaRPC:
         method = str(body.get("method"))
         d = int(time.time() // 86400)
         if ep.day != d:
-            ep.day, ep.today = d, 0
+            ep.day, ep.today, ep.since = d, 0, time.time()
         ep.today += 1
         try:
             r = await self.http.post(ep.svc + ("_trade" if trade else ""), ep.http, json_body=body, retries=retries)

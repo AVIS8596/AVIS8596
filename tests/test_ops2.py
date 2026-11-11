@@ -1312,7 +1312,7 @@ def test_watchdog_reports_any_problem(tmp_path, monkeypatch):
             # Solana 节点：Chainstack 照今天的速度会超预算
             from bot.sources.solana_rpc import Endpoint
             ep = Endpoint("Chainstack", "https://x", "wss://x", "solrpc1")
-            ep.day, ep.today = int(now // 86400), 10 ** 9
+            ep.day, ep.today, ep.since = int(now // 86400), 10 ** 9, now - 7200
             app.sol = SimpleNamespace(eps=[ep], out=False)
             app.gmgn = SimpleNamespace(paused_until=now + 900, bans=3)
             # 10 小时前买过最后一笔；最近 8 笔全亏
@@ -1329,7 +1329,7 @@ def test_watchdog_reports_any_problem(tmp_path, monkeypatch):
             for _ in range(30):
                 _logging.getLogger("memebot.solmon").warning("Solana WS 断开（%s），%ds 后重连", "x", 2)
             _logging.getLogger("other.lib").error("不是机器人自己的日志")
-            if now % 86400 < 2 * 3600:                             # UTC 当天刚开始 2 小时内不估算额度
+            if now % 86400 < 3600:                                 # UTC 当天开始不到 1 小时：不估算额度
                 ep.day = -1
             dog = wd.Watchdog(app)
             probs = await dog.problems(now)
@@ -1398,3 +1398,18 @@ def test_solana_subscriptions_paced_and_retried(monkeypatch):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     asyncio.run(go())
+
+
+
+def test_busy_wallets_dropped_without_spending_quota():
+    """1 小时推来 30 条以上通知的钱包（交易机器人）：停止监听 24 小时，之后的通知直接丢、不花额度取交易。"""
+    from bot.monitor import solana_wallets as sw
+
+    ev = asyncio.Event()
+    sm = sw.SolanaWalletMonitor(SimpleNamespace(wallets_changed={"solana": ev}))
+    t0 = time.time()
+    assert not any(sm._busy("CALM", t0 + i * 300) for i in range(12))        # 1 小时 12 条：正常
+    hits = [sm._busy("BOT", t0 + i * 10) for i in range(sw.BUSY_PER_H)]
+    assert not any(hits[:-1]) and hits[-1] and "BOT" in sm.busy_out and ev.is_set()
+    assert sm._busy("BOT", t0 + 9999)
+    assert not any(sm._busy("SLOW", t0 + i * 200) for i in range(40))       # 40 条但分散在 2 小时多：不算

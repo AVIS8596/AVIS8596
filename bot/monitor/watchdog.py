@@ -168,12 +168,12 @@ class Watchdog:
                 out["sol_nodes"] = (f"🚨 <b>Solana 节点全部用不了</b>（{html.escape(whys)}）\n"
                                     f"期间代币分析改用 GMGN 的数据，Solana 链上监听也会断。\n{node_hint(whys)}")
             budgets = {**BUDGET, **(self.app.cfg.get("safety.node_daily_budget", {}) or {})}
-            day_frac = (now % 86400) / 86400
             for ep in sol.eps:
                 cap = float(budgets.get(ep.name, 0) or 0)
-                if not cap or ep.day != int(now // 86400) or day_frac < 2 / 24:
+                start = max(float(getattr(ep, "since", 0) or 0), now - now % 86400)
+                if not cap or ep.day != int(now // 86400) or now - start < 3600:
                     continue
-                proj = ep.today / day_frac
+                proj = ep.today / ((now - start) / 86400)      # 按开始计数以来的速度折算成一天
                 if proj > cap * 1.3:
                     out[f"budget_{ep.name}"] = (
                         f"⚠️ <b>{ep.name} 额度用得太快</b>：今天（UTC）已用约 {ep.today:,} 次，照这个速度一天约 {proj:,.0f} 次，"
