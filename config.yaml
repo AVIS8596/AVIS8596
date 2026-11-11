@@ -284,6 +284,8 @@ strategies:
     max_insider_rate: 0.15
     max_creator_rate: 0.05
     max_per_day: 6
+    exp_min_holders: 50           # 早期实验仓（11-12）：持有人 50~min_holders 之间也买，仓位 × trading.experiment.size_mult（¼）
+    exp_max_per_day: 20           # 早期实验仓单独每天最多 20 笔，不占上面 6 笔的名额；trading.experiment.enabled=false 时一起关
     persist_sec: 60               # 论证：达标后隔 1 分钟再看一次，仍达标、持有人没减少才继续
     min_token_score: 50           # 论证：完整分析的代币评分要 ≥ 50
   narrative:                      # 强叙事：KOL / 聪明钱 / 引用大号新推文 / 项目粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分

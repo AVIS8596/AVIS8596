@@ -402,7 +402,7 @@ class Trader:
         if amount <= 0:
             return
         reason = f"{reason} | {TIER_NAME[tier]}"
-        if reason.startswith(EXPERIMENT):       # 实验仓：小仓位多收集真实成交数据
+        if reason.startswith(EXPERIMENT) or "实验仓" in reason:   # 实验仓：小仓位多收集真实成交数据
             m = float((self.cfg.get("trading.experiment", {}) or {}).get("size_mult", 0.25))
             amount = round(amount * m, 4)
             reason += f" | 实验仓 ×{m:g}"

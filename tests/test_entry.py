@@ -380,4 +380,7 @@ def test_new_token_experiment_lane():
         assert len(calls) == 2
         from bot.trade.sizing import source_of
         assert source_of(calls[1]) == "新币实验仓"
+        assert source_of("早期建仓（快毕业，持有人 3 分钟 40→60 +50%）（实验仓：持有人 60 不到 100）、代币评分 70 | 一般") \
+            == "早期实验仓"
+        assert source_of("早期建仓（快毕业，持有人 3 分钟 100→140 +40%）、代币评分 70 | 一般") == "早期建仓"
     asyncio.run(go())

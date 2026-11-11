@@ -100,8 +100,8 @@ async def daily_review(app: "App", start: float) -> str:
                      f"胜率 {wins / len(closed) * 100:.0f}%，已实现 <b>{fmt_usd(pnl)}</b>")
         lines += payoff_lines(closed)
         lines.append("<b>按买入来源</b>")
-        lines += _group(closed, lambda p: ("试探仓" if "试探仓" in (p.get("reason") or "") else
-                                           re.split(r"[（(|]", p.get("reason") or "其他")[0].strip() or "其他"))
+        from .sizing import source_of
+        lines += _group(closed, lambda p: source_of(p.get("reason")))
         lines.append("<b>按档位</b>")
         lines += _group(closed, lambda p: TIER_LABEL.get(p.get("tier"), "老持仓"))
         lines.append("<b>按卖出原因</b>（最后一笔）")
@@ -157,7 +157,7 @@ async def daily_review(app: "App", start: float) -> str:
 
 
 MODE_TEXT = {"off": "已关闭", "shadow": "观察中，只记录不执行", "live": "已接管卖出"}
-FUNNEL_SRC = {"跟单": "跟单", "聪明钱共振+高评分": "跟单", "新币高评分": "新币", "新币实验仓": "新币", "早期建仓": "主动建仓", "强叙事": "主动建仓",
+FUNNEL_SRC = {"跟单": "跟单", "聪明钱共振+高评分": "跟单", "新币高评分": "新币", "新币实验仓": "新币", "早期建仓": "主动建仓", "早期实验仓": "主动建仓", "强叙事": "主动建仓",
               "模型买入": "模型"}
 
 

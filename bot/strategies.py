@@ -36,6 +36,7 @@ EARLY_DEFAULTS = {
     "min_holder_growth_pct": 15, "min_volume": 15000, "max_rug_ratio": 0.2, "max_top10_rate": 0.3,
     "max_bundler_rate": 0.15, "max_insider_rate": 0.15, "max_creator_rate": 0.05, "max_per_day": 6,
     "persist_sec": 60, "min_token_score": 50,
+    "exp_min_holders": 50, "exp_max_per_day": 20,   # 早期实验仓：持有人 50 起就买（¼ 仓位），单独每天最多 20 笔
 }
 NARRATIVE_DEFAULTS = {
     "enabled": True, "min_score": 60, "max_age_hours": 24, "min_holders": 150, "min_volume": 30000,
@@ -111,8 +112,10 @@ def early_status(it: dict, hist: deque, now: float, cfg: dict) -> tuple[str, str
     if created and now - created > float(cfg["max_age_min"]) * 60:
         return "", f"发币超过 {float(cfg['max_age_min']) / 60:g} 小时"
     holders = int(f(it.get("holder_count")))
-    if holders < int(cfg["min_holders"]):
-        return "", f"持有人 {holders}（要 ≥ {cfg['min_holders']}）"
+    need_h, exp = int(cfg["min_holders"]), int(cfg.get("exp_min_holders", 0) or 0)
+    trial = bool(exp) and exp <= holders < need_h   # 人还少：按实验仓（¼ 仓位）买，多收集早期数据
+    if holders < need_h and not trial:
+        return "", f"持有人 {holders}（要 ≥ {need_h}" + (f"，实验仓 ≥ {exp}" if exp and exp < need_h else "") + "）"
     if volume(it) < float(cfg["min_volume"]):
         return "", f"成交 ${volume(it):,.0f}（要 ≥ ${float(cfg['min_volume']):,.0f}）"
     prob = structure_problem(it, cfg)
@@ -134,7 +137,8 @@ def early_status(it: dict, hist: deque, now: float, cfg: dict) -> tuple[str, str
     if int(f(it.get("renowned_count"))):
         extra.append(f"KOL {int(f(it.get('renowned_count')))}")
     return (f"{EARLY}（快毕业，持有人 {mins:.0f} 分钟 {h0}→{holders} +{growth:.0f}%"
-            + ("，" + "，".join(extra) if extra else "") + "）"), ""
+            + ("，" + "，".join(extra) if extra else "") + "）"
+            + (f"（实验仓：持有人 {holders} 不到 {need_h}）" if trial else "")), ""
 
 
 def early_signal(it: dict, hist: deque, now: float, cfg: dict) -> str:
@@ -230,7 +234,10 @@ class Strategies:
 
     def conf(self, name: str) -> dict:
         base = EARLY_DEFAULTS if name == "early" else NARRATIVE_DEFAULTS
-        return {**base, **(self.cfg.get(f"strategies.{name}", {}) or {})}
+        c = {**base, **(self.cfg.get(f"strategies.{name}", {}) or {})}
+        if name == "early" and not (self.cfg.get("trading.experiment", {}) or {}).get("enabled", True):
+            c["exp_min_holders"] = 0          # 实验仓总开关关了：早期建仓也不开实验仓
+        return c
 
     async def run(self, chain: str) -> None:
         poll = float(self.cfg.get("strategies.poll_sec", 30))
@@ -474,6 +481,15 @@ class Strategies:
         prefix = EARLY if name == "early" else NARRATIVE
         c = self.conf(name)
         now = time.time()
+        if "实验仓" in reason:              # 实验仓单独计数，不占正常名额
+            n = await self.app.db.fetchone(
+                "SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND reason LIKE '%实验仓%' AND opened_at>=?",
+                (prefix + "%", self.app.day_start()))
+            if n and n["n"] >= int(c.get("exp_max_per_day", 20)):
+                await self.app.db.execute("INSERT INTO strat_log(ts,chain,token,msg,price) VALUES(?,?,?,?,?)",
+                                          (now, chain, token, f"{prefix}：实验仓今天已经买满 {n['n']} 笔，跳过", 0))
+                return
+            return await self._fire_go(chain, token, reason, tier, prefix, c, now)
         per_hour = int(self.cfg.get("strategies.max_per_hour", 2))
         if sum(1 for t in self.attempts if now - t < 3600) >= per_hour:
             log.info("主动建仓这 1 小时已经 %d 笔，跳过 %s", per_hour, token)
@@ -481,13 +497,16 @@ class Strategies:
                                       (now, chain, token, f"{prefix}：达标，但这 1 小时已经买了 {per_hour} 笔，跳过", 0))
             return
         n = await self.app.db.fetchone(
-            "SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
+            "SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND reason NOT LIKE '%实验仓%' AND opened_at>=?",
             (prefix + "%", self.app.day_start()))
         if n and n["n"] >= int(c["max_per_day"]):
             log.info("%s 今天已买 %d 笔，达到上限，跳过 %s", prefix, n["n"], token)
             await self.app.db.execute("INSERT INTO strat_log(ts,chain,token,msg,price) VALUES(?,?,?,?,?)",
                                       (now, chain, token, f"{prefix}：达标，但今天已经买满 {n['n']} 笔，跳过", 0))
             return
+        await self._fire_go(chain, token, reason, tier, prefix, c, now)
+
+    async def _fire_go(self, chain: str, token: str, reason: str, tier: str, prefix: str, c: dict, now: float) -> None:
         rep = await self.app.analyzer.analyze(chain, token, source=prefix)
         if not rep:
             return
@@ -496,7 +515,8 @@ class Strategies:
                                        f"论证：代币评分 {rep.get('score')} 低于 {c['min_token_score']}")
             return
         reason += f"、代币评分 {rep.get('score')}"
-        self.attempts.append(now)
+        if "实验仓" not in reason:
+            self.attempts.append(now)        # 实验仓不占正常的每小时名额
         log.info("触发%s %s：%s", prefix, rep.get("symbol"), reason)
         await self.app.hub.confirm_and_buy(chain, token, rep, reason, wallets=rep.get("smart_buyers") or [],
                                            tier=tier)

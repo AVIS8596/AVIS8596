@@ -34,7 +34,18 @@ def test_structure_and_early():
     # 结构不干净 / 太老 / 持有人太少
     assert early_signal({**CLEAN, "top_10_holder_rate": 0.5}, h, NOW, EARLY_DEFAULTS) == ""
     assert early_signal({**CLEAN, "created_timestamp": NOW - 5 * 3600}, h, NOW, EARLY_DEFAULTS) == ""
-    assert early_signal({**CLEAN, "holder_count": 90}, deque([(NOW - 180, 60)]), NOW, EARLY_DEFAULTS) == ""
+    no_exp = {**EARLY_DEFAULTS, "exp_min_holders": 0}
+    assert early_signal({**CLEAN, "holder_count": 90}, deque([(NOW - 180, 60)]), NOW, no_exp) == ""
+    # 早期实验仓：持有人 50~min_holders 之间也算达标，理由里标「实验仓」；50 以下照样不要
+    cfg = {**EARLY_DEFAULTS, "min_holders": 100, "exp_min_holders": 50}
+    why = early_signal({**CLEAN, "holder_count": 90}, deque([(NOW - 180, 60)]), NOW, cfg)
+    assert why.startswith("早期建仓") and "实验仓：持有人 90 不到 100" in why
+    assert "实验仓" not in early_signal(CLEAN, h, NOW, cfg)          # 人够了就是正常仓
+    from bot.strategies import early_status
+    assert "实验仓 ≥ 50" in early_status({**CLEAN, "holder_count": 40}, deque([(NOW - 180, 20)]), NOW, cfg)[1]
+    st = Strategies(SimpleNamespace(cfg=SimpleNamespace(
+        get=lambda k, d=None: {"enabled": False} if k == "trading.experiment" else d)))
+    assert st.conf("early")["exp_min_holders"] == 0                  # 实验仓总开关关了，早期也不开
 
 
 def test_narrative_score():
@@ -119,6 +130,8 @@ def test_fire_requires_token_score_and_hourly_cap(tmp_path):
 
         async def confirm_and_buy(chain, token, rep, reason, wallets=None, tier=None):
             calls["buy"].append((token, reason))
+            await db.execute("INSERT INTO positions(chain,token,symbol,status,reason,opened_at) VALUES(?,?,?,?,?,?)",
+                             (chain, token, token, "open", reason, time.time()))
 
         app = SimpleNamespace(cfg=SimpleNamespace(get=lambda k, d=None: d), db=db, day_start=lambda: 0,
                               analyzer=SimpleNamespace(analyze=analyze), trader=SimpleNamespace(skip=skip),
@@ -130,6 +143,15 @@ def test_fire_requires_token_score_and_hourly_cap(tmp_path):
             await st.fire("solana", t, "强叙事（80 分）", "normal")
         assert [b[0] for b in calls["buy"]] == ["OK1", "OK2"]        # 每小时最多 2 笔
         assert "代币评分 70" in calls["buy"][0][1]
+        # 实验仓不占正常的每小时 / 每天名额，单独每天限量
+        reps.update({f"E{i}": {"symbol": f"E{i}", "score": 70} for i in range(4)})
+        await db.execute("INSERT INTO positions(chain,token,symbol,status,reason,opened_at) VALUES(?,?,?,?,?,?)",
+                         ("solana", "X", "X", "open", "早期建仓（…）（实验仓：持有人 60 不到 100）", time.time()))
+        st.cfg = SimpleNamespace(get=lambda k, d=None: {"exp_max_per_day": 3} if k == "strategies.early" else d)
+        for i in range(4):
+            await st.fire("solana", f"E{i}", "早期建仓（快毕业）（实验仓：持有人 60 不到 100）", "normal")
+        assert [b[0] for b in calls["buy"][2:]] == ["E0", "E1"]        # 已有 1 笔，上限 3
+        assert "代币评分 70" in calls["buy"][-1][1] and "实验仓" in calls["buy"][-1][1]
         await db.close()
 
     asyncio.run(go())
