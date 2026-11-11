@@ -28,6 +28,16 @@ class QuotaError(ApiError):
     """429 + "max usage reached"：套餐额度用完了，要等计费周期重置或升级。不要重试。"""
 
 
+QUOTA_WORDS = ("max usage", "monthly capacity", "monthly limit", "quota", "credits exhausted", "out of credits",
+               "usage limit", "plan limit", "upgrade your plan", "payment required")
+
+
+def is_quota_text(text: str) -> bool:
+    """节点返回的错误是不是"额度用完"（不是一时的每秒限流）。"""
+    t = (text or "").lower()
+    return any(w in t for w in QUOTA_WORDS)
+
+
 class Http:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
@@ -70,7 +80,7 @@ class Http:
                     if binary and resp.status == 200:
                         return await resp.read()
                     text = await resp.text(errors="replace")
-                    if resp.status == 429 and "max usage" in text.lower():
+                    if resp.status == 402 or (resp.status == 429 and is_quota_text(text)):
                         # 这个月的额度用完了（Helius 等）：不是一时的限流，重试没用，马上报错让上层走兜底
                         raise QuotaError(service, resp.status, text)
                     if resp.status == 429 or resp.status >= 500:

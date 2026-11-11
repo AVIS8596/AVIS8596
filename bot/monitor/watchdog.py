@@ -26,10 +26,10 @@ REPEAT_SEC = 6 * 3600
 
 
 def node_hint(err: str) -> str:
-    if "429" in err:
-        return ("HTTP 429 = Helius 拒绝连接，常见两种原因：① 这个月的额度用完了（免费版每月 100 万）；"
-                "② 同时连接数 / 请求频率超限。到 Helius 后台（dashboard.helius.dev）的 Usage 页看额度用了多少：\n"
-                "用完了 → 升级套餐，或者等下个计费周期自动恢复；没用完 → 把这条消息发给 Claude。")
+    if "429" in err or "402" in err or "max usage" in err.lower():
+        return ("HTTP 429 / 402 = 节点拒绝连接，常见两种原因：① 这个月的额度用完了；② 同时连接数 / 请求频率超限。"
+                "到这个节点的后台看额度用了多少：\n用完了 → 加一个备用节点（python3 deploy/setup_env.py solana），"
+                "或者等下个计费周期自动恢复；没用完 → 把这条消息发给 Claude。")
     if "401" in err or "403" in err:
         return "HTTP 401 / 403 = Helius 的 key 无效或被停用，到 Helius 后台检查 key。"
     return "多半是节点或网络临时故障，机器人会一直自动重连；持续很久的话把这条消息发给 Claude。"

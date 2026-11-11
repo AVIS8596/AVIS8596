@@ -44,6 +44,7 @@ smart_money:
   max_trades: 1500                # 30天交易超过 1500 个币（每天 50 个），基本是扫盘机器人，排除
   min_avg_hold_sec: 60            # 平均持仓不到 60 秒的是高频机器人，排除
   max_wallets_per_chain: 300      # 每条链最多监听多少个地址
+  sol_max_daily_buys: 150         # Solana 链上监听跳过刷单型钱包：最近 7 天平均每天买 150 次以上的（省节点额度；0 = 不跳过）
   # 种子来源：盈利排行榜 + 热门代币的顶级交易者
   gainers_types: ["1W", "yesterday", "today"]
   trending_tokens_per_chain: 20

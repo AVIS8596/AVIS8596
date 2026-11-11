@@ -75,7 +75,34 @@ def set_chain(cfg: str, chain: str, enabled: bool) -> str:
     return re.sub(rf"(?m)^(\s*{chain}:\s*\{{\s*enabled:\s*)(true|false)", rf"\g<1>{'true' if enabled else 'false'}", cfg)
 
 
+def solana_only() -> None:
+    """只填备用 Solana 节点：python3 deploy/setup_env.py solana"""
+    text, vals = load_env()
+    old = vals.get("SOLANA_RPC_URLS", "")
+    urls = [u for u in old.split(",") if u.strip()]
+    print("=== 添加 Solana 备用节点 ===")
+    if urls:
+        print("现在已有：" + "、".join(mask(u) for u in urls))
+    print("把节点后台复制的 HTTPS 地址粘贴进来（https:// 开头），回车；不加了直接回车。")
+    while True:
+        v = ask("SOLANA_RPC_URLS", "新的 Solana 节点 HTTPS 地址", r"^https://\S+$", "")
+        if not v:
+            break
+        if v in urls:
+            print("  这个地址已经有了")
+            continue
+        urls.append(v)
+        print(f"  ✅ 已加入（第 {len(urls)} 个）")
+    text = set_env(text, "SOLANA_RPC_URLS", ",".join(urls))
+    ENV.write_text(text, encoding="utf-8")
+    os.chmod(ENV, 0o600)
+    print("\n✅ 已保存到 .env。下一步：sudo systemctl restart memebot")
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "solana":
+        solana_only()
+        return
     print("=== 扫链机器人配置向导 ===  粘贴后回车；填错了重新运行本向导即可")
     text, vals = load_env()
     missing = []

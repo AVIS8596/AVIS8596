@@ -815,8 +815,11 @@ def test_solana_monitor_does_not_reconnect_for_every_wallet_change(monkeypatch):
 
         async def active_wallets(chain, n):
             return [{"address": w} for w in wallets]
-        app = SimpleNamespace(db=SimpleNamespace(active_wallets=active_wallets), wallets_changed={"solana": ev},
-                              cfg=SimpleNamespace(get=lambda k, d=None: 0.2 if k.endswith("resubscribe_min_sec") else d))
+        async def fetchall(sql, args=()):
+            return []
+        app = SimpleNamespace(db=SimpleNamespace(active_wallets=active_wallets, fetchall=fetchall), wallets_changed={"solana": ev},
+                              cfg=SimpleNamespace(get=lambda k, d=None: 0.2 if k.endswith("resubscribe_min_sec")
+                                                  else 400 if k.endswith("max_wallets_per_chain") else d))
         sm = sw.SolanaWalletMonitor(app)
         started = []
 
@@ -977,4 +980,172 @@ def test_helius_quota_out_fails_fast_and_paper_buys_still_work(monkeypatch):
         assert f1.ok and f1.decimals == 9 and f1.token_raw > 0
         ov.clear()
         assert (await ex.buy("T", 1.0, 1000)).decimals == 6
+    asyncio.run(go())
+
+
+def test_solana_rpc_failover_between_nodes(monkeypatch):
+    """多个 Solana 节点：前面的额度用完自动换下一个、10 分钟内不再敲它；临时出错这次换一个试；全部用不了马上报错。"""
+    from bot.http import Http
+    from bot.sources import solana_rpc as sr
+
+    assert sr.parse_urls("https://solana-mainnet.core.chainstack.com/abc, https://x.io/k|wss://y.io/k") == [
+        ("https://solana-mainnet.core.chainstack.com/abc", "wss://solana-mainnet.core.chainstack.com/abc"),
+        ("https://x.io/k", "wss://y.io/k")]
+    assert sr.parse_urls("") == [] and sr.parse_urls("solana.com") == []
+    assert sr.provider_name("https://solana-mainnet.core.chainstack.com/abc") == "Chainstack"
+    assert sr.provider_name("https://solana-mainnet.g.alchemy.com/v2/k") == "Alchemy"
+    assert sr.provider_name("https://api.mainnet.solana.com") == "Solana 公共节点"
+
+    hits = []
+    state = {"helius": (429, '{"error":{"code":-32429,"message":"max usage reached"}}'),
+             "chainstack": (200, '{"jsonrpc":"2.0","id":1,"result":7}')}
+
+    class Resp:
+        def __init__(self, status, text):
+            self.status, self._t, self.headers = status, text, {}
+
+        async def text(self, errors=None):
+            return self._t
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Sess:
+        closed = False
+
+        def request(self, method, url, **kw):
+            who = "helius" if "helius" in url else "chainstack"
+            hits.append(who)
+            return Resp(*state[who])
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr("bot.http.asyncio.sleep", lambda s: real_sleep(0))
+
+    async def go():
+        http = Http()
+        http._session = Sess()
+        rpc = sr.SolanaRPC(http, "HKEY", 100, 100, [("https://solana-mainnet.core.chainstack.com/abc",
+                                                       "wss://solana-mainnet.core.chainstack.com/abc")])
+        assert [e.name for e in rpc.eps] == ["Helius", "Chainstack"]
+        assert await rpc.call("getSlot") == 7 and hits == ["helius", "chainstack"]    # Helius 额度用完 → Chainstack
+        assert rpc.eps[0].out and not rpc.out
+        hits.clear()
+        assert await rpc.call("getSlot") == 7 and hits == ["chainstack"]              # 10 分钟内不再敲 Helius
+        assert "额度用完" in await rpc.probe(rpc.eps[0]) and await rpc.probe(rpc.eps[1]) == "✅ 正常"
+        # Chainstack 也用完了（JSON 里报错的那种）→ 全部用不了：马上报错，不重试不等待
+        state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"Monthly capacity limit exceeded"}}')
+        try:
+            await rpc.call("getSlot")
+            raise AssertionError("应该报错")
+        except sr.QuotaOut as e:
+            assert "Helius 额度用完" in str(e) and "Chainstack 额度用完" in str(e)
+        hits.clear()
+        assert await rpc.get_transaction("SIG") is None and hits == []                # 都用不了：直接返回，不等
+        # 10 分钟到了：Helius 恢复
+        for ep in rpc.eps:
+            ep.out_until = 0
+        state["helius"] = (200, '{"jsonrpc":"2.0","id":1,"result":9}')
+        assert await rpc.call("getSlot") == 9 and rpc.eps[0].out_since == 0 and rpc.eps[0].out_why == ""
+        # Helius 临时出错（502）：这次换 Chainstack 试，不把 Helius 标成用不了
+        state["helius"] = (502, "bad gateway")
+        state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"result":11}')
+        assert await rpc.call("getSlot", retries=0) == 11 and not rpc.eps[0].out
+        # key 无效：1 小时内不用它
+        state["helius"] = (401, "unauthorized")
+        assert await rpc.call("getSlot", retries=0) == 11 and rpc.eps[0].out
+        assert rpc.eps[0].out_until - time.time() > 3000
+        # 普通 JSON-RPC 错误照常抛出，不换节点
+        state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid param"}}')
+        try:
+            await rpc.call("getAccountInfo", ["x"])
+            raise AssertionError("应该报错")
+        except sr.RpcError as e:
+            assert not isinstance(e, sr.QuotaOut) and not rpc.eps[1].out
+    asyncio.run(go())
+
+
+def test_worth_fetching_and_noisy_wallets(tmp_path):
+    """省额度：只转账 / 建账户的通知不去取交易；刷单型钱包不监听（手动加的照样监听）。"""
+    from bot.monitor.solana_wallets import SolanaWalletMonitor, worth_fetching
+
+    transfer = ["Program ComputeBudget111111111111111111111111111111 invoke [1]",
+                "Program ComputeBudget111111111111111111111111111111 success",
+                "Program 11111111111111111111111111111111 invoke [1]", "Program 11111111111111111111111111111111 success",
+                "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]",
+                "Program log: Instruction: Transfer"]
+    pump_buy = transfer[:2] + ["Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+                               "Program log: Instruction: Buy",
+                               "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]"]
+    assert not worth_fetching(transfer)
+    assert worth_fetching(pump_buy)
+    assert worth_fetching(["Program log: something"]) and worth_fetching([]) and worth_fetching(None)
+    assert worth_fetching(transfer + ["Log truncated"])                 # 日志被截断：看不全，照样取
+    bot_route = ["Program BoTxx1111111111111111111111111111111111111 invoke [1]",
+                 "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]"]
+    assert worth_fetching(bot_route)                                    # 不认识的程序（交易机器人路由）：照样取
+
+    async def go():
+        db = DB(tmp_path / "n.db")
+        await db.open()
+        try:
+            for i, (addr, st, sc) in enumerate((("NOISY", "active", 99), ("MAN", "manual", 10), ("A", "active", 80),
+                                                 ("B", "active", 70), ("C", "active", 60))):
+                await db.execute("INSERT INTO wallets(chain,address,status,score) VALUES('solana',?,?,?)", (addr, st, sc))
+            now = time.time()
+            n = 0
+            for w, per_day in (("NOISY", 400), ("MAN", 300), ("A", 20)):
+                for day in range(2):
+                    for k in range(per_day):
+                        n += 1
+                        await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                         (now - day * 86400 - k * 10, "solana", w, f"T{k}", "buy", f"t{n}"))
+            app = SimpleNamespace(db=db, cfg=SimpleNamespace(get=lambda k, d=None: d))
+            sm = SolanaWalletMonitor(app)
+            assert await sm.pick_wallets(3) == ["MAN", "A", "B"] and sm.noisy == 1    # NOISY 每天 400 次：跳过
+            app.cfg = SimpleNamespace(get=lambda k, d=None: 0 if k.endswith("sol_max_daily_buys") else d)
+            assert await sm.pick_wallets(3) == ["MAN", "NOISY", "A"]                 # 设成 0 = 不跳过
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_solana_ws_switches_node_when_rejected(monkeypatch):
+    """第一个节点拒绝 WebSocket（429 额度用完）→ 马上换第二个节点连上，不傻等。"""
+    import json as _json
+    from http import HTTPStatus
+
+    import websockets
+    from bot.http import Http
+    from bot.monitor import solana_wallets as sw
+    from bot.sources.solana_rpc import SolanaRPC
+
+    async def go():
+        def reject(connection, request):
+            return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, '{"error":"max usage reached"}')
+
+        async def handler(ws):
+            async for raw in ws:
+                m = _json.loads(raw)
+                await ws.send(_json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": 500 + m["id"]}))
+
+        async with websockets.serve(handler, "127.0.0.1", 0, process_request=reject) as bad, \
+                websockets.serve(handler, "127.0.0.1", 0) as good:
+            pb, pg = bad.sockets[0].getsockname()[1], good.sockets[0].getsockname()[1]
+            rpc = SolanaRPC(Http(), "", 5, 1, [(f"http://127.0.0.1:{pb}/k1", f"ws://127.0.0.1:{pb}/k1"),
+                                               (f"http://127.0.0.1:{pg}/k2", f"ws://127.0.0.1:{pg}/k2")])
+            sm = sw.SolanaWalletMonitor(SimpleNamespace(sol=rpc))
+            sm.wanted = 2
+            task = asyncio.create_task(sm._conn(0, ["W0", "W1"]))
+            for _ in range(50):
+                if sm.live:
+                    break
+                await asyncio.sleep(0.1)
+            assert sm.live == {0: 2} and sm.node == "127.0.0.1"
+            assert rpc.eps[0].ws_out_until > time.time() and "429" in rpc.eps[0].ws_why
+            assert rpc.ws_pick() is rpc.eps[1]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     asyncio.run(go())

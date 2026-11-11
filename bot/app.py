@@ -37,8 +37,9 @@ class App:
         self.etherscan = Etherscan(self.http, s.etherscan_key, float(b.get("etherscan_rps", 4)))
         self.sol: SolanaRPC | None = None
         if "solana" in cfg.enabled_chains:
+            from .sources.solana_rpc import parse_urls
             self.sol = SolanaRPC(self.http, s.helius_key, float(b.get("helius_rps", 6)),
-                                 float(b.get("helius_trade_rps", 3)))
+                                 float(b.get("helius_trade_rps", 3)), parse_urls(s.solana_rpc_urls))
         from .chains import PUBLIC_RPC
         # 用内置免费公共节点时限速低一些，免得被节点封
         self.evm: dict[str, EvmRPC] = {

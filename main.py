@@ -28,7 +28,9 @@ log = logging.getLogger("memebot")
 def _secrets(cfg) -> list[str]:
     s = cfg.secrets
     pem_lines = [ln for ln in s.gmgn_private_pem.splitlines() if ln and "-----" not in ln]
-    return [s.telegram_token, s.helius_key, s.jupiter_key, s.birdeye_key, s.etherscan_key, s.zerox_key,
+    from bot.sources.solana_rpc import parse_urls
+    sol = [u for pair in parse_urls(s.solana_rpc_urls) for u in pair]
+    return [*sol, s.telegram_token, s.helius_key, s.jupiter_key, s.birdeye_key, s.etherscan_key, s.zerox_key,
             s.solana_private_key, s.evm_private_key, s.gmgn_key, *pem_lines,
             *s.rpc_http.values(), *s.rpc_wss.values()]
 
@@ -225,7 +227,8 @@ async def check(cfg) -> bool:
     if app.birdeye.key:
         await item("Birdeye 价格(SOL)", _nonzero(app.birdeye.price("solana", CHAINS["solana"].wrapped)))
     if app.sol:
-        await item("Helius RPC", app.sol.call("getSlot"))
+        for ep in app.sol.eps:
+            await item(f"Solana 节点 {ep.name}", _probe(app, ep))
     for c, rpc in app.evm.items():
         await item(f"{c} RPC", rpc.block_number())
     if not cfg.dry_run:
@@ -254,6 +257,13 @@ async def check(cfg) -> bool:
     await app.close()
     print("\n全部通过 ✅" if ok_all else "\n有项目未通过，请按上面的提示修改 .env ❌")
     return ok_all
+
+
+async def _probe(app: App, ep) -> str:
+    r = await app.sol.probe(ep)
+    if r.startswith("❌"):
+        raise RuntimeError(r[2:])
+    return r
 
 
 async def _tg_check(app: App) -> str:

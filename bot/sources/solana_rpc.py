@@ -1,13 +1,24 @@
-"""Solana RPC（Helius）。只用标准 JSON-RPC 方法，所有 Helius 付费档都可用。"""
+"""Solana RPC：Helius + 任意多个备用节点（Chainstack / Alchemy / QuickNode / 官方公共节点……），只用标准 JSON-RPC 方法。
+
+按顺序用：排在前面的节点额度用完（429 max usage / 402 / quota……）就自动换下一个，10 分钟后再回头试；
+某个节点临时出错（5xx、超时）这一次请求也换下一个试。.env 里：
+  HELIUS_API_KEY=...                         （可选，有就排第一）
+  SOLANA_RPC_URLS=https://节点1,https://节点2  （WebSocket 地址自动用 wss:// 同一个地址；
+                                              不一样的话写成 https://...|wss://...）
+"""
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
-from ..http import Http, QuotaError
+import aiohttp
+
+from ..http import ApiError, Http, PlanError, QuotaError, is_quota_text
 from ..utils import f
 
 log = logging.getLogger("memebot.solana")
@@ -15,54 +26,192 @@ log = logging.getLogger("memebot.solana")
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 SYSTEM_PROGRAM = "11111111111111111111111111111111"
+PUBLIC_HOSTS = ("api.mainnet.solana.com", "api.mainnet-beta.solana.com")
 
 
 class RpcError(Exception):
     pass
 
 
-OUT_SEC = 600      # Helius 额度用完后，多久再试一次
+OUT_SEC = 600          # 节点额度用完后，多久再试一次
+BAD_KEY_SEC = 3600     # key 无效（401 / 403）多久再试
 
 
 class QuotaOut(RpcError):
-    """Helius 这个月的额度用完了：直接报错，不去敲节点（每 10 分钟放一个请求过去试试恢复没有）。"""
+    """所有 Solana 节点都用不了（额度用完 / key 无效）：直接报错，不去敲节点。"""
 
 
-class SolanaRPC:
-    def __init__(self, http: Http, helius_key: str, rps: float, trade_rps: float = 3):
-        self.http = http
-        self.url = f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
-        self.wss = f"wss://mainnet.helius-rpc.com/?api-key={helius_key}"
-        # 两份额度：交易相关（查余额、确认）单独留一份，不会被分析、监听抢光，保证随时能卖
-        http.set_rate("helius", rps)
-        http.set_rate("helius_trade", trade_rps)
-        self._id = 0
-        self.out_until = 0.0        # 额度用完：这个时间之前直接报错
-        self.out_since = 0.0
+def provider_name(url: str) -> str:
+    host = (urlparse(url).hostname or url).lower()
+    for key, name in (("helius", "Helius"), ("chainstack", "Chainstack"), ("alchemy", "Alchemy"),
+                      ("quiknode", "QuickNode"), ("quicknode", "QuickNode"), ("ankr", "Ankr"), ("drpc", "dRPC"),
+                      ("shyft", "Shyft"), ("syndica", "Syndica"), ("triton", "Triton")):
+        if key in host:
+            return name
+    if host in PUBLIC_HOSTS:
+        return "Solana 公共节点"
+    return host
+
+
+def parse_urls(raw: str) -> list[tuple[str, str]]:
+    """"https://a,https://b|wss://b2" → [(http, wss), ...]。"""
+    out = []
+    for part in (raw or "").replace("\n", ",").replace(" ", ",").split(","):
+        part = part.strip().strip('"').strip("'")
+        if not part:
+            continue
+        h, _, w = part.partition("|")
+        if not h.startswith(("https://", "http://")):
+            continue
+        out.append((h, w or "ws" + h[4:]))
+    return out
+
+
+@dataclass
+class Endpoint:
+    name: str
+    http: str
+    wss: str
+    svc: str
+    out_until: float = 0.0       # HTTP 用不了（额度用完）到什么时候
+    out_since: float = 0.0
+    out_why: str = ""
+    ws_out_until: float = 0.0    # WebSocket 被拒到什么时候
+    ws_why: str = ""
+    calls: int = 0               # 成功的请求数（启动以来）
 
     @property
     def out(self) -> bool:
         return time.time() < self.out_until
 
-    async def call(self, method: str, params: list | None = None, retries: int = 3, svc: str = "helius") -> Any:
-        if self.out:
-            raise QuotaOut(f"Helius 额度用完（max usage reached），{(self.out_until - time.time()) / 60:.0f} 分钟后再试")
-        self._id += 1
-        body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or []}
+
+class SolanaRPC:
+    def __init__(self, http: Http, helius_key: str, rps: float, trade_rps: float = 3,
+                 extra_urls: list[tuple[str, str]] | None = None):
+        self.http = http
+        self.eps: list[Endpoint] = []
+        if helius_key:
+            self.eps.append(Endpoint("Helius", f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                                     f"wss://mainnet.helius-rpc.com/?api-key={helius_key}", "helius"))
+        for i, (h, w) in enumerate(extra_urls or []):
+            self.eps.append(Endpoint(provider_name(h), h, w, f"solrpc{i + 1}"))
+        for ep in self.eps:
+            # 两份额度：交易相关（查余额、确认）单独留一份，不会被分析、监听抢光，保证随时能卖
+            public = (urlparse(ep.http).hostname or "") in PUBLIC_HOSTS
+            http.set_rate(ep.svc, min(rps, 3) if public else rps)       # 公共节点每 10 秒同一方法最多 40 次
+            http.set_rate(ep.svc + "_trade", min(trade_rps, 1) if public else trade_rps)
+        self._id = 0
+
+    # ---- 兼容旧用法 ----
+    @property
+    def url(self) -> str:
+        return self.eps[0].http if self.eps else ""
+
+    @property
+    def wss(self) -> str:
+        return self.ws_pick().wss if self.eps else ""
+
+    @property
+    def out(self) -> bool:
+        return bool(self.eps) and all(ep.out for ep in self.eps)
+
+    @property
+    def out_until(self) -> float:
+        return min((ep.out_until for ep in self.eps), default=0.0)
+
+    @out_until.setter
+    def out_until(self, v: float) -> None:
+        for ep in self.eps:
+            ep.out_until = v
+
+    @property
+    def out_since(self) -> float:
+        return min((ep.out_since for ep in self.eps if ep.out_since), default=0.0)
+
+    # ---- WebSocket 选节点 ----
+    def ws_pick(self) -> Endpoint:
+        now = time.time()
+        ok = [ep for ep in self.eps if ep.ws_out_until <= now]
+        return ok[0] if ok else min(self.eps, key=lambda ep: ep.ws_out_until)
+
+    def ws_failed(self, ep: Endpoint, why: str) -> bool:
+        """WebSocket 连接被拒 / 断开。被拒（429 / 402 / 额度）时这个节点 10 分钟内先不用；返回是否还有别的节点可以马上试。"""
+        rejected = any(x in why for x in ("HTTP 429", "HTTP 402", "HTTP 401", "HTTP 403")) or is_quota_text(why)
+        if rejected and len(self.eps) > 1:
+            ep.ws_out_until, ep.ws_why = time.time() + OUT_SEC, why
+            log.warning("Solana 监听：%s 拒绝连接（%s），换下一个节点", ep.name, why[:120])
+        return any(e.ws_out_until <= time.time() for e in self.eps if e is not ep)
+
+    def ws_ok(self, ep: Endpoint) -> None:
+        ep.ws_out_until, ep.ws_why = 0.0, ""
+
+    # ---- HTTP ----
+    def _mark_out(self, ep: Endpoint, why: str, sec: float = OUT_SEC) -> None:
+        if not ep.out_since:
+            ep.out_since = time.time()
+            rest = [e.name for e in self.eps if e is not ep and not e.out]
+            log.warning("Solana 节点 %s 用不了（%s），%d 分钟后再试；%s", ep.name, why, sec // 60,
+                        f"先用 {rest[0]}" if rest else "没有别的节点了，分析改用 GMGN 数据")
+        ep.out_until, ep.out_why = time.time() + sec, why
+
+    async def _post(self, ep: Endpoint, body: dict, retries: int, trade: bool) -> Any:
         try:
-            r = await self.http.post(svc, self.url, json_body=body, retries=retries)
-        except QuotaError as e:
-            if not self.out_since:
-                self.out_since = time.time()
-                log.warning("Helius 额度用完（max usage reached）：Solana 节点请求先停 %d 分钟，分析改用 GMGN 数据", OUT_SEC // 60)
-            self.out_until = time.time() + OUT_SEC
-            raise QuotaOut("Helius 额度用完（max usage reached）") from e
-        if self.out_since:
-            log.info("Helius 节点恢复（停了 %.0f 分钟）", (time.time() - self.out_since) / 60)
-            self.out_since = 0.0
-        if isinstance(r, dict) and r.get("error"):
-            raise RpcError(f"{method}: {r['error']}")
-        return r.get("result") if isinstance(r, dict) else None
+            r = await self.http.post(ep.svc + ("_trade" if trade else ""), ep.http, json_body=body, retries=retries)
+        except QuotaError:
+            self._mark_out(ep, "额度用完")
+            raise
+        except PlanError:
+            self._mark_out(ep, "key 无效或被停用（401 / 403）", BAD_KEY_SEC)
+            raise
+        err = r.get("error") if isinstance(r, dict) else None
+        if err and is_quota_text(str(err)):
+            self._mark_out(ep, "额度用完")
+            raise QuotaError(ep.svc, 429, str(err))
+        ep.calls += 1
+        if ep.out_since:
+            log.info("Solana 节点 %s 恢复（停了 %.0f 分钟）", ep.name, (time.time() - ep.out_since) / 60)
+            ep.out_since, ep.out_why = 0.0, ""
+        return r
+
+    async def call(self, method: str, params: list | None = None, retries: int = 3, svc: str = "helius") -> Any:
+        trade = svc.endswith("_trade")
+        last: Exception | None = None
+        tried = 0
+        for ep in self.eps:
+            if ep.out:
+                continue
+            tried += 1
+            self._id += 1
+            body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or []}
+            try:
+                r = await self._post(ep, body, retries, trade)
+            except (QuotaError, PlanError) as e:
+                last = e
+                continue
+            except (ApiError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last = e          # 这个节点这次出错（5xx / 超时 / 断线）：换下一个试
+                continue
+            if isinstance(r, dict) and r.get("error"):
+                raise RpcError(f"{method}: {r['error']}")
+            return r.get("result") if isinstance(r, dict) else None
+        if not tried or isinstance(last, (QuotaError, PlanError)):
+            whys = "；".join(f"{ep.name} {ep.out_why or '用不了'}" for ep in self.eps) or "没有配置 Solana 节点"
+            wait = max(0.0, self.out_until - time.time()) / 60
+            raise QuotaOut(f"Solana 节点都用不了（{whys}），{wait:.0f} 分钟后再试") from last
+        raise last or RpcError(f"{method}: 没有可用的 Solana 节点")
+
+    async def probe(self, ep: Endpoint) -> str:
+        """/status 用：这个节点现在通不通。"""
+        if ep.out:
+            return f"❌ {ep.out_why}，{(ep.out_until - time.time()) / 60:.0f} 分钟后再试"
+        try:
+            r = await asyncio.wait_for(self._post(ep, {"jsonrpc": "2.0", "id": 0, "method": "getSlot", "params": []},
+                                                  0, False), 8)
+            if isinstance(r, dict) and r.get("error"):
+                return f"❌ {str(r['error'])[:150]}"
+            return "✅ 正常"
+        except Exception as e:  # noqa: BLE001
+            return f"❌ {ep.out_why or str(e)[:150] or type(e).__name__}"
 
     # ---------------- 读 ----------------
     async def get_transaction(self, sig: str) -> dict | None:
@@ -70,6 +219,8 @@ class SolanaRPC:
             try:
                 tx = await self.call("getTransaction", [sig, {
                     "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}])
+            except QuotaOut:
+                return None          # 节点都用不了：别再等
             except RpcError as e:
                 log.debug("getTransaction %s: %s", sig, e)
                 tx = None

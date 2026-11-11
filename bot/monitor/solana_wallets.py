@@ -4,7 +4,12 @@
 - Helius 免费版最多 5 条同时连接、每条 1000 个订阅 → 默认 500 个钱包一条连接（300 个钱包只用 1 条）；
 - 钱包名单变了不立刻全部断开重连，最多 10 分钟换一次（频繁断开重连会被节点限流，期间 GMGN 交易流照常出信号）；
 - 被拒绝（HTTP 429）时把节点返回的原因记下来，退避到最长 5 分钟，不猛敲；
-- 记录连接状态，/status 能看到、断线 10 分钟以上会在 Telegram 报警（见 watchdog.py）。
+- 记录连接状态，/status 能看到、断线 10 分钟以上会在 Telegram 报警（见 watchdog.py）；
+- 节点有多个（Helius + SOLANA_RPC_URLS）：当前节点拒绝连接就换下一个。
+
+省节点额度（免费版每月几百万次，取一笔交易就扣一次）：
+- 通知里带着交易日志：日志里只有转账 / 建账户 / 设手续费这类程序（没碰任何交易所、聚合器）的，直接跳过不去取交易；
+- 每天平均买 150 次以上的刷单型钱包不监听（单独跟会被"快手"规则拦掉，凑共振也是噪音）。
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -28,6 +34,36 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.solmon")
 PER_CONN = 500
 REBUILD_MIN_SEC = 600
+INVOKE_RE = re.compile(r"^Program (\w{32,44}) invoke \[\d+\]")
+# 这些程序本身不做买卖：一笔交易只碰了它们 = 转账 / 建关账户 / 设手续费 / 备注 / 投票质押，没必要去取交易内容
+NON_SWAP = {
+    "11111111111111111111111111111111",                 # System（转 SOL、Jito 小费）
+    "ComputeBudget111111111111111111111111111111",      # 设优先费
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",      # Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",      # Token-2022
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",     # 建代币账户
+    "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",      # Memo
+    "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
+    "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95",     # Lighthouse（钱包的交易保护断言）
+    "Vote111111111111111111111111111111111111111",
+    "Stake11111111111111111111111111111111111111",
+    "AddressLookupTab1e1111111111111111111111111",
+}
+
+
+def worth_fetching(logs: list | None) -> bool:
+    """看日志判断这笔交易值不值得去取（可能是买卖）。看不出来的一律取，宁可多花额度也不漏信号。"""
+    if not logs:
+        return True
+    progs = set()
+    for line in logs:
+        line = str(line)
+        if "truncated" in line.lower():
+            return True
+        m = INVOKE_RE.match(line)
+        if m:
+            progs.add(m.group(1))
+    return not progs or not progs <= NON_SWAP
 
 
 def ws_error(e: BaseException) -> str:
@@ -54,6 +90,9 @@ class SolanaWalletMonitor:
         self.fails = 0                       # 连续连接失败次数
         self.notes = 0                       # 收到并去处理的通知数
         self.failed = 0                      # 处理失败（取不到交易）的通知数
+        self.skipped = 0                     # 看日志就知道不是买卖、没去取的通知数
+        self.noisy = 0                       # 刷单型、不监听的钱包数
+        self.node = ""                       # 现在连的是哪个节点
         self.last_tx_err = ""
 
     def health(self) -> dict:
@@ -70,7 +109,12 @@ class SolanaWalletMonitor:
         if h["ok"]:
             tail = f"，丢弃了 {h['dropped']} 条通知（节点额度跟不上）" if h["dropped"] else ""
             bad = (f"，{h['failed']}/{h['notes']} 条取交易失败" if h["notes"] >= 20 and h["failed"] * 5 > h["notes"] else "")
-            return f"Solana 链上监听：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{bad}{tail}"
+            node = f"（{self.node}）" if self.node else ""
+            save = ""
+            if self.skipped + self.notes:
+                save = f"，看日志跳过非买卖通知 {self.skipped / (self.skipped + self.notes) * 100:.0f}%"
+            noisy = f"，{self.noisy} 个刷单型钱包不监听" if self.noisy else ""
+            return f"Solana 链上监听{node}：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{bad}{save}{noisy}{tail}"
         return (f"Solana 链上监听：❌ 连不上，已断 {h['down_min']:.0f} 分钟（{h['err'] or '还在连接'}）"
                 f"——这期间 Solana 只剩 GMGN 交易流那一点信号")
 
@@ -82,7 +126,7 @@ class SolanaWalletMonitor:
         built_at = 0.0
         while True:
             ev.clear()
-            wallets = [w["address"] for w in await self.app.db.active_wallets("solana", n)]
+            wallets = await self.pick_wallets(n)
             self.wanted = len(wallets)
             if not wallets:
                 for t in conns:
@@ -115,6 +159,22 @@ class SolanaWalletMonitor:
             else:
                 await asyncio.sleep(3)              # 连接任务意外退出，稍等重建
 
+    async def pick_wallets(self, n: int) -> list[str]:
+        """要监听的钱包：按评分取前 n 个，跳过刷单型（最近 7 天里有信号的日子平均每天买 150 次以上；手动加的不跳过）。"""
+        cap = float(self.app.cfg.get("smart_money.sol_max_daily_buys", 150) or 0)
+        rows = await self.app.db.active_wallets("solana", n * 2 if cap else n)
+        noisy: set[str] = set()
+        if cap:
+            for r in await self.app.db.fetchall(
+                    "SELECT wallet, COUNT(*) n, COUNT(DISTINCT CAST(ts / 86400 AS INTEGER)) d FROM signals "
+                    "WHERE chain='solana' AND side='buy' AND ts>=? GROUP BY wallet HAVING n>?",
+                    (time.time() - 7 * 86400, cap)):
+                if r["n"] / max(r["d"], 1) > cap:
+                    noisy.add(r["wallet"])
+        keep = [w["address"] for w in rows if w.get("status") == "manual" or w["address"] not in noisy][:n]
+        self.noisy = sum(1 for w in rows[:n] if w["address"] in noisy and w.get("status") != "manual")
+        return keep
+
     def _up(self, cid: int, n: int) -> None:
         self.live[cid] = n
         self.down_since, self.fails, self.last_err = 0.0, 0, ""
@@ -130,10 +190,12 @@ class SolanaWalletMonitor:
         if cid:
             await asyncio.sleep(2.0 * cid)          # 多条连接错开建立，不同时去敲节点
         backoff = 2.0
+        sol = self.app.sol
         try:
             while True:
+                ep = sol.ws_pick() if hasattr(sol, "ws_pick") else None
                 try:
-                    async with websockets.connect(self.app.sol.wss, ping_interval=20, ping_timeout=30,
+                    async with websockets.connect(ep.wss if ep else sol.wss, ping_interval=20, ping_timeout=30,
                                                   max_size=10_000_000, open_timeout=15) as ws:
                         pending: dict[int, str] = {}
                         for i, w in enumerate(wallets):
@@ -145,6 +207,9 @@ class SolanaWalletMonitor:
                                 await asyncio.sleep(0.3)   # 订阅请求分批发，不一口气灌给节点
                         subs: dict[int, str] = {}
                         self._up(cid, len(wallets))
+                        if ep:
+                            sol.ws_ok(ep)
+                            self.node = ep.name
                         backoff = 2.0
                         async for raw in ws:
                             msg = json.loads(raw)
@@ -161,6 +226,9 @@ class SolanaWalletMonitor:
                             val = (p.get("result") or {}).get("value") or {}
                             sig = val.get("signature")
                             if not wallet or not sig or val.get("err") is not None:
+                                continue
+                            if not worth_fetching(val.get("logs")):
+                                self.skipped += 1            # 只是转账 / 建账户之类：不花额度去取
                                 continue
                             if not self.seen.add_if_new(f"{sig}:{wallet}"):
                                 continue
@@ -179,12 +247,18 @@ class SolanaWalletMonitor:
                     raise
                 except Exception as e:  # noqa: BLE001
                     why = ws_error(e)
+                    if ep:
+                        why = f"{ep.name}：{why}"
                     self._down(cid, why)
+                    other = sol.ws_failed(ep, why) if ep else False
+                    if other:                    # 换一个节点：马上试
+                        await asyncio.sleep(2)
+                        continue
                     wait = backoff * (0.7 + 0.6 * random.random())
                     log.warning("Solana WS 断开（%s），%.0fs 后重连", why, wait)
                     await asyncio.sleep(wait)
                     # 被拒绝（429 = 限流 / 额度用完）时退避到最长 5 分钟，不猛敲；其他断线最长 1 分钟
-                    backoff = min(backoff * 2, 300.0 if "429" in why else 60.0)
+                    backoff = min(backoff * 2, 300.0 if "429" in why or "402" in why else 60.0)
         finally:
             self.live.pop(cid, None)
             if not self.live and not self.down_since:

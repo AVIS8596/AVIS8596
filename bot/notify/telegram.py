@@ -694,11 +694,8 @@ class Telegram:
         sm = getattr(self.app, "solmon", None)
         if sm:
             lines.append(sm.status_text())
-            try:      # Helius 节点本身通不通（区分"连接被拒"是额度用完还是别的）
-                await asyncio.wait_for(self.app.sol.call("getSlot", retries=0), 8)
-                lines.append("Helius 节点（HTTP）：✅ 正常")
-            except Exception as ex:  # noqa: BLE001
-                lines.append(f"Helius 节点（HTTP）：❌ {e(str(ex)[:220])}")
+            for ep in getattr(self.app.sol, "eps", []):      # 每个 Solana 节点通不通（额度用完会写明）
+                lines.append(f"Solana 节点 {e(ep.name)}：{e(await self.app.sol.probe(ep))}")
         dog = getattr(self.app, "watchdog", None)
         if dog:
             try:

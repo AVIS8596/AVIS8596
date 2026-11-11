@@ -31,6 +31,7 @@ class Secrets:
     telegram_token: str = ""
     telegram_chat_id: str = ""
     helius_key: str = ""
+    solana_rpc_urls: str = ""       # 备用 Solana 节点，逗号分隔（见 solana_rpc.py）
     jupiter_key: str = ""
     birdeye_key: str = ""
     goplus_key: str = ""
@@ -115,6 +116,7 @@ def load_config(base_dir: str | Path = ".", config_file: str = "config.yaml") ->
         telegram_token=env("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=env("TELEGRAM_CHAT_ID", "").strip(),
         helius_key=env("HELIUS_API_KEY", "").strip(),
+        solana_rpc_urls=env("SOLANA_RPC_URLS", "").strip(),
         jupiter_key=env("JUPITER_API_KEY", "").strip(),
         birdeye_key=env("BIRDEYE_API_KEY", "").strip(),
         goplus_key=env("GOPLUS_API_KEY", "").strip(),
@@ -155,8 +157,12 @@ def validate(cfg: Config) -> list[str]:
         errors.append("数据源是 Birdeye，但缺少 BIRDEYE_API_KEY")
 
     trading_live = cfg.get("trading.enabled", False) and not cfg.dry_run
-    if "solana" in chains and not s.helius_key:
-        errors.append("启用了 Solana 但缺少 HELIUS_API_KEY（实时监听聪明钱要用）")
+    if "solana" in chains and not s.helius_key and not s.solana_rpc_urls:
+        errors.append("启用了 Solana 但没有 Solana 节点：填 HELIUS_API_KEY 或 SOLANA_RPC_URLS（实时监听聪明钱要用）")
+    if s.solana_rpc_urls:
+        from .sources.solana_rpc import parse_urls
+        if not parse_urls(s.solana_rpc_urls):
+            errors.append("SOLANA_RPC_URLS 格式不对：要以 https:// 开头，多个用逗号隔开")
     for c in cfg.evm_chains:
         if c in PUBLIC_RPC and s.rpc_http.get(c) and not s.rpc_wss.get(c):
             continue   # 没有 WebSocket 的链：改用 HTTP 轮询监听

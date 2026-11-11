@@ -75,7 +75,13 @@
 免费版每月只有 100 万额度（每取一笔交易 1 额度，WebSocket 每推送 0.1 MB 数据 2 额度），聪明钱多的时候几天就用完；用完后节点直接拒绝连接（HTTP 429），Solana 的聪明钱信号会几乎归零（11-10 就是这样：一天 1.5 万条 → 几百条，买入从 15 笔掉到 1 笔）。
 - 机器人会在 Telegram 报警（见下面"信号源体检"），`/status` 里也能看到 Solana 监听是否连上、Helius 节点是否正常、被拒绝时节点给的原因。
 - 到 Helius 后台 dashboard.helius.dev 的 Usage 页能看到这个月额度用了多少。
-- 额度用完期间：Solana 节点请求不再重试（每 10 分钟试一次恢复没有），代币分析的权限数据改用 GMGN 的，模拟盘照常买卖 Solana 币。**实盘必须有可用的 Helius 额度**（查余额、确认成交都靠它）。
+- **可以加备用节点（免费）**：Chainstack / Alchemy / QuickNode 等的 Solana 节点都行。在服务器上运行 `python3 deploy/setup_env.py solana`，按提示粘贴节点后台复制的 HTTPS 地址（可以加多个），然后 `sudo systemctl restart memebot`。
+  - 按顺序用：Helius 排第一，额度用完（或 key 无效）自动换下一个，10 分钟后再回头试；某个节点临时出错，这一次请求也换下一个。
+  - 链上监听（WebSocket）也一样：当前节点拒绝连接就马上换下一个。
+  - `/status` 会逐个显示每个节点通不通、哪个用完了；`main.py check` 也会逐个检查。
+  - 免费额度参考（2026-11）：Chainstack 每月 300 万次（每次请求都算 1 次，不用绑卡）；Alchemy 每月 3000 万计算单位（取一笔交易 40，约 75 万次）。注意别给免费账号绑卡开"超额付费"，不然用超了会扣钱。
+- **省额度**：链上监听收到通知时先看交易日志，只是转账 / 建账户 / 设手续费的（没碰任何交易所）直接跳过、不去取交易；最近 7 天平均每天买 150 次以上的刷单型钱包不监听（`smart_money.sol_max_daily_buys`）。`/status` 里能看到跳过了多少。
+- 所有节点都用不了期间：Solana 节点请求不再重试（每 10 分钟试一次恢复没有），代币分析的权限数据改用 GMGN 的，模拟盘照常买卖 Solana 币。**实盘必须有可用的节点额度**（查余额、确认成交都靠它）。
 
 ### 4. QuickNode（ETH / BSC / Base 节点）
 注册后分别创建 Ethereum、BNB Smart Chain、Base 三个主网节点。把每个节点的 HTTP 和 WSS 地址填入 `.env` 里对应的 `*_RPC_HTTP` 和 `*_RPC_WSS`。
