@@ -31,6 +31,13 @@ def test_proxy_return():
     assert abs(proxy_return(1.0, 1.2, 2.0) - 0.96) < 1e-9
     assert proxy_return(1.0, 1.2, 100.0) == 5.0 - 0.04          # 封顶 +500%
     assert proxy_return(1.0, None, None) is None
+    # 之后取不到价格（-1）：默认跳过；调参用 dead=True 按亏光算，不再只统计活下来的币
+    assert proxy_return(1.0, -1, None) is None and proxy_return(1.0, -1, None, dead=True) == -1.0
+    assert proxy_return(1.0, 1.2, -1, dead=True) == -1.0
+    assert abs(proxy_return(1.0, -1, 2.0, dead=True) - 0.96) < 1e-9    # 1 小时取不到、4 小时又有价：数据源一时出错
+    assert proxy_return(1.0, 0.5, -1, dead=True) == -0.35 - 0.04        # 先跌破止损已经卖了
+    # 有影子采样（按真实卖出规则完整模拟）就用它；-8 / -9 是"没采 / 没 K 线"
+    assert proxy_return(1.0, 1.2, 3.0, sim=-0.4) == -0.4 and proxy_return(1.0, 1.2, 3.0, sim=-8) == 3.0 - 1 - 0.04
 
 
 def test_lesson_tags():
@@ -176,5 +183,27 @@ def test_tune_once_end_to_end(tmp_path):
         assert raw["trading"]["auto_min_score"] == 70 or raw.get("strategies")
         st = await br.status_text()
         assert "学到的参数" in st
+        await db.close()
+    asyncio.run(go())
+
+
+def test_entry_cases_count_dead_and_use_shadow(tmp_path):
+    """调参数据：取不到价格的币按亏光算（以前直接跳过），有影子采样就用影子采样的结果。"""
+    async def go():
+        db = DB(tmp_path / "e.db")
+        await db.open()
+        t0 = time.time() - 6 * 3600
+        ft = json.dumps({"score": 80, "smart": 2, "liquidity": 50000, "holders": 500})
+        for tok, p60, p240, sim in (("A", 1.2, 2.0, None), ("B", -1, -1, None), ("C", 1.1, 3.0, -0.3),
+                                    ("D", 1.1, 1.5, -8)):
+            await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features,p60,p240,sim_ret) "
+                             "VALUES(?,?,?,?,?,?,?,?,?,?)", (t0, "solana", tok, tok, "x", 1.0, ft, p60, p240, sim))
+        br = Brain(SimpleNamespace(db=db, cfg=Cfg({"trading": {}})))
+        newtok, _ = await br.entry_cases()
+        assert len(newtok) == 4
+        assert br.data_note == {"n": 4, "sim": 1, "dead": 1}
+        cur = br.current(ENTRY_PARAMS)
+        rets = sorted(c.ret_fn(cur) for c in newtok if c.ret_fn(cur) is not None)
+        assert rets[0] == -1.0 and -0.3 in rets
         await db.close()
     asyncio.run(go())

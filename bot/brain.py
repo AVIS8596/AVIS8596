@@ -34,8 +34,14 @@ COST = 0.04           # 买卖合计成本
 CAP = 5.0             # 单个币的收益最多按 +500% 算，防止一个百倍币把结论带偏
 
 
-def proxy_return(price: float, p60: float | None, p240: float | None, p15: float | None = None) -> float | None:
-    """近似"止损 -35% + 拿 4 小时"的收益。数据不全返回 None。"""
+def proxy_return(price: float, p60: float | None, p240: float | None, p15: float | None = None,
+                 sim: float | None = None, dead: bool = False) -> float | None:
+    """近似"止损 -35% + 拿 4 小时"的收益。数据不全返回 None。
+    sim：影子采样按真实卖出规则完整模拟的结果（有就优先用它）。
+    dead=True：之后取不到价格（记成 -1，多半已经归零 / 池子被撤）按亏光算，不再跳过——
+    跳过它们等于只统计活下来的币，结论会系统性偏乐观（11-12 调参建议"聪明钱 2 → 1"就是这么来的）。"""
+    if sim is not None and -1 <= sim < 199:
+        return min(sim, CAP)
     if not price or price <= 0:
         return None
     if any(p and p > 0 and not sane_ratio(p / price) for p in (p15, p60, p240)):
@@ -43,6 +49,9 @@ def proxy_return(price: float, p60: float | None, p240: float | None, p15: float
     lows = [p for p in (p15, p60) if p and p > 0]
     if lows and min(lows) / price <= 1 + STOP:
         return STOP - COST
+    last = p240 if p240 else p60
+    if dead and last is not None and last < 0:
+        return -1.0
     end = p240 if p240 and p240 > 0 else (p60 if p60 and p60 > 0 else None)
     if end is None:
         return None
@@ -354,6 +363,12 @@ class Brain:
                 await db.kv_set("tuned", tuned)
                 log.info("捆绑上限改为以配置文件为准（之前自动学到的值作废）")
             await db.kv_set("pin_bundle_1111", True)
+        # 11-12 调参数据改为"取不到价格按亏光算 + 优先用影子采样"：旧算法给出的待同意建议作废
+        if not await db.kv_get("tune_dead_fix_1112", False):
+            if await db.kv_get("tune_pending", None):
+                await db.kv_set("tune_pending", None)
+                log.info("旧算法的调参建议已作废（新算法会重新算）")
+            await db.kv_set("tune_dead_fix_1112", True)
         for k, v in tuned.items():
             set_cfg(self.cfg.raw, k, v)
         if tuned:
@@ -396,27 +411,34 @@ class Brain:
     # ---------------- 数据
     async def entry_cases(self, days: float = 4) -> tuple[list[Case], list[Case]]:
         rows = await self.app.db.fetchall(
-            "SELECT ts, price, p15, p60, p240, features, source FROM token_outcomes WHERE ts>? AND price>0 "
-            "AND p60 IS NOT NULL AND p60>0", (time.time() - days * 86400,))
+            "SELECT ts, price, p15, p60, p240, sim_ret, features, source FROM token_outcomes WHERE ts>? AND price>0 "
+            "AND p60 IS NOT NULL AND p60<>0", (time.time() - days * 86400,))
         min_liq = float(self.cfg.get("trading.min_liquidity_usd", 8000))
         newtok, filt = [], []
+        note = {"n": 0, "sim": 0, "dead": 0}
         for r in rows:
             if str(r["source"] or "") == "whynot":
                 continue
-            ret = proxy_return(f(r["price"]), f(r["p60"]), f(r["p240"]) or None, f(r["p15"]) or None)
+            sim = r["sim_ret"] if r["sim_ret"] is not None and -1 <= float(r["sim_ret"]) < 199 else None
+            ret = proxy_return(f(r["price"]), f(r["p60"]), f(r["p240"]) or None, f(r["p15"]) or None,
+                               sim=sim, dead=True)
             if ret is None:
                 continue
+            note["n"] += 1
+            note["sim"] += sim is not None
+            note["dead"] += sim is None and ret == -1.0
             ft = json.loads(r["features"] or "{}")
             newtok.append(Case(f(r["ts"]), lambda v, ft=ft, ret=ret: ret if entry_pass(ft, v, min_liq) else None))
             # 通用过滤只在"有人可能会买"的币上评估：有聪明钱买入，或评分不低
             if int(f(ft.get("smart"))) >= 1 or f(ft.get("score")) >= 60:
                 filt.append(Case(f(r["ts"]), lambda v, ft=ft, ret=ret: ret if filter_pass(ft, v, min_liq) else None))
+        self.data_note = note
         return newtok, filt
 
     async def early_cases(self, days: float = 4) -> list[Case]:
         db = self.app.db
         toks = await db.fetchall("SELECT chain, token, first_ts, p60, p240 FROM early_tok WHERE first_ts>? "
-                                 "AND p240 IS NOT NULL AND p240>0", (time.time() - days * 86400,))
+                                 "AND p240 IS NOT NULL AND p240<>0", (time.time() - days * 86400,))
         if not toks:
             return []
         from .strategies import EARLY_DEFAULTS
@@ -438,7 +460,7 @@ class Brain:
                 if entry <= 0:
                     return None
                 # 结果价是"第一次看到后 1 小时 / 4 小时"，入场晚于第一次看到时这是近似
-                return proxy_return(entry, f(t["p60"]) or None, f(t["p240"]) or None)
+                return proxy_return(entry, f(t["p60"]) or None, f(t["p240"]) or None, dead=True)
             cases.append(Case(f(t["first_ts"]), ret_fn))
         return cases
 
@@ -498,6 +520,10 @@ class Brain:
                f"最近 {r['cases']} 个币里，会买的从 {r['n_old']} 个变成 {r['n_new']} 个，"
                f"近似每笔收益 {r['exp_old'] * 100:+.1f}% → {r['exp_new'] * 100:+.1f}%，"
                f"合计 {r['sum_old'] * 100:+.0f}% → {r['sum_new'] * 100:+.0f}%（按每笔同样金额）")
+        dn = getattr(self, "data_note", None)
+        if dn and dn["n"] and name != "早期建仓":
+            why += (f"。数据：{dn['n']} 个币里 {dn['sim']} 个按影子采样完整模拟，"
+                    f"{dn['dead']} 个之后取不到价格按亏光算，其余按 1 小时 / 4 小时价格近似")
         if mode == "auto" and self.cfg.dry_run:
             await self.apply(r["key"], r["new"], why)
             out.append("🧠 <b>自我调参</b>（模拟盘自动生效）\n" + html.escape(why)
