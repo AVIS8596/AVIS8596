@@ -75,7 +75,7 @@
 免费版每月只有 100 万额度（每取一笔交易 1 额度，WebSocket 每推送 0.1 MB 数据 2 额度），聪明钱多的时候几天就用完；用完后节点直接拒绝连接（HTTP 429），Solana 的聪明钱信号会几乎归零（11-10 就是这样：一天 1.5 万条 → 几百条，买入从 15 笔掉到 1 笔）。
 - 机器人会在 Telegram 报警（见下面"信号源体检"），`/status` 里也能看到 Solana 监听是否连上、Helius 节点是否正常、被拒绝时节点给的原因。
 - 到 Helius 后台 dashboard.helius.dev 的 Usage 页能看到这个月额度用了多少。
-- **可以加备用节点（免费）**：Chainstack / Alchemy / QuickNode 等的 Solana 节点都行。在服务器上运行 `python3 deploy/setup_env.py solana`，按提示粘贴节点后台复制的 HTTPS 地址（可以加多个），然后 `sudo systemctl restart memebot`。
+- **可以加备用节点（免费）**：Chainstack / Alchemy / QuickNode 等的 Solana 节点都行。在服务器上运行 `python3 deploy/setup_env.py solana`，按提示粘贴节点后台复制的 HTTPS 地址（可以加多个），然后 `sudo systemctl restart memebot`。粘贴后会马上测试一次，不通过不保存；Chainstack 地址没复制全（结尾密钥不是 32 位）会提示；粘贴同一家的新地址会替换旧的。
   - 按顺序用：Helius 排第一，额度用完（或 key 无效）自动换下一个，10 分钟后再回头试；某个节点临时出错，这一次请求也换下一个。
   - 链上监听（WebSocket）也一样：当前节点拒绝连接就马上换下一个。
   - `/status` 会逐个显示每个节点通不通、哪个用完了；`main.py check` 也会逐个检查。

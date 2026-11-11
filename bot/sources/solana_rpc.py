@@ -161,7 +161,7 @@ class SolanaRPC:
             self._mark_out(ep, "额度用完")
             raise
         except PlanError:
-            self._mark_out(ep, "key 无效或被停用（401 / 403）", BAD_KEY_SEC)
+            self._mark_out(ep, "地址里的密钥无效（401 / 403）：没复制全，或者在节点后台换过密钥", BAD_KEY_SEC)
             raise
         err = r.get("error") if isinstance(r, dict) else None
         if err and is_quota_text(str(err)):

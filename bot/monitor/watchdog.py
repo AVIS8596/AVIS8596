@@ -31,7 +31,8 @@ def node_hint(err: str) -> str:
                 "到这个节点的后台看额度用了多少：\n用完了 → 加一个备用节点（python3 deploy/setup_env.py solana），"
                 "或者等下个计费周期自动恢复；没用完 → 把这条消息发给 Claude。")
     if "401" in err or "403" in err:
-        return "HTTP 401 / 403 = Helius 的 key 无效或被停用，到 Helius 后台检查 key。"
+        return ("HTTP 401 / 403 = 节点地址里的密钥无效：没复制全，或者在节点后台换过密钥。"
+                "运行 python3 deploy/setup_env.py solana 重新粘贴完整地址（会先测试能不能用）。")
     return "多半是节点或网络临时故障，机器人会一直自动重连；持续很久的话把这条消息发给 Claude。"
 
 

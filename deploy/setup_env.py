@@ -75,24 +75,78 @@ def set_chain(cfg: str, chain: str, enabled: bool) -> str:
     return re.sub(rf"(?m)^(\s*{chain}:\s*\{{\s*enabled:\s*)(true|false)", rf"\g<1>{'true' if enabled else 'false'}", cfg)
 
 
+def host_of(url: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or "").lower()
+
+
+def looks_cut(url: str) -> str:
+    """地址是不是没复制全。只认得出 Chainstack（结尾是 32 位密钥）；看不出来返回空。"""
+    if "chainstack.com" in host_of(url):
+        key = url.rstrip("/").rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[0-9a-f]{32}", key):
+            return f"Chainstack 地址结尾的密钥应该是 32 位，你粘贴的是 {len(key)} 位"
+    return ""
+
+
+def test_node(url: str) -> tuple[bool, str]:
+    """马上请求一次节点（getSlot），确认地址能用。"""
+    import json
+    import urllib.error
+    import urllib.request
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}).encode()
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json",
+                                                          "User-Agent": "memebot-setup/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", "replace")[:150]
+        return False, f"节点拒绝了（HTTP {e.code}）：{msg}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"连不上：{e}"
+    if data.get("error"):
+        return False, f"节点报错：{str(data['error'])[:150]}"
+    return True, f"当前区块 {data.get('result')}"
+
+
 def solana_only() -> None:
-    """只填备用 Solana 节点：python3 deploy/setup_env.py solana"""
+    """填 / 换备用 Solana 节点：python3 deploy/setup_env.py solana
+    粘贴的地址会马上测试一次；和已有地址是同一家（同一个域名）的，直接替换旧的。"""
     text, vals = load_env()
     old = vals.get("SOLANA_RPC_URLS", "")
-    urls = [u for u in old.split(",") if u.strip()]
-    print("=== 添加 Solana 备用节点 ===")
+    urls = [u.strip() for u in old.split(",") if u.strip()]
+    print("=== 添加 / 更换 Solana 备用节点 ===")
     if urls:
         print("现在已有：" + "、".join(mask(u) for u in urls))
+        for u in urls:
+            cut = looks_cut(u)
+            if cut:
+                print(f"⚠️ 现有的 {mask(u)} 没复制全（{cut}），请把完整地址重新粘贴一次，会替换掉它")
+        print("（粘贴同一家的新地址会替换旧的；输入 clear 清空全部）")
     print("把节点后台复制的 HTTPS 地址粘贴进来（https:// 开头），回车；不加了直接回车。")
     while True:
-        v = ask("SOLANA_RPC_URLS", "新的 Solana 节点 HTTPS 地址", r"^https://\S+$", "")
+        v = ask("SOLANA_RPC_URLS", "新的 Solana 节点 HTTPS 地址", r"^(https://\S+|clear)$", "")
         if not v:
             break
+        if v == "clear":
+            urls = []
+            print("  已清空")
+            continue
         if v in urls:
             print("  这个地址已经有了")
             continue
-        urls.append(v)
-        print(f"  ✅ 已加入（第 {len(urls)} 个）")
+        cut = looks_cut(v)
+        if cut:
+            print(f"  ⚠️ 地址好像没复制全：{cut}。请在节点后台用复制按钮复制完整地址再粘贴")
+            continue
+        ok, info = test_node(v)
+        if not ok:
+            print(f"  ❌ 测试没通过：{info}\n     地址没复制全、复制错了节点，或者刚换过密钥？请检查后重新粘贴")
+            continue
+        same = [u for u in urls if host_of(u) == host_of(v)]
+        urls = [u for u in urls if host_of(u) != host_of(v)] + [v]
+        print(f"  ✅ 测试通过（{info}），" + ("已替换旧地址" if same else f"已加入（第 {len(urls)} 个）"))
     text = set_env(text, "SOLANA_RPC_URLS", ",".join(urls))
     ENV.write_text(text, encoding="utf-8")
     os.chmod(ENV, 0o600)
