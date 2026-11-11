@@ -1075,7 +1075,19 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
         # Helius 临时出错（502）：这次换 Chainstack 试，不把 Helius 标成用不了
         state["helius"] = (502, "bad gateway")
         state["chainstack"] = (200, '{"jsonrpc":"2.0","id":1,"result":11}')
-        assert await rpc.call("getSlot", retries=0) == 11 and not rpc.eps[0].out
+        rpc.eps[1].out_until = 0
+        for _ in range(2):                                                         # 不管轮到谁先
+            assert await rpc.call("getSlot", retries=0) == 11 and not rpc.eps[0].out
+        # 轮流用：两个节点都正常时，请求平均分到两个节点
+        state["helius"] = (200, '{"jsonrpc":"2.0","id":1,"result":9}')
+        hits.clear()
+        got = [await rpc.call("getSlot") for _ in range(4)]
+        assert sorted(got) == [9, 9, 11, 11] and hits.count("helius") == 2
+        # 前面的节点被每秒限流（429）：不在原地等着重试，马上换下一个
+        state["helius"] = (429, "Too many requests")
+        hits.clear()
+        assert [await rpc.call("getSlot") for _ in range(2)] == [11, 11] and hits.count("helius") <= 1
+        state["helius"] = (502, "bad gateway")
         # 密钥有效、只是套餐不含某个方法（403）：只有这个方法改用别的节点，其他照常用 Helius
         bodies = []
         orig_request = Sess.request
@@ -1090,7 +1102,7 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
                 return Resp(200, '{"jsonrpc":"2.0","id":1,"result":5}')
             return Resp(200, '{"jsonrpc":"2.0","id":1,"result":11}')
         Sess.request = picky
-        rpc.eps[0].key_ok_at = 0                                                     # 1 分钟内没确认过密钥
+        rpc.eps[0].key_ok_at, rpc._rr = 0, 0                                                   # 1 分钟内没确认过密钥
         try:
             assert await rpc.call("getTokenAccountsByOwner", ["w"], retries=0) == 11
             assert not rpc.eps[0].out and not rpc.eps[0].can("getTokenAccountsByOwner")
@@ -1098,7 +1110,8 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
             bodies.clear()
             assert await rpc.call("getTokenAccountsByOwner", ["w"], retries=0) == 11
             assert bodies == [("chainstack", "getTokenAccountsByOwner")]              # 1 小时内直接用别的节点
-            assert await rpc.call("getAccountInfo", ["x"], retries=0) == 5            # 别的方法照常用 Helius
+            got = {await rpc.call("getAccountInfo", ["x"], retries=0) for _ in range(2)}
+            assert got == {5, 11}                                                     # 别的方法照常轮流用 Helius
             assert "套餐不含：getTokenAccountsByOwner" in await rpc.probe(rpc.eps[0])
             # 验密钥那一下被限速（429 每秒限流）：不能判定密钥无效，只停用这个方法 10 分钟，节点照常用
             def rps(self, method, url, **kw):
@@ -1110,11 +1123,11 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
                     return Resp(429, "exceeded the RPS limit")
                 return Resp(200, '{"jsonrpc":"2.0","id":1,"result":' + ("5" if who == "helius" else "11") + "}")
             Sess.request = rps
-            rpc.eps[0].key_ok_at = 0
+            rpc.eps[0].key_ok_at, rpc._rr = 0, 0
             assert await rpc.call("getProgramAccounts", ["p"], retries=0) == 11
             assert not rpc.eps[0].out and not rpc.eps[0].can("getProgramAccounts")
             assert rpc.eps[0].blocked["getProgramAccounts"][0] - time.time() < 700
-            assert await rpc.call("getAccountInfo", ["x"], retries=0) == 5
+            assert 5 in {await rpc.call("getAccountInfo", ["x"], retries=0) for _ in range(2)}
             # 同时在路上的请求成功返回：说明节点能用，连停用时间一起清掉（以前留下"❌ ，54 分钟后再试"）
             rpc.eps[0].out_until, rpc.eps[0].out_why, rpc.eps[0].out_since = time.time() + 3000, "x", time.time()
             await rpc._post(rpc.eps[0], {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": []}, 0, False)
@@ -1123,6 +1136,7 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
             Sess.request = orig_request
         # key 无效：1 小时内不用它
         state["helius"] = (401, "unauthorized")
+        rpc._rr, rpc.eps[0].key_ok_at = 0, 0
         assert await rpc.call("getSlot", retries=0) == 11 and rpc.eps[0].out
         assert rpc.eps[0].out_until - time.time() > 3000
         # 普通 JSON-RPC 错误照常抛出，不换节点

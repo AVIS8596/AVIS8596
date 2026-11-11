@@ -113,6 +113,7 @@ class SolanaRPC:
             http.set_rate(ep.svc, min(rps, 3) if public else rps)       # 公共节点每 10 秒同一方法最多 40 次
             http.set_rate(ep.svc + "_trade", min(trade_rps, 1) if public else trade_rps)
         self._id = 0
+        self._rr = 0          # 轮流用节点的起点
 
     # ---- 兼容旧用法 ----
     @property
@@ -229,14 +230,19 @@ class SolanaRPC:
         trade = svc.endswith("_trade")
         last: Exception | None = None
         tried = 0
-        for ep in self.eps:
-            if ep.out or not ep.can(method):
-                continue
+        # 轮流用：能用的节点按顺序轮换起点，请求平均分到每个节点（单个节点不容易撞到每秒上限，额度也省着用）。
+        # 前面的节点限流 / 出错不在原地重试，马上换下一个；只有最后一个才按 retries 重试。
+        avail = [ep for ep in self.eps if not ep.out and ep.can(method)]
+        if len(avail) > 1:
+            k = self._rr % len(avail)
+            self._rr += 1
+            avail = avail[k:] + avail[:k]
+        for i, ep in enumerate(avail):
             tried += 1
             self._id += 1
             body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or []}
             try:
-                r = await self._post(ep, body, retries, trade)
+                r = await self._post(ep, body, retries if i == len(avail) - 1 else 0, trade)
             except (QuotaError, PlanError) as e:
                 last = e
                 continue
