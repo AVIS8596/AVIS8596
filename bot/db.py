@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS learn_wallets (
   PRIMARY KEY (chain, address)
 );
 CREATE INDEX IF NOT EXISTS idx_signals_wallet ON signals(chain, wallet, ts);
+CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts);
 """
 
 # 老数据库需要补的列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）

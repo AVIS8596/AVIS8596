@@ -40,11 +40,15 @@ async def daily_report(app: App) -> None:
         if nxt <= now:
             nxt += timedelta(days=1)
         await asyncio.sleep((nxt - now).total_seconds())
-        from bot.trade.review import daily_review
+        from bot.trade.review import daily_review, funnel_text
         try:
             await app.tg.send(await daily_review(app, app.day_start()))
         except Exception as e:  # noqa: BLE001
             log.exception("每日复盘失败: %s", e)
+        try:      # 漏斗单独一条（复盘已经很长，合在一起会超过 Telegram 的长度上限）
+            await app.tg.send(await funnel_text(app, 3))
+        except Exception as e:  # noqa: BLE001
+            log.exception("漏斗统计失败: %s", e)
         try:
             await maintenance(app)
         except Exception as e:  # noqa: BLE001
@@ -107,6 +111,7 @@ async def run_bot(cfg) -> None:
     newtok = NewTokenMonitor(app)
     if "solana" in cfg.enabled_chains:
         sm = SolanaWalletMonitor(app)
+        app.solmon = sm            # /status 里显示它丢弃了多少通知
         jobs.append(("Solana聪明钱监听", sm.run))
         if cfg.get("discovery.pumpportal_new_tokens", True):
             jobs.append(("pump新币", newtok.pumpportal))

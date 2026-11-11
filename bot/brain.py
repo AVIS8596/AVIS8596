@@ -340,6 +340,7 @@ class Brain:
             n = await self.reset()
             await db.kv_set("model_a", None)
             await db.kv_set("model_b", None)
+            await db.kv_set("model_epoch", time.time())
             await db.kv_set("data_fix_v1", True)
             log.warning("数据修正：恢复 %d 个学到的参数，选币模型重新训练", n)
             tg = getattr(self.app, "tg", None)

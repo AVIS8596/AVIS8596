@@ -422,9 +422,12 @@ class SelfModel:
         if not self.cfg.dry_run:
             return ""
         mode = await self.mode()
-        since = min([v.get("trained_at", 0) for v in self.m.values() if v.get("ok")] or [time.time()])
         if mode == "shadow" and bool(self.cfg.get("learning.model_auto_promote", True)):
-            r = await self.record(since=since - 3 * 86400)
+            # 只考最近 24 小时选的币：模型每天重新训练，更早的选择是旧模型做的
+            # （比如 11-09 用错误价格数据训练的那一版，一天选 1978 个、中位 -39%），不能拿来给现在的模型打分
+            since = time.time() - float(self.cfg.get("learning.model_exam_hours", 24)) * 3600
+            epoch = float(await self.app.db.kv_get("model_epoch", 0) or 0)      # 模型被清空重训的时间
+            r = await self.record(since=max(since, epoch))
             if r["n"] >= 30 and r["avg"] >= 0.10 and r["med"] >= 0:
                 await self.app.db.kv_set("model_mode", "on")
                 return (f"🤖 <b>模型通过考核</b>：影子期选了 {r['n']} 个有结果的币，近似平均 {r['avg'] * 100:+.1f}%，"
@@ -456,7 +459,7 @@ class SelfModel:
                 f"{time.strftime('%H:%M', time.localtime(r['ts']))} {r['symbol']}（{'分析' if r['model'] == 'a' else '早期'} "
                 f"{r['score']:.2f}" + (f"，4h {f(r['p240']) / f(r['price']):.1f}倍" if f(r["p240"]) > 0 else "") + "）"
                 for r in recent)))
-        lines.append("考核：影子期选的币有 30 个出结果、平均赚 10% 以上、中位不亏 → 模拟盘自动让它下单；"
+        lines.append("考核：最近 24 小时选的币有 30 个出结果、平均赚 10% 以上、中位不亏 → 模拟盘自动让它下单；"
                      "之后最近 30 个平均转亏 → 自动退回影子")
         lines.append("命令：/model train 立即训练｜/model shadow / on / off")
         return "\n".join(lines)

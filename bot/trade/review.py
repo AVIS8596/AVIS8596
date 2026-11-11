@@ -157,6 +157,87 @@ async def daily_review(app: "App", start: float) -> str:
 
 
 MODE_TEXT = {"off": "已关闭", "shadow": "观察中，只记录不执行", "live": "已接管卖出"}
+FUNNEL_SRC = {"跟单": "跟单", "聪明钱共振+高评分": "跟单", "新币高评分": "新币", "早期建仓": "主动建仓", "强叙事": "主动建仓",
+              "模型买入": "模型"}
+
+
+async def funnel(app: "App", days: int = 3) -> list[dict]:
+    """每天的漏斗：进来多少信号 → 多少被拦在哪 → 买了多少、赚没赚。用来回答"为什么买得少 / 是不是条件太严"。"""
+    from .sizing import source_of
+    db = app.db
+    dry = int(app.cfg.dry_run)
+    day0 = app.day_start()
+    cut = float(app.cfg.get("trading.auto_min_score", 75))
+    out = []
+    for i in range(max(int(days), 1) - 1, -1, -1):
+        a, b = day0 - i * 86400, day0 - (i - 1) * 86400
+        sig = await db.fetchone("SELECT COUNT(*) n, COUNT(DISTINCT wallet) w FROM signals WHERE side='buy' "
+                                "AND ts>=? AND ts<?", (a, b))
+        # 这些信号里，有多少来自现在已经不再监听的钱包（体检可疑 / 拉黑 / 被淘汰）
+        gone = await db.fetchone(
+            "SELECT COUNT(*) n, COUNT(DISTINCT s.wallet) w FROM signals s LEFT JOIN wallets w "
+            "ON w.chain=s.chain AND w.address=s.wallet WHERE s.side='buy' AND s.ts>=? AND s.ts<? "
+            "AND (w.status IS NULL OR w.status NOT IN ('active','manual'))", (a, b))
+        top = await db.fetchall("SELECT COUNT(*) n FROM signals WHERE side='buy' AND ts>=? AND ts<? GROUP BY wallet "
+                                "ORDER BY n DESC LIMIT 10", (a, b))
+        chains = await db.fetchall("SELECT chain, COUNT(*) n FROM signals WHERE side='buy' AND ts>=? AND ts<? "
+                                   "GROUP BY chain ORDER BY n DESC", (a, b))
+        seen: dict[str, float] = {}
+        for r in await db.fetchall("SELECT chain, token, features FROM token_outcomes WHERE ts>=? AND ts<?", (a, b)):
+            try:
+                sc = float((json.loads(r["features"] or "{}") or {}).get("score") or 0)
+            except (TypeError, ValueError):
+                sc = 0.0
+            k = f"{r['chain']}:{r['token']}"
+            seen[k] = max(seen.get(k, 0.0), sc)
+        skips: dict[str, Counter] = {}
+        for r in await db.fetchall("SELECT trigger, cat, COUNT(*) n FROM skipped WHERE ts>=? AND ts<? "
+                                   "GROUP BY trigger, cat", (a, b)):
+            src = FUNNEL_SRC.get(source_of(r["trigger"]), "其他")
+            skips.setdefault(src, Counter())[r["cat"]] += r["n"]
+        buys: Counter = Counter()
+        pnl, still = 0.0, 0
+        for p in await db.fetchall("SELECT reason, status, cost_usd, realized_usd FROM positions WHERE opened_at>=? "
+                                   "AND opened_at<? AND dry_run=?", (a, b, dry)):
+            buys[source_of(p["reason"])] += 1
+            if p["status"] == "open":
+                still += 1
+            else:
+                pnl += _pnl(p)
+        out.append({"start": a, "sig": sig["n"], "wallets": sig["w"], "gone": gone["n"], "gone_w": gone["w"],
+                    "top10": sum(r["n"] for r in top), "chains": [(r["chain"], r["n"]) for r in chains],
+                    "seen": len(seen), "high": sum(1 for v in seen.values() if v >= cut), "cut": cut,
+                    "skips": skips, "buys": buys, "pnl": pnl, "open": still})
+    return out
+
+
+async def funnel_text(app: "App", days: int = 3) -> str:
+    from datetime import datetime
+    from ..chains import CHAINS
+    lines = ["📉 <b>漏斗</b>（每天：进来多少信号 → 拦在哪 → 买了多少）"]
+    for d in await funnel(app, days):
+        day = datetime.fromtimestamp(d["start"], app.tz).strftime("%m-%d")
+        sig = f"{day}：聪明钱买入信号 {d['sig']:,} 条（{d['wallets']} 个钱包"
+        if d["sig"]:
+            sig += f"，最活跃的 10 个占 {d['top10'] / d['sig'] * 100:.0f}%"
+        sig += "）"
+        if d["gone"]:
+            sig += f"，其中 {d['gone']:,} 条来自现在已不再监听的 {d['gone_w']} 个钱包（体检可疑 / 拉黑 / 淘汰）"
+        lines.append(sig)
+        if len(d["chains"]) > 1:
+            lines.append("  按链：" + "、".join(f"{CHAINS[c].name if c in CHAINS else c} {n:,}" for c, n in d["chains"]))
+        lines.append(f"  分析过的币 {d['seen']:,} 个，评分 ≥ {d['cut']:g} 的 {d['high']} 个")
+        for src, c in sorted(d["skips"].items(), key=lambda kv: -sum(kv[1].values())):
+            lines.append(f"  {src}被拦 {sum(c.values()):,} 个币：" + "、".join(f"{k} {n}" for k, n in c.most_common(4)))
+        n = sum(d["buys"].values())
+        if n:
+            tail = f"，已平仓的合计 {fmt_usd(d['pnl'])}" + (f"（还有 {d['open']} 笔持仓中）" if d["open"] else "")
+            lines.append(f"  买入 {n} 笔：" + "、".join(f"{k} {v}" for k, v in d["buys"].most_common()) + tail)
+        else:
+            lines.append("  买入 0 笔")
+    lines.append("看法：信号少 = 源头的问题（钱包少 / 监听掉线）；信号多但被拦得多 = 看拦下那一类的影子单是赚是亏；"
+                 "被拦的本来就亏，就不是条件太严")
+    return "\n".join(lines)
 
 
 async def skipped_review(app: "App", start: float) -> str:

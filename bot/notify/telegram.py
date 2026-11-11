@@ -40,6 +40,7 @@ HELP = """<b>命令列表</b>
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
+/funnel [天数] 漏斗：每天进来多少信号、被拦在哪、买了多少、赚没赚（回答"为什么买得少 / 条件是不是太严"，默认 4 天）
 /sell 编号 [百分比] 手动卖出，例：/sell 3 50
 /alerts off | on 关闭 / 打开聪明钱和新币提醒（交易、风控、复盘照常推送）
 /backtest [天数] 回放回测：用真实入场按 8 套卖出规则重新模拟，看哪套最赚（默认最近 3 天）
@@ -62,6 +63,7 @@ CHAIN_ALIAS = {"sol": "solana", "eth": "ethereum", "bnb": "bsc", "hood": "robinh
 # 在 Telegram 输入框点 "/" 或左下角菜单按钮就能看到、点选的命令（按常用程度排序）
 MENU = [
     ("help", "全部命令和用法"), ("status", "运行状态"), ("positions", "当前持仓"), ("review", "今日复盘"),
+    ("funnel", "[天数]：每天信号 → 被拦 → 买入的漏斗"),
     ("history", "代币地址：这个币的时间线（为什么买 / 没买）"), ("whynot", "代币地址：这个币为什么没买"),
     ("why", "编号：持仓的健康分和卖出规则"), ("sell", "编号 [百分比]：手动卖出"),
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
@@ -461,6 +463,10 @@ class Telegram:
         elif cmd == "/review":
             from ..trade.review import daily_review
             await self.send(await daily_review(self.app, self.app.day_start()))
+        elif cmd == "/funnel":
+            from ..trade.review import funnel_text
+            days = int(args[0]) if args and args[0].isdigit() else 4
+            await self.send(await funnel_text(self.app, min(max(days, 1), 7)))
         elif cmd == "/dynamic":
             await self._dynamic(args)
         elif cmd == "/pause":
@@ -682,6 +688,9 @@ class Telegram:
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
         r = await db.fetchone("SELECT COUNT(*) n FROM signals WHERE ts>?", (time.time() - 3600,))
         lines.append(f"近1小时信号 {r['n']} 条")
+        sm = getattr(self.app, "solmon", None)
+        if sm and sm.dropped:
+            lines.append(f"⚠️ Solana 链上监听因节点额度不够丢弃了 {sm.dropped} 条通知（启动以来；多了说明 Helius 额度跟不上）")
         from ..trade.regime import regime, text as rg_text
         lines.append(rg_text(await regime(self.app)))
         sk = await db.fetchone("SELECT COUNT(*) n FROM skipped WHERE ts>?", (time.time() - 3600,))

@@ -679,3 +679,61 @@ def test_liquidity_check_takes_larger_source():
         st.update(gm=0.0, dex=0.0)
         assert await d.liquidity_check("solana", "T") == 0.0      # 都取不到 = 不知道
     asyncio.run(go())
+
+
+def test_funnel_shows_where_volume_goes(tmp_path):
+    """漏斗：每天进来多少信号、多少来自后来被淘汰的钱包、被拦在哪、买了多少、赚没赚。"""
+    from bot.trade.review import funnel, funnel_text
+
+    async def go():
+        db = DB(tmp_path / "f.db")
+        await db.open()
+        try:
+            tz = ZoneInfo("Asia/Phnom_Penh")
+            from datetime import datetime
+            day0 = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            app = SimpleNamespace(db=db, cfg=PCfg({"trading": {"auto_min_score": 75}}), tz=tz, day_start=lambda: day0)
+            app.cfg.dry_run = True
+            y = day0 - 86400 + 3600                                     # 昨天
+            for addr, st in (("BOT", "suspect"), ("W1", "active"), ("W2", "active")):
+                await db.execute("INSERT INTO wallets(chain,address,status) VALUES('solana',?,?)", (addr, st))
+            n = 0
+            for i in range(40):                                          # 昨天：机器人钱包刷了 40 条，正常钱包 4 条
+                n += 1
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (y + i, "solana", "BOT", f"T{i}", "buy", f"tx{n}"))
+            for w in ("W1", "W2", "W1", "W2"):
+                n += 1
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (y + 100 + n, "solana", w, "TA", "buy", f"tx{n}"))
+            await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                             (y + 500, "solana", "W1", "TA", "sell", "txs"))       # 卖出不算
+            for i in range(3):                                           # 今天：只有正常钱包的 3 条
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (day0 + 60 + i, "solana", "W1", f"N{i}", "buy", f"txn{i}"))
+            for i, (trig, cat) in enumerate((("跟单", "钱包体检不过"), ("跟单", "钱包体检不过"), ("跟单", "快手/战绩差钱包"),
+                                             ("强叙事", "强叙事结构不过关"), ("新币高评分（Pump.fun已毕业）", "流动性低"))):
+                await db.execute("INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) "
+                                 "VALUES(?,?,?,?,?,?,?,?)", (y + i, "solana", f"S{i}", "S", trig, cat, "x", 1.0))
+            for i, sc in enumerate((80, 60, 76, 30)):
+                await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) "
+                                 "VALUES(?,?,?,?,?,?,?)", (y + i, "solana", f"K{i}", "K", "x", 1.0, '{"score": %d}' % sc))
+            await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) "
+                             "VALUES(?,?,?,?,?,?,?)", (y + 9, "solana", "K1", "K", "x", 1.0, '{"score": 90}'))   # 同一个币再看一次
+            for reason, status, cost, real in (("跟单 | 👍较好", "closed", 100, 80), ("早期建仓（快毕业）", "closed", 100, 250),
+                                               ("跟单（试探仓：前10持仓 50% 超限）", "open", 25, 0)):
+                await db.execute("INSERT INTO positions(chain,token,symbol,status,dry_run,reason,cost_usd,realized_usd,"
+                                 "opened_at) VALUES('solana','P','P',?,1,?,?,?,?)", (status, reason, cost, real, y + 50))
+            d = await funnel(app, 2)
+            yd, td = d[0], d[1]
+            assert yd["sig"] == 44 and yd["wallets"] == 3 and yd["gone"] == 40 and yd["gone_w"] == 1 and yd["top10"] == 44
+            assert yd["seen"] == 4 and yd["high"] == 3                              # K0 80、K1 90、K2 76
+            assert yd["skips"]["跟单"]["钱包体检不过"] == 2 and yd["skips"]["主动建仓"]["强叙事结构不过关"] == 1
+            assert yd["skips"]["新币"]["流动性低"] == 1
+            assert yd["buys"] == {"跟单": 1, "早期建仓": 1, "试探仓": 1} and abs(yd["pnl"] - 130) < 1e-9 and yd["open"] == 1
+            assert td["sig"] == 3 and td["gone"] == 0 and not td["buys"]
+            txt = await funnel_text(app, 2)
+            assert "其中 40 条来自现在已不再监听的 1 个钱包" in txt and "买入 3 笔" in txt and "买入 0 笔" in txt
+        finally:
+            await db.close()
+    asyncio.run(go())

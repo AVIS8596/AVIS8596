@@ -94,6 +94,11 @@ def test_shadow_then_on_and_promotion(tmp_path):
                              "VALUES(?,?,?,?,?,?,?,?,?,?)", (now - 3600 * 5, "solana", f"X{i}", "S", "a", 0.9, 1.0, 0,
                                                              1.2, 1.6 if i % 3 else 0.9))
         sm.m["a"]["trained_at"] = now - 86400
+        # 旧模型两天前选的一大堆烂币（中位 -39%）不算在现在的模型头上
+        for i in range(200):
+            await db.execute("INSERT INTO model_picks(ts,chain,token,symbol,model,score,price,acted,p60,p240) "
+                             "VALUES(?,?,?,?,?,?,?,?,?,?)", (now - 2 * 86400, "solana", f"O{i}", "S", "a", 0.9, 1.0, 0,
+                                                             0.5, 0.3))
         msg = await sm.promote_check()
         assert "通过考核" in msg and await sm.mode() == "on"
         await sm._pick("a", "solana", "T9", "NEW", 0.9, 1.0, {"symbol": "NEW", "price": 1.0})
