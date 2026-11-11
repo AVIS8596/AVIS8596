@@ -36,6 +36,17 @@ class Fill:
     error: str = ""
     unknown: bool = False     # 状态未知（需要人工确认）
     quote: float = 0.0        # 下单那一刻的报价（算真实成本用）
+    note: str = ""            # 成交的特殊情况说明（比如池子被抽干、只卖回一小部分），会写进卖出原因
+
+
+RECHECK_SEC = 3.0             # 池子看起来被抽干时，隔几秒换数据源再确认一次
+IMPACT_CAP = 0.3
+
+
+def pool_impact(usd: float, liq: float) -> float:
+    """恒定乘积池子的价格冲击：池子两边一共 liq 美元（单边 liq/2），成交 usd 美元 → 少拿 usd / (liq/2 + usd)。
+    金额远小于池子时 ≈ 2 × usd / liq；池子被抽干时接近 100%（卖不出钱）。"""
+    return usd / (liq / 2 + usd) if liq > 0 and usd > 0 else 0.0
 
 
 # ====================================================================== 模拟盘
@@ -68,25 +79,56 @@ class DryRunExecutor:
         if px <= 0 or npx <= 0:
             return Fill(False, error="取不到价格，模拟卖出失败")
         usd = raw / 10 ** decimals * px
-        native = max(usd / npx * (1 - await self._cost(token, usd, "sell")) - self._fixed(), 0.0)
-        return Fill(True, "DRYRUN", raw, decimals, native, quote=px)
+        cost, impact, liq = await self._cost_detail(token, usd, "sell")
+        native = max(usd / npx * (1 - cost) - self._fixed(), 0.0)
+        note = ""
+        if impact > IMPACT_CAP:      # 池子被抽走了大半：报价还在，但卖不回那么多钱
+            note = f"池子只剩 ${liq:,.0f}，这笔按报价值 ${usd:,.0f}，实际只能卖回约 {max(1 - cost, 0) * 100:.0f}%"
+        return Fill(True, "DRYRUN", raw, decimals, native, quote=px, note=note)
 
     def _fixed(self) -> float:
         return float(self.app.cfg.per_chain("trading.sim_fixed_fee_native", self.chain, 0) or 0)
 
     async def _cost(self, token: str, usd: float, side: str = "buy") -> float:
-        """单边成交成本 = max(公式估算, 实盘实测中位成本)。
-        公式 = 手续费（默认 1%）+ 价格冲击（约 2 × 金额 / 流动性，上限 30%）；
-        实测 = 实盘成交价比报价多花 / 少拿的中位数（至少 8 笔实盘成交才用，见 costs.py）。"""
+        return (await self._cost_detail(token, usd, side))[0]
+
+    async def _cost_detail(self, token: str, usd: float, side: str = "buy") -> tuple[float, float, float]:
+        """单边成交成本 = max(公式估算, 实盘实测中位成本)。返回 (成本, 价格冲击, 用到的流动性)。
+        公式 = 手续费（默认 1%）+ 价格冲击（恒定乘积池子：金额 / (流动性 / 2 + 金额)，小单 ≈ 2 × 金额 / 流动性）；
+        实测 = 实盘成交价比报价多花 / 少拿的中位数（至少 8 笔实盘成交才用，见 costs.py）。
+
+        卖出不封顶：池子被撤走 / 抽干后报价还挂着，但真去卖只能拿回池子里剩的那点钱（以前最多只扣 30%，偏乐观）。
+        为了不因为数据一时出错把持仓算成归零：冲击超过 30% 时等几秒、换数据源（GMGN 重新取 + DexScreener）再确认一次，
+        取几次里最大的流动性；复查拿不到数就按老办法最多扣 30%；一开始就取不到流动性（= 不知道）仍按 5% 估算。
+        买入有"单笔不超过池子 3%"的限制，冲击沿用 30% 封顶。"""
         fee = float(self.app.cfg.get("trading.sim_fee_pct", 1)) / 100
         try:     # GMGN 被限流时最多等 3 秒，取不到流动性就按 5% 冲击估算，不让模拟成交卡住
             liq = float((await asyncio.wait_for(self.app.data.overview(self.chain, token), 3)).get("liquidity") or 0)
         except Exception:  # noqa: BLE001
             liq = 0.0
-        impact = min(2 * usd / liq, 0.3) if liq > 0 else 0.05
+        impact = pool_impact(usd, liq) if liq > 0 else 0.05
+        if side == "buy":
+            impact = min(impact, IMPACT_CAP)
+        elif impact > IMPACT_CAP:
+            again = 0.0
+            check = getattr(self.app.data, "liquidity_check", None)
+            if check:
+                await asyncio.sleep(RECHECK_SEC)
+                try:
+                    again = float(await asyncio.wait_for(check(self.chain, token), 10) or 0)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("流动性复查失败 %s: %s", token, e)
+            if again > 0:        # 复查拿到了数：用几次里最大的流动性
+                liq = max(liq, again)
+                impact = pool_impact(usd, liq)
+            else:                # 复查拿不到数，确认不了：按老办法最多扣 30%，不凭一次读数把持仓算成归零
+                impact = IMPACT_CAP
+            if impact > IMPACT_CAP:
+                log.info("模拟卖出 %s：池子只剩 $%.0f，卖 $%.0f 的价格冲击 %.0f%%", token, liq, usd, impact * 100)
         from .costs import measured
         m = measured(getattr(self.app, "live_costs", None), self.chain, side)
-        return max(fee + impact, m) if m is not None else fee + impact
+        cost = max(fee + impact, m) if m is not None else fee + impact
+        return min(cost, 1.0), impact, liq
 
 
 # ====================================================================== Solana

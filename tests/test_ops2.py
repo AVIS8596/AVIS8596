@@ -571,3 +571,111 @@ def test_sane_ratio_guards():
     assert proxy_return(1.0, 1.2, 2.0) is not None
     rows = [{"price": 1e-15, "p60": 1.0, "features": "{}"}] + [{"price": 1.0, "p60": 1.1, "features": "{}"}] * 3
     assert analyze_rows(rows, "p60")["n"] == 3
+
+
+def test_dryrun_sell_in_drained_pool(tmp_path, monkeypatch):
+    """模拟卖出按池子里真有的钱算：池子被抽干只能卖回一点点；数据一时出错（复查不一致 / 复查拿不到）不会把持仓算成归零。"""
+    from bot.trade import executors
+    from bot.trade.executors import DryRunExecutor, Fill, pool_impact
+    from bot.trade.positions import PositionManager
+
+    monkeypatch.setattr(executors, "RECHECK_SEC", 0)
+    assert abs(pool_impact(100, 1_000_000) - 2 * 100 / 1_000_000) < 1e-7      # 小单：和原来的估算一样
+    assert pool_impact(100, 2) > 0.98 and pool_impact(100, 200) == 0.5 and pool_impact(100, 0) == 0.0
+
+    async def go():
+        db = DB(tmp_path / "d.db")
+        await db.open()
+        try:
+            st = {"liq": 1_000_000.0, "again": 0.0, "checks": 0}
+
+            async def ov(chain, token):
+                return {"liquidity": st["liq"]}
+
+            async def price(chain, token):
+                return 1.0
+
+            async def check(chain, token):
+                st["checks"] += 1
+                return st["again"]
+
+            async def native_price(chain):
+                return 100.0
+            cfg = PCfg({"trading": {"sim_fee_pct": 1, "sim_fixed_fee_native": {"solana": 0}}, "exit": {}})
+            app = SimpleNamespace(cfg=cfg, live_costs=None, db=db, native_price=native_price,
+                                  data=SimpleNamespace(overview=ov, price=price, liquidity_check=check))
+            ex = DryRunExecutor(app, "solana")
+            raw = 100 * 10 ** 6                                   # 100 个币，报价 $1 → 值 $100
+
+            f1 = await ex.sell("T", raw, 6, 1000)                 # 池子很深：只扣 1% 手续费
+            assert abs(f1.native * 100 - 100 * (1 - 0.01 - 0.0002)) < 0.01 and not f1.note and st["checks"] == 0
+            st.update(liq=2.0, again=2.0)                          # 池子被撤空，复查也是空的：几乎卖不回钱
+            f2 = await ex.sell("T", raw, 6, 1000)
+            assert f2.ok and f2.native * 100 < 1.0 and "池子只剩 $2" in f2.note and st["checks"] == 1
+            st.update(liq=2.0, again=500_000.0)                    # 第一次读数是错的，复查说池子还在：正常成交
+            f3 = await ex.sell("T", raw, 6, 1000)
+            assert f3.native * 100 > 98 and not f3.note
+            st.update(liq=2.0, again=0.0)                          # 复查拿不到数：确认不了，最多扣 30%（老办法）
+            f4 = await ex.sell("T", raw, 6, 1000)
+            assert abs(f4.native * 100 - 69) < 0.01 and not f4.note
+            st.update(liq=0.0)                                     # 一开始就取不到流动性：按 5% 估
+            f5 = await ex.sell("T", raw, 6, 1000)
+            assert abs(f5.native * 100 - 94) < 0.01 and not f5.note
+            st.update(liq=200.0, again=200.0)                      # 池子被抽走大半：卖 $100 只能拿回一半
+            f6 = await ex.sell("T", raw, 6, 1000)
+            assert abs(f6.native * 100 - 49) < 0.01 and "实际只能卖回约 49%" in f6.note
+            st.update(liq=2.0, again=2.0)                          # 买入沿用 30% 封顶
+            assert abs(await ex._cost("T", 100, "buy") - 0.31) < 1e-6
+
+            # 持仓管理：这种成交会写进卖出原因
+            sent, closed = [], []
+
+            async def trade_sell(p, fill, usd, reason, is_closed, realized):
+                sent.append((reason, usd))
+
+            async def sell(token, amt, dec, slip, urgent=False):
+                return Fill(True, "DRYRUN", amt, dec, 0.004, quote=1.0, note="池子只剩 $2，这笔按报价值 $100，实际只能卖回约 0%")
+            app.trader = SimpleNamespace(exec={"solana": SimpleNamespace(sell=sell)})
+            app.tg = SimpleNamespace(trade_sell=trade_sell)
+            pm = PositionManager.__new__(PositionManager)
+            pm.app, pm.cfg, pm._selling, pm._next_try = app, cfg, set(), {}
+
+            async def close(p, realized, reason):
+                closed.append((reason, realized))
+            pm._close = close
+            pid = await db.execute(
+                "INSERT INTO positions(chain,token,symbol,status,dry_run,decimals,amount_raw,remaining_raw,cost_usd,"
+                "realized_usd,tp_stage,opened_at) VALUES('solana','T','X','open',1,6,?,?,100,0,0,?)",
+                (str(raw), str(raw), time.time() - 600))
+            await pm.sell({"id": pid}, 100, "止损 -35%", 1.0)
+            assert closed and closed[0][0].startswith("止损 -35%｜池子只剩 $2") and abs(closed[0][1] - 0.4) < 1e-9
+            assert sent and "池子只剩" in sent[0][0]
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_liquidity_check_takes_larger_source():
+    from bot.data import DataHub
+
+    async def go():
+        d = DataHub.__new__(DataHub)
+        d.provider, d.app, d._dex_liq = "gmgn", SimpleNamespace(gmgn=object()), {}
+        st = {"gm": 5.0, "dex": 900.0}
+
+        async def gm_info(chain, token, max_age=5):
+            assert max_age == 0                                   # 复查不走缓存
+            return {"liquidity": st["gm"]} if st["gm"] else {}
+
+        async def dex_prices(chain, tokens):
+            if st["dex"]:
+                d._dex_liq[(chain, tokens[0])] = (time.time(), st["dex"])
+            return {}
+        d._gm_info, d.dex_prices = gm_info, dex_prices
+        assert await d.liquidity_check("solana", "T") == 900.0    # GMGN 说 $5、DexScreener 说 $900：取大的
+        d._dex_liq.clear()
+        st.update(gm=3.0, dex=0.0)
+        assert await d.liquidity_check("solana", "T") == 3.0
+        st.update(gm=0.0, dex=0.0)
+        assert await d.liquidity_check("solana", "T") == 0.0      # 都取不到 = 不知道
+    asyncio.run(go())

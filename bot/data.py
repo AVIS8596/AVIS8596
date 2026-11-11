@@ -24,6 +24,7 @@ class DataHub:
         self.app = app
         self.provider = app.cfg.get("data.provider", "gmgn")
         self._dex: dict[tuple[str, str], tuple[float, float]] = {}   # DexScreener 兜底价格缓存
+        self._dex_liq: dict[tuple[str, str], tuple[float, float]] = {}   # DexScreener 的池子流动性（复查用）
         self._px: dict[tuple[str, str], tuple[float, float]] = {}
         self._info: dict[tuple[str, str], tuple[float, dict]] = {}
 
@@ -121,12 +122,25 @@ class DataHub:
                 liq, px = f(dig(r, "liquidity.usd", default=0)), f(r.get("priceUsd"))
                 if px > 0 and liq >= best.get(a, (-1, 0))[0]:
                     best[a] = (liq, px)
-            for a, (_, px) in best.items():
+            for a, (liq, px) in best.items():
                 out[low[a]] = px
                 self._dex[(chain, low[a])] = (now, px)
+                self._dex_liq[(chain, low[a])] = (now, liq)
         if len(self._dex) > 5000:
             self._dex.clear()
+            self._dex_liq.clear()
         return out
+
+    async def liquidity_check(self, chain: str, token: str) -> float:
+        """流动性复查：GMGN 不走缓存重新取一次 + DexScreener，返回两者里较大的（都取不到返回 0 = 不知道）。
+        模拟卖出发现池子像是被抽干时用，避免单一数据源一时出错。"""
+        gm = 0.0
+        if self.use_gmgn:
+            gm = f((await self._gm_info(chain, token, max_age=0)).get("liquidity"))
+        await self.dex_prices(chain, [token])
+        hit = self._dex_liq.get((chain, token))
+        dex = hit[1] if hit and time.time() - hit[0] < 60 else 0.0
+        return max(gm, dex)
 
     async def native_usd(self, chain: str) -> float:
         info = CHAINS[chain]

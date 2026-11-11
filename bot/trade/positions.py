@@ -579,6 +579,8 @@ class PositionManager:
                     await self.app.db.execute("UPDATE positions SET sell_attempts=? WHERE id=?", (attempts, pid))
                     await self.app.tg.trade_failed(chain, {"symbol": p["symbol"], "address": p["token"]}, "卖出", fill)
                 return
+            if fill.note:      # 比如池子被抽干、只卖回一小部分：写进卖出原因，复盘时一眼能看出来
+                reason = f"{reason}｜{fill.note}"
             new_remaining = max(remaining - fill.token_raw, 0)
             realized = float(p["realized_usd"] or 0) + usd
             stage = int(p["tp_stage"] or 0) + (1 if reason.startswith("止盈") else 0)
