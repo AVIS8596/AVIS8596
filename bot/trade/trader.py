@@ -29,6 +29,7 @@ SKIP_CATS = [("池子没烧", "池子能被撤"), ("论证：叙事分", "强叙
              ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过")]
 
 
+EXPERIMENT = "新币实验仓"
 CURVE_WORDS = ("dbc", "launchlab", "bonding", "curve", "moonshot", "boop", "bonk")
 CURVE_NAMES = ("pump", "pumpfun", "pump_fun", "pump.fun")
 
@@ -401,6 +402,10 @@ class Trader:
         if amount <= 0:
             return
         reason = f"{reason} | {TIER_NAME[tier]}"
+        if reason.startswith(EXPERIMENT):       # 实验仓：小仓位多收集真实成交数据
+            m = float((self.cfg.get("trading.experiment", {}) or {}).get("size_mult", 0.25))
+            amount = round(amount * m, 4)
+            reason += f" | 实验仓 ×{m:g}"
         if probe:
             amount = round(amount * float(probe_cfg(self.cfg)["size_mult"]), 4)
             reason += f" | 试探仓 ×{float(probe_cfg(self.cfg)['size_mult']):g}"

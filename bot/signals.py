@@ -242,10 +242,15 @@ class SignalHub:
                 return   # 市值虚高（成交量和市值严重不匹配），不推送也不买
             if rep["score"] >= float(self.cfg.get("alerts.min_token_score_alert", 60)):
                 await self.app.tg.token_report(rep, title=f"🆕 新币（{source}）", low=True)
-            if self.cfg.get("trading.auto_trade", False) and \
-                    rep["score"] >= float(self.cfg.get("trading.auto_min_score", 75)) and \
-                    len(rep.get("smart_buyers", [])) >= int(self.cfg.get("trading.auto_min_cluster", 2)):
-                await self.app.trader.consider(chain, token, rep, reason=f"新币高评分（{source}）",
-                                               wallets=rep.get("smart_buyers", []))
+            exp = self.cfg.get("trading.experiment", {}) or {}
+            enough = len(rep.get("smart_buyers", [])) >= int(self.cfg.get("trading.auto_min_cluster", 2))
+            if self.cfg.get("trading.auto_trade", False) and enough:
+                if rep["score"] >= float(self.cfg.get("trading.auto_min_score", 75)):
+                    await self.app.trader.consider(chain, token, rep, reason=f"新币高评分（{source}）",
+                                                   wallets=rep.get("smart_buyers", []))
+                elif exp.get("enabled") and rep["score"] >= float(exp.get("min_score", 60)):
+                    # 实验仓：评分差一点（60~75）的新币，小仓位买，多收集真实数据；所有防阴谋盘的规则照常
+                    await self.app.trader.consider(chain, token, rep, reason=f"新币实验仓（{rep['score']} 分，{source}）",
+                                                   wallets=rep.get("smart_buyers", []))
         finally:
             self._pending_new.discard(key)

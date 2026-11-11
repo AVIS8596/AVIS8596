@@ -36,6 +36,30 @@ def _pct(v: Any) -> float:
     return x * 100 if 0 < x <= 1 else x
 
 
+def gsec_extra(gsec: dict | None) -> dict:
+    """GMGN 安全数据里机器人以前没用上的几项（先记进结果档案，用数据看哪些能提前认出骗局）。"""
+    if not gsec:
+        return {}
+    yes = str(gsec.get("is_wash_trading", "")).lower() in ("1", "true", "yes")
+    return {"rug_ratio_pct": round(_pct(gsec.get("rug_ratio")), 2),
+            "rat_trade_pct": round(_pct(gsec.get("rat_trader_amount_rate")), 2),
+            "bundler_trade_pct": round(_pct(gsec.get("bundler_trader_amount_rate")), 2),
+            "wash": int(yes), "sniper_n": int(f(gsec.get("sniper_count")))}
+
+
+def gm_extra(ov: dict) -> dict:
+    """GMGN 代币信息里的统计和社交（新钱包、机器人、蓝筹、钓鱼钱包、推特 / 官网 / TG）。"""
+    st, tg, link = ov.get("stat") or {}, ov.get("tags_stat") or {}, ov.get("link") or {}
+    return {"fresh_pct": round(_pct(st.get("fresh_wallet_rate")), 2),
+            "bot_pct": round(_pct(st.get("bot_degen_rate")), 2),
+            "bluechip_pct": round(_pct(st.get("bluechip_owner_percentage")), 2),
+            "entrap_pct": round(_pct(st.get("top_entrapment_trader_percentage")), 2),
+            "rat_top_pct": round(_pct(st.get("top_rat_trader_percentage")), 2),
+            "fresh_n": int(f(tg.get("fresh_wallets"))), "sniper_wallets": int(f(tg.get("sniper_wallets"))),
+            "has_x": int(bool(link.get("twitter_username"))), "has_web": int(bool(link.get("website"))),
+            "has_tg": int(bool(link.get("telegram")))}
+
+
 async def _empty_dict() -> dict:
     return {}
 
@@ -187,6 +211,7 @@ class Analyzer:
             log.debug("团伙查询失败: %s", e)
             rep["gang_n"] = 0
         rep["exchange"] = ov.get("exchange", "")
+        rep.update(gm_extra(ov))
         dev = ov.get("dev") or {}
         rep["dev_launches"] = int(f(dev.get("creator_open_count")))           # 项目方以前发过几个币
         rep["dev_sold"] = int(str(dev.get("creator_token_status") or "").lower() in ("sell", "creator_close"))
@@ -332,6 +357,7 @@ class Analyzer:
         ex = self._extra(res, creator, launch_ts)
         # GMGN：burn_status "burn" = 池子已烧，"" = 没烧；GMGN 没返回安全数据时记成 None（不知道）
         ex["lp_burn"] = str(gsec.get("burn_status") or "") if gsec else None
+        ex.update(gsec_extra(gsec))
         # 已知"阴谋地址"/早期发现者现在的持仓（来自大涨币挖矿）：先只记录，让结果档案告诉我们它们在场时是涨是跌
         if g_hold and supply:
             ks = list(g_hold)
@@ -459,6 +485,7 @@ class Analyzer:
         facts.age_hours = (time.time() - launch_ts) / 3600 if launch_ts else 0
         ex = self._extra(res, creator, launch_ts)
         ex["lp_burn"] = str((gsec or {}).get("burn_status") or "")
+        ex.update(gsec_extra(gsec))
         return ex
 
     async def _block_at(self, chain: str, ts: float) -> int:
@@ -628,6 +655,13 @@ class Analyzer:
             feats["dev_sold"] = rep.get("dev_sold", 0)
             feats["lp_burned"] = int(rep.get("lp_burn") == "burn")
             feats["gang_n"] = rep.get("gang_n", 0)
+            for k in ("fresh_pct", "bot_pct", "bluechip_pct", "entrap_pct", "rat_top_pct", "fresh_n", "sniper_wallets",
+                      "has_x", "has_web", "has_tg", "rug_ratio_pct", "rat_trade_pct", "bundler_trade_pct", "wash",
+                      "sniper_n", "exchange"):
+                if k in rep:
+                    feats[k] = rep[k]
+            from ..trade.trader import pullable_pool
+            feats["lp_pullable"] = int(bool(pullable_pool(rep)))
             await db.execute(
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
                 (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),

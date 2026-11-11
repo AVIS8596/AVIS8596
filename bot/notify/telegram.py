@@ -37,6 +37,7 @@ HELP = """<b>命令列表</b>
 /learn auto 立即自动找一轮高手 | /learn del 地址 不再学习
 /learn token 代币地址 拆解这个币的盈利前 20 名（什么时候、什么市值买的，是不是内部人）
 /learn data [15|60|240] 从结果档案里学习：各项特征分档后，之后 15 分钟/1 小时/4 小时的涨跌
+/learn early 早期赢家 vs 早期骗局：之后涨了 3 倍的币和归零 / 撤池子的币，刚被发现时的数据有什么不同
 /dynamic 动态管理状态和新旧规则对比
 /dynamic on | shadow | off 接管卖出 / 只观察 / 关闭
 /review 立即看今日复盘
@@ -561,6 +562,9 @@ class Telegram:
             await self.send("开始自动找高手：收集 KOL / 聪明钱钱包 → 按 30 天利润取前 20 → 逐个生成画像，大约需要几分钟……")
             n = await ln.auto("solana")
             await self.send(f"自动学习完成，新增/更新 {n} 个画像。发 /learn 查看汇总")
+        elif args[0].lower() == "early":
+            from ..trade.early_report import early_report
+            await self.send(await early_report(self.app))
         elif args[0].lower() == "data":
             from ..trade.insight import feature_report
             h = {"15": "p15", "60": "p60", "240": "p240"}.get(args[1] if len(args) > 1 else "60", "p60")

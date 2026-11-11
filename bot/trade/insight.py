@@ -32,6 +32,17 @@ BUCKETS = [
     ("winner_pct", "精准钱包持仓%", [0.01, 10, 25]),
     ("liq_mcap", "池子/市值", [0.3, 0.6, 0.85]),       # 池子相对市值特别深：常见于"先放大池子装安全、再撤池子"
     ("lp_burned", "池子已烧（1=是）", [1]),
+    # 11-12 起记录（GMGN 上有、以前没用的数据）
+    ("lp_pullable", "池子能被撤（1=是）", [1]),
+    ("fresh_pct", "新钱包占比%", [5, 20, 40]),
+    ("bot_pct", "机器人钱包占比%", [5, 20, 40]),
+    ("bluechip_pct", "蓝筹持有者%", [0.01, 2, 5]),
+    ("entrap_pct", "钓鱼钱包%", [0.01, 5, 15]),
+    ("rat_trade_pct", "老鼠仓交易%", [0.01, 5, 20]),
+    ("rug_ratio_pct", "跑路概率%", [1, 20, 50]),
+    ("bundler_trade_pct", "捆绑交易%", [5, 20, 40]),
+    ("has_x", "有推特（1=是）", [1]),
+    ("has_web", "有官网（1=是）", [1]),
 ]
 
 
@@ -45,11 +56,16 @@ def _label(edges: list[float], i: int) -> str:
     return f"{k(edges[i - 1])}~{k(edges[i])}"
 
 
-def _stats(rs: list[float]) -> dict:
-    rs = sorted(rs)
+def _stats(all_rs: list) -> dict:
+    """None = 之后取不到价格（多半已经归零 / 池子被撤），单独算"无价"比例，不参与涨跌统计。"""
+    rs = sorted(r for r in all_rs if r is not None)
+    gone = sum(1 for r in all_rs if r is None) / len(all_rs) if all_rs else 0.0
+    if not rs:
+        return {"n": len(all_rs), "med": -1.0, "mean": -1.0, "hit": 0.0, "dump": 1.0, "gone": gone}
     capped = [min(r, 3.0) for r in rs]   # 单个百倍币不能把平均值带飞：收益按最多 +300% 计
-    return {"n": len(rs), "med": rs[len(rs) // 2], "mean": sum(capped) / len(capped),
-            "hit": sum(1 for r in rs if r >= 0.3) / len(rs), "dump": sum(1 for r in rs if r <= -0.3) / len(rs)}
+    return {"n": len(all_rs), "med": rs[len(rs) // 2], "mean": sum(capped) / len(capped),
+            "hit": sum(1 for r in rs if r >= 0.3) / len(rs), "dump": sum(1 for r in rs if r <= -0.3) / len(rs),
+            "gone": gone}
 
 
 def analyze_rows(rows: list[dict], horizon: str) -> dict:
@@ -57,14 +73,20 @@ def analyze_rows(rows: list[dict], horizon: str) -> dict:
     data = []
     for r in rows:
         p0, p1 = f(r.get("price")), f(r.get(horizon))
-        if p0 <= 0 or p1 <= 0 or not sane_ratio(p1 / p0):
+        if p0 <= 0:
             continue
+        if p1 < 0:                       # 取不到价格：多半已经归零 / 池子被撤（也可能是数据源一时出错）
+            ret = None
+        elif p1 == 0 or not sane_ratio(p1 / p0):
+            continue
+        else:
+            ret = p1 / p0 - 1
         feats = json.loads(r.get("features") or "{}")
         b, s = f(feats.get("buys_1h")), f(feats.get("sells_1h"))
         feats["buy_sell"] = b / s if s > 0 else (3.0 if b > 0 else 0.0)
         if f(feats.get("mcap")) > 0 and feats.get("liquidity") is not None:
             feats["liq_mcap"] = f(feats.get("liquidity")) / f(feats.get("mcap"))
-        data.append((feats, p1 / p0 - 1, int(r.get("bought") or 0), str(r.get("source") or "")))
+        data.append((feats, ret, int(r.get("bought") or 0), str(r.get("source") or "")))
     if not data:
         return {"n": 0}
     out = {"n": len(data), "all": _stats([d[1] for d in data]), "features": {}}
@@ -95,7 +117,8 @@ async def feature_report(app: "App", horizon: str = "p60", days: float = 3) -> s
     a = res["all"]
     lines = [f"<b>从结果里学习</b>（最近 {days:g} 天 {res['n']} 个币，看{H_NAME[horizon]}后的涨跌）",
              f"全部：中位 {a['med'] * 100:+.0f}%，平均 {a['mean'] * 100:+.0f}%，"
-             f"涨超 30% 的占 {a['hit'] * 100:.0f}%，跌超 30% 的占 {a['dump'] * 100:.0f}%"]
+             f"涨超 30% 的占 {a['hit'] * 100:.0f}%，跌超 30% 的占 {a['dump'] * 100:.0f}%，"
+             f"之后取不到价格（多半归零 / 撤池子）{a['gone'] * 100:.0f}%"]
     if "bought" in res:
         b = res["bought"]
         lines.append(f"机器人买过的 {b['n']} 个：中位 {b['med'] * 100:+.0f}%，平均 {b['mean'] * 100:+.0f}%，"
@@ -107,7 +130,7 @@ async def feature_report(app: "App", horizon: str = "p60", days: float = 3) -> s
         lines.append(f"\n<b>{name}</b>")
         for lab, st in groups:
             lines.append(f"  {lab}：{st['n']} 个，中位 {st['med'] * 100:+.0f}%，涨超30% {st['hit'] * 100:.0f}%，"
-                         f"跌超30% {st['dump'] * 100:.0f}%")
+                         f"跌超30% {st['dump'] * 100:.0f}%，无价 {st['gone'] * 100:.0f}%")
             edge = st["hit"] - st["dump"]
             best.append((edge, f"{name} {lab}"))
             worst.append((edge, f"{name} {lab}"))

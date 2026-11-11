@@ -342,3 +342,42 @@ def test_pullable_pool_blocked(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_new_token_experiment_lane():
+    """新币评分 60~75（差一点）：走"新币实验仓"；≥ 75 正常买；< 60 不买；实验仓关掉就不买。"""
+    from bot.signals import SignalHub
+
+    async def go():
+        calls = []
+
+        async def consider(chain, token, rep, reason="", wallets=None, **kw):
+            calls.append(reason)
+
+        async def analyze(chain, token, source=""):
+            return dict(rep_box[0])
+
+        async def noop(*a, **k):
+            pass
+        raw = {"trading": {"auto_trade": True, "auto_min_score": 75, "auto_min_cluster": 2,
+                           "experiment": {"enabled": True, "min_score": 60, "size_mult": 0.25}},
+               "discovery": {"min_liquidity_usd": 5000}, "alerts": {"min_token_score_alert": 99}}
+        hub = SignalHub.__new__(SignalHub)
+        from bot.utils import TTLSet
+        hub.app = SimpleNamespace(analyzer=SimpleNamespace(analyze=analyze), trader=SimpleNamespace(consider=consider),
+                                  tg=SimpleNamespace(token_report=noop))
+        hub.cfg = Cfg(raw)
+        hub._pending_new, hub._new_seen = set(), TTLSet(3600)
+        rep_box = [{}]
+        base = {**GOOD, "smart_buyers": ["a", "b"], "liquidity": 50000, "mcap": 100000, "volume_1h": 50000}
+        for i, sc in enumerate((80, 65, 50)):
+            rep_box[0] = {**base, "score": sc}
+            await hub.on_new_token("solana", f"T{i}", "pump", delay=0)
+        assert calls[0].startswith("新币高评分") and calls[1].startswith("新币实验仓（65 分") and len(calls) == 2
+        raw["trading"]["experiment"]["enabled"] = False
+        rep_box[0] = {**base, "score": 65}
+        await hub.on_new_token("solana", "T9", "pump", delay=0)
+        assert len(calls) == 2
+        from bot.trade.sizing import source_of
+        assert source_of(calls[1]) == "新币实验仓"
+    asyncio.run(go())
