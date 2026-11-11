@@ -611,9 +611,23 @@ class Telegram:
         if not rep:
             await self.send("分析失败（接口没数据），稍后再试")
             return
+        nsmart = len(rep.get("smart_buyers") or [])
         lines = [f"<b>{e(rep.get('symbol') or '?')} 为什么没买</b>",
-                 f"代币评分 {rep['score']}（强叙事要 ≥ 55、早期建仓要 ≥ 50）| 聪明钱 {len(rep.get('smart_buyers') or [])} 个",
-                 "", "<b>主动建仓</b>"]
+                 f"代币评分 {rep['score']}（强叙事要 ≥ 55、早期建仓要 ≥ 50）| 聪明钱 {nsmart} 个",
+                 "要买，得先有一个<b>买入理由</b>（跟单 / 新币高评分 / 主动建仓），再过下面的风控；风控全过但没有买入理由，也不会买。"]
+        # 新币高评分 / 实验仓（只对新币列表里新出现的币）
+        smin, cmin = float(self.app.cfg.get("trading.auto_min_score", 75)), int(self.app.cfg.get("trading.auto_min_cluster", 2))
+        exp = self.app.cfg.get("trading.experiment", {}) or {}
+        if nsmart < cmin:
+            lines.append(f"\n<b>新币高评分</b>\n❌ 聪明钱 {nsmart} 个（要 ≥ {cmin}）")
+        elif rep["score"] >= smin:
+            lines.append(f"\n<b>新币高评分</b>\n✅ 评分 {rep['score']}（要 ≥ {smin:g}）——只对刚出现在新币列表里的币，错过第一次分析就不会再走这条")
+        elif exp.get("enabled") and rep["score"] >= float(exp.get("min_score", 60)):
+            lines.append(f"\n<b>新币高评分</b>\n🧪 评分 {rep['score']}（正常要 ≥ {smin:g}），够实验仓（≥ {exp.get('min_score', 60)}，¼ 仓位）"
+                         "——只对刚出现在新币列表里的币")
+        else:
+            lines.append(f"\n<b>新币高评分</b>\n❌ 评分 {rep['score']}（要 ≥ {smin:g}）")
+        lines += ["", "<b>主动建仓</b>"]
         strat = getattr(self.app, "strategies", None)
         lines += strat.explain(chain, token) if strat else ["主动建仓未启用"]
         age = f(rep.get("age_hours"))
@@ -625,7 +639,9 @@ class Telegram:
         sk = await self.app.db.fetchone("SELECT reason, ts FROM skipped WHERE chain=? AND token=? ORDER BY id DESC LIMIT 1",
                                         (chain, token))
         if sk:
-            lines.append(f"\n最近一次被拦：{e(sk['reason'])}（{self.app.fmt_time(sk['ts'])}）")
+            lines.append(f"\n<b>跟单</b> / 最近一次被拦：{e(sk['reason'])}（{self.app.fmt_time(sk['ts'])}）")
+        else:
+            lines.append("\n<b>跟单</b>：没有聪明钱的跟单信号触发过")
         await self.send("\n".join(lines))
 
     async def _dynamic(self, args: list[str]) -> None:
