@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import websockets
 
@@ -34,6 +36,24 @@ class EvmWalletMonitor:
         self.ok = False                     # 现在连着（WS 订阅成功 / 最近一次轮询成功）
         self.down_since = time.time()       # 断开的开始时间（0 = 连着）
         self.last_err = ""
+        self.hits: deque = deque(maxlen=20000)   # 收到聪明钱转账通知的时间（/status 看最近 1 小时收到多少）
+        self.sigs: deque = deque(maxlen=20000)   # 解析出买卖信号的时间
+
+    def status_text(self) -> str:
+        """/status 用：这条链的链上监听连没连着、最近 1 小时收到多少。"""
+        name = CHAINS[self.chain].name
+        host = (urlparse(self.wss or getattr(self.rpc, "url", "") or "").hostname or "").split(".")
+        node = f"（{host[-2] if len(host) >= 2 else '?'}）" if host != [""] else ""
+        now = time.time()
+        got = sum(1 for t in self.hits if now - t < 3600)
+        sig = sum(1 for t in self.sigs if now - t < 3600)
+        if not self.wanted:
+            return f"{name} 链上监听{node}：还没有聪明钱地址"
+        if not self.ok:
+            h = self.health()
+            return f"{name} 链上监听{node}：❌ 断开 {h['down_min']:.0f} 分钟（{self.last_err[:80]}）"
+        return (f"{name} 链上监听{node}：✅ 监听 {self.wanted} 个钱包，最近 1 小时收到转账 {got} 笔、"
+                f"其中买卖 {sig} 笔")
 
     def _up(self) -> None:
         self.ok, self.down_since, self.last_err = True, 0.0, ""
@@ -76,6 +96,7 @@ class EvmWalletMonitor:
         wallet = to if to in wset else frm if frm in wset else None
         if not wallet or not h or not self.seen.add_if_new(f"{h}:{wallet}"):
             return
+        self.hits.append(time.time())
         t = asyncio.create_task(self._handle(h, wallet))
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
@@ -153,6 +174,7 @@ class EvmWalletMonitor:
             if not rc or rc.get("status") != "0x1":
                 return
             for s in parse_receipt(self.chain, wallet, tx, rc):
+                self.sigs.append(time.time())
                 await self.app.hub.on_signal(s)
         except Exception as e:  # noqa: BLE001
             log.warning("处理 %s 交易 %s 失败: %s", self.chain, h, e)

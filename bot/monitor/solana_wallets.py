@@ -196,7 +196,7 @@ class SolanaWalletMonitor:
             if now - t >= MENTION_SEC:
                 self.busy_out.pop(w, None)
                 self.wrate.pop(w, None)
-        rows = await self.app.db.active_wallets("solana", n * 2)
+        rows = await self.app.db.active_wallets("solana", n * 3)
         noisy: set[str] = set()
         if cap:
             for r in await self.app.db.fetchall(

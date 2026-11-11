@@ -56,6 +56,8 @@ def test_poll_monitor_on_log():
     mon = EvmWalletMonitor.__new__(EvmWalletMonitor)
     from bot.utils import TTLSet
     mon.seen, mon._tasks, mon.chain = TTLSet(60), set(), "robinhood"
+    from collections import deque
+    mon.hits, mon.sigs = deque(), deque()
 
     async def fake_handle(h, wallet):
         handled.append((h, wallet))

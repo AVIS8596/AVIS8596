@@ -164,6 +164,10 @@ class WalletExpander:
                 await db.execute("UPDATE wallets SET kind=?, score=MAX(score, ?) WHERE chain=? AND address=?",
                                  (kind if cur.get("kind") in (None, "smart") else cur["kind"], score, chain, w))
                 continue
+            if cur:
+                # 已经被移出（评分排不上 / 信号质量差 / 体检可疑）：不再自己拉回来。
+                # 以前每次挖矿都把几百个被移出的钱包重新激活，再被移出，来回折腾，监听名单一直在变
+                continue
             await db.execute(
                 "INSERT INTO wallets(chain,address,status,source,score,created_at,evaluated_at,kind) "
                 "VALUES(?,?,'active',?,?,?,?,?) ON CONFLICT(chain,address) DO UPDATE SET status='active', "
@@ -189,8 +193,8 @@ class WalletExpander:
         now, added = time.time(), 0
         for profit, w in ranked[:top]:
             cur = await db.wallet(chain, w)
-            if cur and cur["status"] in ("manual", "blacklist", "active"):
-                continue   # 已在监听（达标的聪明钱保持原类别）或被拉黑
+            if cur and cur["status"] in ("manual", "blacklist", "active", "suspect"):
+                continue   # 已在监听（达标的聪明钱保持原类别）、被拉黑或体检可疑
             await db.execute(
                 "INSERT INTO wallets(chain,address,status,source,score,realized_usd,created_at,evaluated_at,kind) "
                 "VALUES(?,?,'active','kol',50,?,?,?,'kol') ON CONFLICT(chain,address) DO UPDATE SET status='active', "
@@ -201,8 +205,35 @@ class WalletExpander:
             self.app.wallets_changed[chain].set()
         return added
 
+    async def restore_pool_1112(self) -> int:
+        """一次性（11-12）：挖矿钱包以前被"只留 300 个"移出、下次挖矿又拉回来，来回折腾。
+        现在库里留 600 个、挖矿不再拉回被移出的钱包，所以先把被移出的挖矿钱包恢复一次（信号质量差的除外），再按评分留 600 个。"""
+        db = self.app.db
+        if await db.kv_get("pool_restore_1112", False):
+            return 0
+        bad = "COALESCE(sig_n,0)>=15 AND COALESCE(sig_ret,0)<=-0.2 AND COALESCE(sig_dump,0)>COALESCE(sig_hit,0)*2"
+        rows = await db.fetchall(f"SELECT chain, address FROM wallets WHERE status='inactive' AND source LIKE 'mining:%' "
+                                 f"AND NOT ({bad})")
+        for r in rows:
+            await db.execute("UPDATE wallets SET status='active' WHERE chain=? AND address=?", (r["chain"], r["address"]))
+        smart = getattr(self.app, "smart", None)
+        for c in {r["chain"] for r in rows}:
+            if smart is not None:
+                await smart.trim(c)
+            ev = (getattr(self.app, "wallets_changed", {}) or {}).get(c)
+            if ev:
+                ev.set()
+        await db.kv_set("pool_restore_1112", True)
+        if rows:
+            log.info("聪明钱库：恢复 %d 个之前被挤出去的挖矿钱包（按评分留到库容量）", len(rows))
+        return len(rows)
+
     async def run(self) -> None:
         await asyncio.sleep(120)
+        try:
+            await self.restore_pool_1112()
+        except Exception as e:  # noqa: BLE001
+            log.warning("恢复聪明钱库失败: %s", e)
         last = {"q": 0.0, "m": 0.0, "k": 0.0}
         while True:
             now = time.time()

@@ -1489,3 +1489,18 @@ def test_gm_extra_keys_do_not_clobber_report_lists():
         "smart_buyers", "risks", "warnings", "reasons", "clusters", "price", "liquidity", "holders", "score"}
     assert not keys & reserved, keys & reserved
     assert gm_extra({"stat": {}, "tags_stat": {"sniper_wallets": 4}, "link": {}})["sniper_tag_n"] == 4
+
+
+def test_evm_monitor_status_line():
+    """/status 里 BSC 链上监听一行：连没连着、最近 1 小时收到多少转账 / 买卖。"""
+    from bot.monitor.evm_wallets import EvmWalletMonitor
+    m = EvmWalletMonitor.__new__(EvmWalletMonitor)
+    m.chain, m.wss, m.rpc = "bsc", "wss://bsc-rpc.publicnode.com", SimpleNamespace(url="")
+    m.wanted, m.ok, m.down_since, m.last_err = 27, True, 0.0, ""
+    from collections import deque
+    now = time.time()
+    m.hits, m.sigs = deque([now - 7200, now - 60, now - 30]), deque([now - 30])
+    t = m.status_text()
+    assert "BSC" in t and "publicnode" in t and "监听 27 个钱包" in t and "转账 2 笔" in t and "买卖 1 笔" in t
+    m.ok, m.down_since, m.last_err = False, now - 600, "HTTP 429"
+    assert "❌ 断开 10 分钟" in m.status_text()

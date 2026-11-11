@@ -93,6 +93,26 @@ def test_mining_and_quality_flow(tmp_path):
             assert await ex.update_quality("solana") == 1
             pro = await db.wallet("solana", "PRO")
             assert pro["sig_n"] == 15 and pro["status"] == "inactive"
+            # 再挖一次矿：被移出的 PRO 不会被拉回来（以前每次挖矿都把被移出的钱包重新激活，名单来回变）
+            await db.kv_set("mined_tokens", [])
+            await ex.mine_winners("solana")
+            assert (await db.wallet("solana", "PRO"))["status"] == "inactive"
+            # 一次性恢复：被挤出去的挖矿钱包恢复（信号质量差的 PRO 不恢复），只做一次
+            await db.execute("UPDATE wallets SET status='inactive' WHERE address='RAT'")
+            assert await ex.restore_pool_1112() == 1
+            assert (await db.wallet("solana", "RAT"))["status"] == "active"
+            assert (await db.wallet("solana", "PRO"))["status"] == "inactive"
+            assert await ex.restore_pool_1112() == 0
+            # 聪明钱库保留监听上限的 2 倍：库里 700 个、监听上限 300 → 留 600 个
+            from bot.discovery.smart_money import SmartMoney
+            for i in range(700):
+                await db.upsert_wallet("solana", f"S{i}", status="active", source="t", realized_usd=1, win_rate=0.5,
+                                       trades=10, score=i)
+            sm = SmartMoney.__new__(SmartMoney)
+            sm.app, sm.cfg = app, SimpleNamespace(get=lambda k, d=None: 300 if k == "smart_money.max_wallets_per_chain" else d)
+            await sm.trim("solana")
+            n = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE chain='solana' AND status='active'")
+            assert n["n"] == 600
         finally:
             await db.close()
 

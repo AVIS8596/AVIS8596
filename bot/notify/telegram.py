@@ -724,7 +724,7 @@ class Telegram:
                  f"已运行 {(time.time() - self.app.started_at) / 3600:.1f} 小时"]
         for c in self.app.cfg.enabled_chains:
             n = await db.fetchone("SELECT COUNT(*) n FROM wallets WHERE chain=? AND status IN ('active','manual')", (c,))
-            lines.append(f"{CHAINS[c].name}：监听 {n['n']} 个聪明钱 | 交易地址 {short(self.app.trader.address(c))}")
+            lines.append(f"{CHAINS[c].name}：聪明钱库 {n['n']} 个 | 交易地址 {short(self.app.trader.address(c))}")
         pos = await db.open_positions()
         pnl = await db.realized_today_usd(self.app.day_start(), self.app.cfg.dry_run)
         lines.append(f"持仓 {len(pos)} 个 | 今日已实现 {fmt_usd(pnl)}")
@@ -738,6 +738,11 @@ class Telegram:
             lines.append(sm.status_text())
             for ep in getattr(self.app.sol, "eps", []):      # 每个 Solana 节点通不通（额度用完会写明）
                 lines.append(f"Solana 节点 {e(ep.name)}：{e(await self.app.sol.probe(ep))}")
+        for m in (getattr(self.app, "evmmons", {}) or {}).values():   # BSC 等 EVM 链的链上监听
+            try:
+                lines.append(e(m.status_text()))
+            except Exception:  # noqa: BLE001
+                pass
         dog = getattr(self.app, "watchdog", None)
         if dog:
             try:

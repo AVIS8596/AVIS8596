@@ -196,8 +196,11 @@ class SmartMoney:
                 self.app.wallets_changed[chain].set()
 
     async def trim(self, chain: str) -> None:
-        """每条链只保留评分最高的 N 个（手动添加的不受影响）。"""
-        n = int(self.cfg.get("smart_money.max_wallets_per_chain", 300))
+        """每条链只保留评分最高的一批（手动添加的不受影响）。
+        保留数 = 实时监听上限的 2 倍（smart_money.pool_per_chain）：监听时要跳过扫盘型 / 交易太频繁 / 只是被提到的钱包，
+        库里只留 300 个的话跳过一批后就不够 300 个了（11-12 一度只订阅了 176 个）。"""
+        cap = int(self.cfg.get("smart_money.max_wallets_per_chain", 300))
+        n = max(cap, int(self.cfg.get("smart_money.pool_per_chain", cap * 2) or cap * 2))
         await self.app.db.execute(
             """UPDATE wallets SET status='inactive' WHERE chain=? AND status='active' AND address NOT IN (
                  SELECT address FROM wallets WHERE chain=? AND status='active' ORDER BY score DESC LIMIT ?)""",
