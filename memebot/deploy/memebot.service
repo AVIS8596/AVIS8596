@@ -1,0 +1,18 @@
+[Unit]
+Description=Meme 扫链机器人
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+# 崩溃后 10 秒自动重启；停止时给 20 秒做收尾
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

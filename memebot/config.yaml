@@ -1,0 +1,316 @@
+# =====================================================================
+#  扫链机器人配置。金额单位说明：
+#    *_native  = 该链原生币（SOL / BNB / ETH）
+#    *_usd     = 美元
+#  改完配置后重启机器人生效：sudo systemctl restart memebot
+# =====================================================================
+
+general:
+  # 模拟交易开关。true = 只模拟不花钱（强烈建议先跑 3~7 天看效果）
+  dry_run: true
+  timezone: "Asia/Phnom_Penh"     # TG 消息里显示的时区
+  db_path: "data/memebot.db"
+  log_dir: "logs"
+  log_level: "INFO"
+
+# ---------------- 数据源与 GMGN ----------------
+data:
+  provider: gmgn                  # gmgn（默认）或 birdeye
+
+gmgn:
+  plan: free                      # 你的 GMGN API 套餐：free / plus / pro（决定限流速度），升级后改这里
+  rate_usage: 0.8                 # 只用套餐额度的 80%，避免触发 5 分钟封禁
+  feed_poll_sec: 3                # 聪明钱交易流轮询间隔（秒）
+  candidate_eval_min: 10          # 交易流里的新钱包，每隔多少分钟批量核实一次胜率
+  anti_mev: true                  # 防夹（Solana/BSC/ETH 支持，Base 不支持会自动关闭）
+  priority_fee_sol: ""            # Solana 优先费（单位 SOL，如 "0.0005"），留空用 GMGN 默认
+  tip_fee: {}                     # 小费，如 { solana: "0.001", bsc: "0.0001" }，留空用默认
+
+chains:
+  robinhood: { enabled: true }   # 罗宾汉链（Gas 用 ETH）：默认用免费公共节点 + 轮询监听；GMGN 暂无它的聪明钱交易流
+  solana:   { enabled: true }
+  bsc:      { enabled: true }
+  ethereum: { enabled: true }
+  base:     { enabled: true }
+
+# ---------------- 聪明钱筛选 ----------------
+smart_money:
+  refresh_hours: 3                # 每隔多少小时找一次新的聪明钱
+  reevaluate_hours: 24            # 已入库地址多久复查一次（不达标就停用）
+  pnl_duration: "30d"             # 统计周期
+  min_realized_profit_sol: 50     # 近30天已实现利润 ≥ 50 SOL（EVM 链按美元等值换算）
+  min_win_rate: 0.60              # 胜率 ≥ 60%（GMGN 按"交易过的代币"计算：赚钱的币 / 全部币）
+  min_trades: 10                  # 30天交易过的代币数太少的不算（运气成分大）
+  max_trades: 1500                # 30天交易超过 1500 个币（每天 50 个），基本是扫盘机器人，排除
+  min_avg_hold_sec: 60            # 平均持仓不到 60 秒的是高频机器人，排除
+  max_wallets_per_chain: 300      # 每条链最多监听多少个地址
+  sol_max_daily_tokens: 50        # Solana 链上监听跳过扫盘型钱包：最近 7 天平均每天买 50 个以上不同的币（省节点额度；0 = 不跳过）
+  # 种子来源：盈利排行榜 + 热门代币的顶级交易者
+  gainers_types: ["1W", "yesterday", "today"]
+  trending_tokens_per_chain: 20
+  top_traders_per_token: 10
+  # 手动添加的地址（格式 链:地址），也可以在 TG 里发 /addwallet 链 地址
+  manual_wallets: []
+
+# ---------------- 新币发现与分析 ----------------
+discovery:
+  pumpportal_new_tokens: true     # 监听 pump.fun 新币和毕业（免费）
+  new_token_poll_sec: 20          # 新币轮询间隔（GMGN trenches）
+  gmgn_trench_types: ["completed", "near_completion"]   # 只看已毕业 / 即将毕业的 launchpad 币
+  min_liquidity_usd: 5000         # 流动性低于这个的新币不分析
+  analyze_delay_sec: 20           # 新币出现后等多少秒再分析（让早期交易先发生）
+  analysis_cache_min: 2           # 同一个币分析结果缓存多久（下单前不管缓存，超过 20 秒都会重新分析）
+  early_slots: 3                  # Solana：开盘后前几个 slot 内买入算"早期"
+  early_blocks: 3                 # EVM：开盘后前几个区块内买入算"早期"
+  max_early_buyers: 40            # 最多分析多少个早期买家
+  fresh_wallet_hours: 72          # 开盘前多少小时内才首次充值的钱包算"新钱包"
+  similar_amount_cv: 0.15         # 买入金额变异系数低于此值视为"金额相近"
+
+# ---------------- 告警 ----------------
+alerts:
+  smart_buy: true                 # 聪明钱买入就推送
+  smart_buy_min_score: 55         # 只推送评分 ≥ 此值的钱包（钱包多了会刷屏，可调高）
+  cluster_wallets: 2              # N 个以上聪明钱在窗口期内买同一个币，推送"共振"
+  cluster_window_min: 30
+  min_token_score_alert: 60       # 新币评分 ≥ 此值推送
+
+# ---------------- 交易（跟单 + 自动交易）----------------
+trading:
+  enabled: true                   # 总开关（dry_run=true 时只模拟）
+  executor: gmgn                  # gmgn = 用 GMGN 钱包下单；self = 自托管私钥（Jupiter / 0x）
+  copy_trade: true                # 聪明钱买入 → 跟单
+  copy_min_wallet_score: 55       # 只跟评分 ≥ 此值的聪明钱（刚达标的钱包约 55~60 分）
+  copy_min_cluster: 1             # 至少几个聪明钱买了才跟（1 = 一个就跟）
+  auto_trade: true                # 新币评分高 + 聪明钱共振 → 自动买
+  auto_min_score: 75
+  auto_min_cluster: 2
+  # ---- 买入时机 ----
+  solo_min_hold_sec: 600          # 单个聪明钱买入就跟，要求它平均持仓 ≥ 10 分钟（快进快出的钱包要 2 个以上一起买才跟）
+  solo_bad_follow_min: 8          # 跟某个钱包满 8 笔、胜率低于 40%，也不再单独跟它
+  solo_bad_follow_wr: 0.4
+  confirm_sec: 20                 # 确认期：信号出现后等 20 秒，带单钱包没卖、价格没拉飞/没砸才买
+  confirm_max_rise_pct: 25        # 确认期内涨超 25% 不追
+  confirm_max_drop_pct: 15        # 确认期内跌超 15% 不买
+  max_change_1h_pct: 300          # 1 小时已涨超 300% 不追（3 个以上聪明钱一起买除外）
+  chase_ok_smart: 3
+  fake_mcap_min_usd: 3000000      # 市值 ≥ $3M 且超过 1 小时成交量的 500 倍 → 市值虚高，不买也不推送
+  fake_mcap_vol_ratio: 500
+  max_sell_buy_ratio: 1.5         # 1 小时卖出笔数超过买入的 1.5 倍（且 ≥ 30 笔）不买
+  min_holders: 80                 # 持有人太少不买
+  loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟
+  loss_streak_pause_min: 60
+  loss_streak_dry: 0              # 模拟盘的连亏熔断（0 = 不熔断，方便积累数据）
+  max_drawdown_pct: 60            # 不接飞刀：从 2 小时内高点跌了 60% 以上不买（3 个以上聪明钱一起买除外）
+  copy_min_native: 0.2            # 聪明钱买入不到 0.2 SOL（试探性小单）不单独跟
+  stoploss_cooldown_hours: 24     # 止损过的币 24 小时内不再买
+  max_liquidity_pct: 3            # 单笔不超过池子流动性的 3%，超过自动减少买入量
+  regime: { cold: 0.5, normal: 1, hot: 1, cold_pause: false }   # 市场冷热：冷时仓位 ×0.5；cold_pause: true 则冷时暂停买入
+  max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
+  max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
+  max_rep_age_sec: 20             # 下单前复查：分析报告超过 20 秒就重新完整分析，用最新数据过所有风控
+  max_drop_5m_pct: 20             # 最近 5 分钟跌超 20% 不买（正在砸盘，不管几个聪明钱）
+  max_dev_launches: 15            # 项目方以前发过 15 个币以上不买（批量发币，撤池子的高发人群；0 = 关闭）
+  max_dev_tokens_7d: 3            # 7 天内机器人见过同一个项目方发 3 个以上别的币，不买
+  bad_symbol_hours: 48            # 亏光过（≥80%）的币名 48 小时内不再买（换合约重发）；亏光过的项目方 30 天不碰
+  max_gang_members: 3             # 早期可疑买家里有同一个阴谋团伙的 3 个以上成员 → 团伙盘不买（0 = 关闭）
+  max_cabal_pct: 3                # 已知阴谋地址合计持仓 ≥ 3% 不买（0 = 关闭）。11-11 结果档案：3~10% 的 231 个币 1 小时后中位 -44%、57% 跌超 30%
+  probe:                          # 试探仓：信号很强、只是前10 / 捆绑这两个"刚发币天然偏高"的指标超限时，小仓位先上车
+    enabled: false                # 11-11 关闭：结果档案里捆绑 ≥ 25% 中位 -48%、前10 ≥ 40% 有 45% 跌超 30%，放宽不划算
+    size_mult: 0.25               # 仓位 = 正常仓位 × 0.25
+    max_top10_pct: 65             # 前10持仓宽松上限（正常 45 / 叙事 40）
+    max_bundle_pct: 45            # 捆绑地址现在还拿着的比例（正常 25）
+    max_bundler_trade_pct: 60     # 强叙事扫描时"捆绑交易占成交量"的宽松上限（正常 30）
+    min_smart: 2                  # 跟单信号要 ≥ 2 个还拿着的聪明钱才开试探仓（主动建仓 / 新币高评分 / 模型买入不需要）
+    narrative_min_score: 80       # 强叙事要 ≥ 80 分才开试探仓（埋伏 / 老鼠仓 / 刷量 / 跑路风险 / dev 持仓一律不放宽）
+  max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
+  sim_fixed_fee_native: { solana: 0.0005, bsc: 0.0002, ethereum: 0.0005, base: 0.00003, robinhood: 0.00003 }   # 模拟盘每笔扣的固定优先费 / Gas（原生币）
+  evidence_sizing: true           # 仓位按各买入来源 / 档位最近 7 天的真实期望值自动调（×0.25 ~ ×1.5，满 15 笔才调）
+  evidence_min_trades: 15
+  max_exposure_usd_dry: 6000      # 模拟盘所有持仓合计金额上限（防止一群 meme 一起崩）
+  max_exposure_usd: 0             # 实盘的上限（0 = 不限，受钱包余额限制）
+  # 过滤条件（任一不满足就不买）
+  max_bundle_pct: 15              # 捆绑地址仍持有占比上限（%）。11-11 结果档案：15~25% 的 1230 个币 1 小时后中位 -22%、45% 跌超 30%
+  max_insider_pct: 20             # 埋伏地址仍持有占比上限（%）
+  max_top10_pct: 45               # 前10持仓占比上限（%，已排除池子）
+  max_sell_tax_pct: 10            # EVM 卖出税上限
+  min_liquidity_usd: 8000
+  max_token_age_hours: 72         # 只买上线 72 小时内的币
+  token_cooldown_min: 120         # 同一个币卖出后多久内不再买
+  notify_skips: false             # 被风控拦下的交易是否推送 TG（调试时可以打开）
+  # 每笔金额（原生币）
+  buy_amount_native:
+    solana: 0.2
+    bsc: 0.05
+    ethereum: 0.01
+    base: 0.005
+    robinhood: 0.01
+  # 钱包里至少保留这么多原生币做手续费
+  reserve_native:
+    solana: 0.05
+    bsc: 0.01
+    ethereum: 0.01
+    base: 0.002
+    robinhood: 0.002
+  slippage_bps:                   # 滑点（100 = 1%）
+    solana: 1500
+    bsc: 1200
+    ethereum: 800
+    base: 1200
+    robinhood: 1500
+  max_price_impact_pct: 15
+  max_gas_gwei:                   # Gas 价格上限，超过就不交易
+    bsc: 5
+    ethereum: 40
+    base: 1
+    robinhood: 1
+  max_open_positions: 10
+  max_daily_loss_usd: 200         # 当天累计亏损超过就自动暂停买入
+  # 仅 executor=self 时使用：ETH 主网私密交易防夹
+  private_rpc:
+    ethereum: "https://rpc.flashbots.net"
+
+# ---------------- 止盈止损 ----------------
+exit:
+  check_interval_sec: 10
+  stop_loss_pct: -35              # 亏 35% 止损
+  take_profit:                    # 分批止盈：涨到 x% 卖出持仓的 y%
+    - { gain_pct: 100, sell_pct: 50 }
+    - { gain_pct: 300, sell_pct: 50 }
+  # 回放回测（11-08）：跟卖、"涨不上去就卖"、移动止损把后来大涨的币提前卖掉了；只用止损 + 分批止盈拿满 24 小时，
+  # 同一批入场合计从 -$58 变成 +$745（去掉最大赢家后仍 +$293）。所以先关掉这三条，让利润奔跑。
+  # 想恢复：trailing_start_pct 改回 60、follow_smart_sell 改回 true、tiers 里的 stall_hours 改回 1 / 4 / 12
+  trailing_start_pct: 10000       # 移动止损（10000 = 关闭）
+  trailing_drop_pct: 30
+  max_hold_hours: 24              # 最长持仓时间
+  follow_smart_sell: false        # 带单的聪明钱卖出时跟着卖（已关闭；动态管理的健康分里仍会参考聪明钱卖出）
+  max_sell_attempts: 5            # 卖出失败重试次数，超过标记为"无法卖出"
+  confirm_ticks: 2                # 止损 / 移动止损要连续 2 次检查（约 10 秒）都触发才卖，防插针
+  hard_stop_pct: -50              # 跌破 -50% 不等确认，立刻卖
+  # 强势长拿：翻倍出本（卖一半收回本金）之后，剩下的不再按固定价位止盈，一直拿着；
+  # 从最高点回撤 25% 卖 1/3、回撤 40% 再卖一半、回撤 55% 卖完；回落到 +20% 保底线全部卖出；最长拿 7 天
+  recover_cost_only: true         # 翻倍出本只卖"刚好收回本金"的部分：翻倍卖约一半，涨 4 倍约 1/4、5 倍约 1/5（false = 固定按比例卖）
+  recover_cost_buffer_pct: 5      # 多卖 5% 覆盖卖出成本
+  runner:
+    enabled: true
+    trigger_gain_pct: 100
+    floor_gain_pct: 20
+    max_hold_hours: 168
+    ladder:
+      - { drop_pct: 25, sell_pct: 33 }
+      - { drop_pct: 40, sell_pct: 50 }
+      - { drop_pct: 55, sell_pct: 100 }
+  # 移动止损在还没止盈过时先卖一半，剩下一半从当时的价格重新算最高点；剩下的跌回成本就卖
+  # 按买入档位区分（覆盖上面的同名项；没写的项沿用上面的）。
+  #   stall_hours / stall_min_gain_pct：持有满 N 小时还没涨到 +X% 就卖（"涨不上去就走"，已止盈过的不受影响）
+  #   follow_smart_sell_pct：带单聪明钱卖出时跟卖多少（%）
+  tiers:
+    normal:                       # 一般
+      max_hold_hours: 24
+      stall_hours: 0              # "涨不上去就卖"（0 = 关闭）
+      stall_min_gain_pct: 15
+    good:                         # 👍 较好
+      max_hold_hours: 24
+      stall_hours: 0
+      stall_min_gain_pct: 20
+    best:                         # 🔥 优质：拿得久、翻倍先出本，剩下的让利润多跑一会
+      max_hold_hours: 72
+      stall_hours: 0
+      stall_min_gain_pct: 30
+      trailing_start_pct: 10000
+      trailing_drop_pct: 35
+      follow_smart_sell_pct: 50
+      take_profit:
+        - { gain_pct: 100, sell_pct: 50 }    # 翻倍出本
+        - { gain_pct: 300, sell_pct: 30 }
+        - { gain_pct: 1000, sell_pct: 50 }
+  # 动态管理：每隔几分钟复查持仓数据（聪明钱、捆绑/埋伏/dev、流动性、持有人、成交量），算 0~100 健康分
+  dynamic:
+    mode: shadow                  # off 关闭 / shadow 只记录不执行（先观察）/ live 接管卖出。TG 发 /dynamic 随时切换
+    check_sec: 120                # 每个持仓多久复查一次
+    confirm_checks: 2             # 健康分偏低要连续几次复查才动手（撤池子、dev 清仓这类紧急情况立刻卖）
+    reduce_below: 40              # 健康分 < 40 卖一半
+    exit_below: 25                # 健康分 < 25 全卖
+    strong_above: 80              # 健康分 > 80 视为强势：推迟第 2 档以后的止盈、移动止损多容忍 10%、观察期和最长持有延长
+    breakeven_after_pct: 50       # 保本止损：涨过 +50% 后，跌回成本附近（+3%，覆盖手续费）就卖
+    breakeven_floor_pct: 3
+    urgent_slippage_bps: 3000     # 紧急卖出时的滑点（30%）
+    urgent_priority_fee_sol: "0.002"   # 紧急卖出时的优先费和小费（SOL）
+    urgent_tip_fee: "0.002"
+  # 观察模式里的第三套规则「高手规则」（参考 /learn 学到的习惯：快止盈、紧止损、拿得短），只模拟不执行，
+  # 每日复盘和 /dynamic 里和旧规则对比。效果好再考虑用到正式规则。
+  learned:
+    stop_loss_pct: -20
+    take_profit:
+      - { gain_pct: 30, sell_pct: 30 }
+      - { gain_pct: 60, sell_pct: 40 }
+      - { gain_pct: 100, sell_pct: 100 }
+    trailing_start_pct: 30
+    trailing_drop_pct: 15
+    max_hold_hours: 2
+    stall_hours: 0.5
+    stall_min_gain_pct: 10
+
+# ---------------- 其他接口限速（Birdeye / Jupiter / 0x 只在对应模式下用到） ----------------
+budget:
+  birdeye_daily_cu: 300000        # Birdeye 每日计算单元上限（Premium 每月 1000 万 ≈ 每日 33 万）
+  birdeye_rps: 40                 # Premium 50 rps，留余量
+  helius_rps: 6                   # Helius 免费版每秒 10 次：分析/监听用 6，交易留 3；升级 Developer（50）后可改成 35
+  helius_trade_rps: 3             # 交易专用额度（查余额、确认成交），保证随时能卖
+  jupiter_rps: 8                  # Developer 档 10 rps；免费档请改成 1
+  zerox_rps: 1                    # 0x 免费档 1 rps
+  etherscan_rps: 4
+  goplus_rps: 2
+
+# ---------------- 主动建仓（不等聪明钱）----------------
+# 数据来自 GMGN trenches 列表（快毕业 + 已毕业的币），触发后仍要过完整分析、风控和 30 秒确认期，买入后交给动态管理。
+# 两类都用一般档金额（早期建仓有 2 个以上聪明钱或 KOL 时用较好档），每天限量。
+strategies:
+  poll_sec: 15                    # 主动建仓每 15 秒扫一次快毕业 / 已毕业列表
+  max_per_hour: 2                 # 两类合计每小时最多交给确认期 2 笔，避免集中下单
+  early:                          # 早期建仓：快毕业、结构干净、持有人快速增长
+    enabled: true
+    max_age_min: 180              # 发币 3 小时内
+    min_holders: 100
+    growth_window_min: 3          # 观察 3 分钟
+    min_holder_growth_pct: 15     # 3 分钟内持有人增长 ≥ 15%
+    min_volume: 15000             # 发币以来累计成交额（GMGN 列表只给 24h 成交）
+    max_rug_ratio: 0.2            # 以下比例都是 0~1
+    max_top10_rate: 0.3
+    max_bundler_rate: 0.15
+    max_insider_rate: 0.15
+    max_creator_rate: 0.05
+    max_per_day: 6
+    persist_sec: 60               # 论证：达标后隔 1 分钟再看一次，仍达标、持有人没减少才继续
+    min_token_score: 50           # 论证：完整分析的代币评分要 ≥ 50
+  narrative:                      # 强叙事：KOL / 聪明钱 / 引用大号新推文 / 项目粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分
+    enabled: true
+    min_score: 60
+    max_age_hours: 24
+    min_holders: 150
+    min_volume: 30000
+    max_rug_ratio: 0.3
+    max_top10_rate: 0.4
+    max_bundler_rate: 0.3
+    max_insider_rate: 0.2
+    max_creator_rate: 0.1
+    max_per_day: 6
+    persist_sec: 180              # 论证：达标后观察 3 分钟，热度没退（持有人不减、叙事分不明显下降）才继续
+    fast_score: 90                # 叙事分 ≥ 90 的只观察 fast_persist_sec 秒（早点买，而不是等涨上去再买）
+    fast_persist_sec: 60
+    min_token_score: 55           # 论证：完整分析的代币评分要 ≥ 55
+
+# ---------------- 自我学习 ----------------
+learning:
+  auto_tune: auto                 # auto：模拟盘自动改参数（实盘只发建议）｜suggest：只建议｜off：关闭；TG 里 /tune auto|suggest|off 也能改
+  tune_hours: 6                   # 每隔几小时学一次（每次最多改一个参数，同一参数 24 小时内不重复改）
+  model: shadow                   # 自己的选币模型：shadow 影子（只记录不下单）｜on 模拟盘自己下单｜off；TG 里 /model 也能改
+  model_auto_promote: true        # 影子期选的币有 30 个出结果、平均赚 10% 以上、中位不亏 → 模拟盘自动让它下单（实盘永远不自动）
+  model_train_hours: 24           # 每天用最新数据重训一次
+  model_max_per_hour: 3           # 模型每小时最多下 3 笔
+  exit_days: 4                    # 卖出规则自动调整：用最近几天的真实入场回放
+  exit_min_trades: 30             # 至少多少笔才调整卖出规则
+
+# ---------------- 无人值守的安全 ----------------
+safety:
+  tg_backup: true                 # 每天把精简版数据库备份发到 Telegram（异地保存，服务器坏了能恢复）
+  withdraw_above_native: {}       # 实盘钱包余额超过多少就提醒转出，如 { solana: 3, bsc: 0.5 }（空 = 不提醒）
