@@ -272,8 +272,12 @@ def test_probe_position(tmp_path):
             assert "捆绑地址持有" in await tr.check("solana", "T", dict(hot))
             assert await tr.check("solana", "T", dict(hot), relax=True) == ""
             assert "前10持仓" in await tr.check("solana", "T", {**hot, "top10_pct": 80}, relax=True)
+            assert "埋伏地址持有" in await tr.check("solana", "T", {**hot, "insider_held_pct": 30}, relax=True)   # 埋伏不放宽
+            assert skip_cat("论证：叙事分 95 够，但结构不过关（捆绑交易 75.0%，上限 60%）") == "强叙事结构不过关"
+            assert skip_cat("论证：代币评分 40 低于 55") == "主动建仓论证未通过"
             assert tr.probe_ok(hot, [], "早期建仓（持有人 3 分钟 +30%）")
             assert tr.probe_ok(hot, ["a", "b"], "跟单（2 个聪明钱）")
+            assert tr.probe_ok(hot, [], "强叙事（95 分：KOL 3 个）") and not tr.probe_ok(hot, [], "强叙事（65 分：KOL 1 个）")
             assert not tr.probe_ok(hot, ["a"], "跟单（1 个聪明钱）")
             assert not tr.probe_ok({**hot, "insider_wallets": ["b"]}, ["a", "b"], "跟单")   # 老鼠仓不算聪明钱
             bought, skipped = [], []

@@ -4,12 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
 from .executors import DryRunExecutor, EvmExecutor, Fill, GmgnExecutor, SolanaExecutor
 from .health import snapshot
 from .positions import exit_rules
+from .probe import PROBE, STRUCT_PREFIX, probe_cfg, probe_note
 
 if TYPE_CHECKING:
     from ..app import App
@@ -20,21 +22,11 @@ TIER_NAME = {"best": "🔥优质", "good": "👍较好", "normal": "一般"}
 # 这些拒绝原因和标的好坏无关（开关、持仓满、冷却……），不记入"被过滤的信号"统计
 NOT_QUALITY = ("交易总开关", "该链执行器", "已手动暂停", "当日亏损", "连亏", "已有持仓", "持仓数量已满", "冷却期",
                "市场冷", "总敞口")
-SKIP_CATS = [("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
+SKIP_CATS = [("论证：叙事分", "强叙事结构不过关"), ("论证", "主动建仓论证未通过"), ("确认期：带单钱包", "带单钱包很快卖出"), ("确认期", "确认期价格异动"), ("这个钱包", "快手/战绩差钱包"),
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
              ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过")]
-
-
-PROBE = "试探仓"
-STRUCT_PREFIX = ("捆绑地址持有", "埋伏地址持有", "前10持仓")
-PROBE_DEFAULTS = {"enabled": True, "size_mult": 0.25, "max_top10_pct": 65, "max_bundle_pct": 45,
-                  "max_insider_pct": 35, "min_smart": 2, "narrative_min_score": 80}
-
-
-def probe_cfg(cfg) -> dict:
-    return {**PROBE_DEFAULTS, **(cfg.get("trading.probe", {}) or {})}
 
 
 def norm_symbol(s) -> str:
@@ -101,12 +93,12 @@ class Trader:
 
     async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None, reason: str = "",
                     relax: bool = False) -> str:
-        """返回拒绝原因；空字符串表示可以买。relax=True：筹码结构按"试探仓"的宽松上限判断。"""
+        """返回拒绝原因；空字符串表示可以买。relax=True：前10持仓 / 捆绑地址按"试探仓"的宽松上限判断（埋伏地址不放宽）。"""
         t = self.cfg.get("trading", {}) or {}
         if relax:
             pb = probe_cfg(self.cfg)
-            t = {**t, "max_top10_pct": pb["max_top10_pct"], "max_bundle_pct": pb["max_bundle_pct"],
-                 "max_insider_pct": pb["max_insider_pct"]}
+            t = {**t, "max_top10_pct": max(float(t.get("max_top10_pct", 45)), float(pb["max_top10_pct"])),
+                 "max_bundle_pct": max(float(t.get("max_bundle_pct", 25)), float(pb["max_bundle_pct"]))}
         if not t.get("enabled", False):
             return "交易总开关关闭"
         if chain not in self.exec:
@@ -289,7 +281,7 @@ class Trader:
                         and self.probe_ok(rep, wallets, reason):
                     # 信号很强、只是筹码结构稍微超限（刚发币时前10 / 捆绑天然偏高）：小仓位先建仓，再观察
                     if not await self.check(chain, token, rep, wallets, reason, relax=True):
-                        reason = f"{reason}（{PROBE}：{why}，先小仓位建仓再观察）"
+                        reason = reason + probe_note(why)
                         probe, why = True, ""
                 if why:
                     await self.skip(chain, token, rep, reason, why)
@@ -373,7 +365,10 @@ class Trader:
         pb = probe_cfg(self.cfg)
         if not pb["enabled"]:
             return False
-        if reason.startswith(("强叙事", "早期建仓", "新币高评分", "模型买入")):
+        if reason.startswith("强叙事"):          # 强叙事要够强（≥ 80 分）才值得试探
+            m = re.match(r"强叙事（(\d+) 分", reason)
+            return bool(m) and int(m.group(1)) >= int(pb["narrative_min_score"])
+        if reason.startswith(("早期建仓", "新币高评分", "模型买入")):
             return True
         from ..discovery.audit import token_roles
         held = (set(wallets or []) | set(rep.get("smart_buyers") or [])) - set(token_roles(rep))

@@ -155,23 +155,67 @@ def test_explain_lines():
     assert "不在 GMGN" in st.explain("solana", "NOPE")[0]
 
 
-def test_narrative_probe_when_top10_slightly_high():
-    """强叙事 95 分、刚发币前10 持仓 45%（叙事上限 40%）：开试探仓；前10 80% 还是不碰。"""
-    fired = []
+
+def _hot(t0, **kw):
+    """叙事分 ≥ 90 的强叙事币（KOL 3、聪明钱 3、社交齐全、成交火热）。"""
+    return {**CLEAN, "_stage": "已毕业", "symbol": "NB", "created_timestamp": t0 - 600, "renowned_count": 3,
+            "smart_degen_count": 3, "twitter": "x.com/nb", "telegram": "t.me/nb", "website": "nb.xyz",
+            "x_user_follower": 25000, "holder_count": 900, "volume_1h": 300000, "swaps_1h": 1500, **kw}
+
+
+def test_soft_structure_only_relaxes_surface_metrics():
+    from bot.strategies import soft_structure
+    from bot.trade.probe import PROBE_DEFAULTS as PB
+    nc = NARRATIVE_DEFAULTS
+    assert soft_structure(CLEAN, nc, PB) == ("", "")
+    prob, soft = soft_structure({**CLEAN, "bundler_trader_amount_rate": 0.55}, nc, PB)      # TREMP：捆绑交易 55%
+    assert prob == "" and "捆绑交易 55.0%" in soft
+    prob, soft = soft_structure({**CLEAN, "top_10_holder_rate": 0.451}, nc, PB)             # 牛逼：前10 45.1%
+    assert prob == "" and "前10持仓 45.1%" in soft
+    assert soft_structure({**CLEAN, "bundler_trader_amount_rate": 0.75}, nc, PB) == ("捆绑交易 75.0%，上限 60%", "")
+    # 直接说明是阴谋盘的不放宽：老鼠仓、刷量、跑路风险、dev 持仓
+    for bad in ({"rat_trader_amount_rate": 0.3}, {"is_wash_trading": True}, {"rug_ratio": 0.5},
+                {"creator_balance_rate": 0.2}):
+        prob, soft = soft_structure({**CLEAN, "bundler_trader_amount_rate": 0.55, **bad}, nc, PB)
+        assert prob and not soft, bad
+    assert soft_structure({**CLEAN, "bundler_trader_amount_rate": 0.55}, nc, {**PB, "enabled": False})[0]
+
+
+def test_narrative_probe_fast_and_tolerant():
+    """强叙事 ≥ 90 分、只是捆绑交易 / 前10 超限：1 分钟后开试探仓；持有人少一两个不算热度回落；分数不够高或结构太差不买。"""
+    skips = []
+
+    async def skip(chain, token, rep, trigger, why):
+        skips.append((token, why))
     app = SimpleNamespace(cfg=SimpleNamespace(get=lambda k, d=None: d), hub=SimpleNamespace(_tasks=set()),
-                          trader=SimpleNamespace(skip=lambda *a, **k: asyncio.sleep(0)))
+                          trader=SimpleNamespace(skip=skip))
     st = Strategies(app)
+    fired = []
+
+    async def fire(chain, token, reason, tier):
+        fired.append((token, reason))
+    st.fire = fire
 
     async def go():
         t0 = time.time()
-        base = {**CLEAN, "_stage": "已毕业", "symbol": "NB", "created_timestamp": t0 - 600, "renowned_count": 3,
-                "smart_degen_count": 3, "twitter": "x.com/nb", "telegram": "t.me/nb", "website": "nb.xyz",
-                "x_user_follower": 25000, "holder_count": 900, "volume_1h": 300000, "swaps_1h": 1500,
-                "top_10_holder_rate": 0.451}
-        bad = dict(base, address="BAD", symbol="ZZ", top_10_holder_rate=0.8)
-        for dt in (0, 100, 190):
-            out = await st.poll("solana", [dict(base, address="NB1"), bad], now=t0 + dt)
-            fired.extend(out)
+        items = [
+            _hot(t0, address="TREMP", symbol="TREMP", bundler_trader_amount_rate=0.55),
+            _hot(t0, address="NB", symbol="NB", top_10_holder_rate=0.451),
+            _hot(t0, address="WORSE", symbol="WORSE", bundler_trader_amount_rate=0.8),       # 超过试探仓上限
+            _hot(t0, address="RAT", symbol="RAT", bundler_trader_amount_rate=0.55, rat_trader_amount_rate=0.3),
+            {**_hot(t0, address="WEAK", symbol="WEAK", bundler_trader_amount_rate=0.55),      # 叙事分 60 多，不到 80
+             "renowned_count": 2, "smart_degen_count": 2, "swaps_1h": 100},
+            _hot(t0, address="FADE", symbol="FADE", top_10_holder_rate=0.451),
+        ]
+        assert narrative_score(items[0], 1, True, t0)[0] >= 90 and 60 <= narrative_score(items[4], 1, True, t0)[0] < 80
+        assert await st.poll("solana", items, now=t0) == []
+        later = [dict(it) for it in items]
+        later[0]["holder_count"] = 890                    # 少 1%：正常波动
+        later[5]["holder_count"] = 780                    # 少 13%：热度在退
+        out = await st.poll("solana", later, now=t0 + 65)
         await asyncio.sleep(0)
-        assert [o[0] for o in fired] == ["NB1"] and "试探仓" in fired[0][1] and "前10" in fired[0][1]
+        assert sorted(o[0] for o in out) == ["NB", "TREMP"]
+        assert all("试探仓" in o[1] for o in out) and "捆绑交易 55.0%" in dict((o[0], o[1]) for o in out)["TREMP"]
+        assert {t for t, _ in skips} == {"WORSE", "RAT", "WEAK"} and all(w.startswith("论证：叙事分") for _, w in skips)
+        assert "FADE" not in [o[0] for o in out] and "solana:FADE" not in st.pending
     asyncio.run(go())

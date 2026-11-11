@@ -188,6 +188,16 @@ async def skipped_review(app: "App", start: float) -> str:
     return "\n".join(lines)
 
 
+def unsellable(s: dict) -> bool:
+    """虚拟持仓的最后一笔是"流动性被撤走"的紧急卖出，而且当时池子里剩的钱还不到持仓成本的 2 倍：实际卖不出去。"""
+    last = (json.loads(s.get("log") or "[]") or [[0, 0, "", 0]])[-1]
+    why = str(last[2])
+    if "流动性被撤走" not in why:
+        return False
+    m = re.search(r"→ \$([\d,]+)", why)
+    return bool(m) and float(m.group(1).replace(",", "")) < 2 * float(s.get("cost_usd") or 0)
+
+
 def _mult(s: dict) -> float:
     """虚拟持仓的收益倍数（已卖出部分 + 剩余部分按最新价）。"""
     entry = float(s["entry_price"] or 0)
@@ -207,6 +217,11 @@ async def shadow_compare(app: "App") -> str:
     lines: list[str] = []
     for b in ("v2", "v3"):
         done = [(pid, v) for pid, v in by.items() if "v1" in v and b in v and v["v1"]["closed"] and v[b]["closed"]]
+        # 池子已经被撤空才触发的"紧急卖出"其实卖不掉（模拟按报价成交是假的），不能算成这套规则的功劳
+        fake = [pid for pid, v in done if unsellable(v[b])]
+        done = [(pid, v) for pid, v in done if pid not in fake]
+        if fake:
+            lines.append(f"（{VARIANT_NAME[b]}有 {len(fake)} 个是池子已被撤空后才触发的紧急卖出，实际卖不掉，不计入对比）")
         if not done:
             continue
         u1 = sum(float(v["v1"]["cost_usd"] or 0) * (_mult(v["v1"]) - 1) for _, v in done)

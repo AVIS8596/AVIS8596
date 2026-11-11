@@ -265,3 +265,17 @@ def test_runner_mode():
     # 关闭强势长拿：回到固定止盈（+300% 卖第 2 档）
     off = {**EXIT, "runner": {**rn, "enabled": False}}
     assert decide_exit(pos(tp_stage=1, high_price=4.1), 4.1, off, t)[0] == 50
+
+
+def test_unsellable_rug_exit_not_counted():
+    """池子被撤空后才触发的"紧急卖出"实际卖不掉，不能算成动态管理的功劳；池子还有钱的照常算。"""
+    import json as _json
+    from bot.trade.review import unsellable
+
+    def row(why, cost=50):
+        return {"log": _json.dumps([[1, 30, "止盈 1", 80.0], [2, 100, why, 120.0]], ensure_ascii=False), "cost_usd": cost}
+    assert unsellable(row("🚨紧急卖出：流动性被撤走（$16,186 → $0）"))
+    assert unsellable(row("🚨紧急卖出：流动性被撤走（$49,634 → $60）"))
+    assert not unsellable(row("🚨紧急卖出：流动性被撤走（$49,634 → $12,000）"))      # 池子还有钱：卖得掉
+    assert not unsellable(row("🚨紧急卖出：dev 清仓（5.0% → 0.2%）"))
+    assert not unsellable(row("止损 -35%")) and not unsellable({"log": None, "cost_usd": 50})

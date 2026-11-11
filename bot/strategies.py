@@ -20,6 +20,7 @@ from collections import Counter, deque
 from typing import TYPE_CHECKING
 
 from .chains import norm_addr
+from .trade.probe import probe_cfg, probe_note
 from .utils import f
 
 if TYPE_CHECKING:
@@ -41,7 +42,22 @@ NARRATIVE_DEFAULTS = {
     "max_rug_ratio": 0.3, "max_top10_rate": 0.4, "max_bundler_rate": 0.3, "max_insider_rate": 0.2,
     "max_creator_rate": 0.1, "max_per_day": 6,
     "persist_sec": 180, "min_token_score": 55,
+    "fast_score": 90, "fast_persist_sec": 60,     # 叙事分 ≥ 90 的只观察 1 分钟（早点买，而不是等涨上去再买）
 }
+MAX_HOLDER_DROP = 0.05      # 观察期内持有人比刚达标时少 5% 以上才算热度回落（少一两个人是正常波动）
+
+
+def soft_structure(it: dict, cfg: dict, pb: dict) -> tuple[str, str]:
+    """强信号的结构判断。返回 (不过关的问题, 试探仓说明)，最多一个非空。
+    只有"前10持仓 / 捆绑交易占比"这两个刚发币时天然偏高的表面指标可以放宽到试探仓上限；
+    刷量、跑路风险、老鼠仓、dev 持仓这些直接说明是阴谋盘的，一个不放宽。"""
+    prob = structure_problem(it, cfg)
+    if not prob or not pb.get("enabled"):
+        return prob, ""
+    loose = {**cfg, "max_top10_rate": max(float(cfg["max_top10_rate"]), float(pb["max_top10_pct"]) / 100),
+             "max_bundler_rate": max(float(cfg["max_bundler_rate"]), float(pb["max_bundler_trade_pct"]) / 100)}
+    worse = structure_problem(it, loose)
+    return (worse, "") if worse else ("", prob)
 
 
 def _rate(it: dict, *keys: str) -> float:
@@ -295,16 +311,12 @@ class Strategies:
                     and int(f(it.get("holder_count"))) >= int(nc["min_holders"]) \
                     and volume(it) >= float(nc["min_volume"])
                 prob = structure_problem(it, nc) if ok_size else ""
-                probe = False
+                soft = ""
                 if prob:
-                    # 叙事分很高、结构只是稍微超限（刚发币时前10 / 捆绑天然偏高）：按试探仓的宽松上限再看一次
-                    from .trade.trader import probe_cfg
+                    # 叙事分很高（≥ 80）、只是前10 / 捆绑交易占比超限（刚发币时天然偏高）：按试探仓的宽松上限再看一次
                     pb = probe_cfg(self.cfg)
-                    msc0, _ = narrative_score(it, names.get(n, 0), True, now)
-                    loose = {**nc, "max_top10_rate": pb["max_top10_pct"] / 100, "max_bundler_rate": pb["max_bundle_pct"] / 100,
-                             "max_insider_rate": pb["max_insider_pct"] / 100}
-                    if pb["enabled"] and msc0 >= int(pb["narrative_min_score"]) and not structure_problem(it, loose):
-                        probe, prob0, prob = True, prob, ""
+                    if narrative_score(it, names.get(n, 0), True, now)[0] >= int(pb["narrative_min_score"]):
+                        prob, soft = soft_structure(it, nc, pb)
                 if prob and f"{chain}:{addr}" not in self.missed:
                     msc, _ = narrative_score(it, names.get(n, 0), True, now)
                     if msc >= int(nc["min_score"]):
@@ -324,22 +336,28 @@ class Strategies:
                         st["best_narr"] = (sc, str(it.get("symbol") or "?"))
                     if sc >= int(nc["min_score"]):
                         reason = f"{NARRATIVE}（{sc} 分：{'、'.join(notes[:4])}）"
-                        if probe:
-                            reason += f"（试探仓：{prob0}，先小仓位建仓再观察）"
+                        if soft:
+                            reason += probe_note(soft)
             if reason:
                 pk = f"{chain}:{addr}"
                 holders = int(f(it.get("holder_count")))
                 name = "early" if reason.startswith(EARLY) else "narrative"
                 persist = float((ec if name == "early" else nc)["persist_sec"])
                 pend = self.pending.get(pk)
+                if name == "narrative" and sc is not None and sc >= float(nc["fast_score"]) \
+                        and (not pend or (pend["score"] or 0) >= float(nc["fast_score"])):
+                    persist = min(persist, float(nc["fast_persist_sec"]))
                 if not pend or now - pend["last"] > max(persist, 120) + 120:
                     self.pending[pk] = {"first": now, "last": now, "holders": holders, "score": sc}
                     continue
                 pend["last"] = now
-                if holders < pend["holders"] or (sc is not None and pend["score"] is not None
-                                                 and sc < pend["score"] - 15):
+                less = holders < pend["holders"] * (1 - MAX_HOLDER_DROP)
+                cooler = sc is not None and pend["score"] is not None and sc < pend["score"] - 15
+                if less or cooler:
                     self.pending.pop(pk, None)   # 热度在退，不买
-                    self.note(chain, addr, it, f"{'早期建仓' if name == 'early' else '强叙事'}：观察期内热度回落，放弃")
+                    what = f"持有人 {pend['holders']}→{holders}" if less else f"叙事分 {pend['score']}→{sc}"
+                    self.note(chain, addr, it,
+                              f"{'早期建仓' if name == 'early' else '强叙事'}：观察期内热度回落（{what}），放弃")
                     continue
                 if now - pend["first"] < persist:
                     continue
@@ -419,7 +437,10 @@ class Strategies:
             basic.append(f"成交 ${volume(it):,.0f}")
         out.append(f"{'✅' if sc >= int(nc['min_score']) else '❌'} 强叙事评分 {sc}（要 ≥ {nc['min_score']}）："
                    + ("、".join(notes) or "没有加分项"))
-        if prob:
+        pb = probe_cfg(self.cfg)
+        if prob and sc >= int(pb["narrative_min_score"]) and soft_structure(it, nc, pb)[1]:
+            out.append(f"🧪 强叙事结构：{prob}，但叙事分 ≥ {pb['narrative_min_score']}，可以开试探仓（小仓位）")
+        elif prob:
             out.append(f"❌ 强叙事结构：{prob}（GMGN 数据，上限见 config 的 strategies.narrative）")
         if basic:
             out.append("❌ 强叙事基础条件不够：" + "、".join(basic))

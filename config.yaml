@@ -113,14 +113,14 @@ trading:
   bad_symbol_hours: 48            # 亏光过（≥80%）的币名 48 小时内不再买（换合约重发）；亏光过的项目方 30 天不碰
   max_gang_members: 3             # 早期可疑买家里有同一个阴谋团伙的 3 个以上成员 → 团伙盘不买（0 = 关闭）
   max_cabal_pct: 20               # 已知阴谋地址合计持仓 ≥ 20% 不买（0 = 关闭）
-  probe:                          # 试探仓：信号很强、只是筹码结构稍微超限（刚发币时前10 / 捆绑天然偏高）时，小仓位先上车
+  probe:                          # 试探仓：信号很强、只是前10 / 捆绑这两个"刚发币天然偏高"的指标超限时，小仓位先上车
     enabled: true
     size_mult: 0.25               # 仓位 = 正常仓位 × 0.25
-    max_top10_pct: 65             # 宽松上限（正常 45 / 叙事 40）
-    max_bundle_pct: 45            # 正常 25
-    max_insider_pct: 35           # 正常 20
+    max_top10_pct: 65             # 前10持仓宽松上限（正常 45 / 叙事 40）
+    max_bundle_pct: 45            # 捆绑地址现在还拿着的比例（正常 25）
+    max_bundler_trade_pct: 60     # 强叙事扫描时"捆绑交易占成交量"的宽松上限（正常 30）
     min_smart: 2                  # 跟单信号要 ≥ 2 个还拿着的聪明钱才开试探仓（主动建仓 / 新币高评分 / 模型买入不需要）
-    narrative_min_score: 80       # 强叙事要 ≥ 80 分才开试探仓
+    narrative_min_score: 80       # 强叙事要 ≥ 80 分才开试探仓（埋伏 / 老鼠仓 / 刷量 / 跑路风险 / dev 持仓一律不放宽）
   max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
   sim_fixed_fee_native: { solana: 0.0005, bsc: 0.0002, ethereum: 0.0005, base: 0.00003, robinhood: 0.00003 }   # 模拟盘每笔扣的固定优先费 / Gas（原生币）
   evidence_sizing: true           # 仓位按各买入来源 / 档位最近 7 天的真实期望值自动调（×0.25 ~ ×1.5，满 15 笔才调）
@@ -294,6 +294,8 @@ strategies:
     max_creator_rate: 0.1
     max_per_day: 6
     persist_sec: 180              # 论证：达标后观察 3 分钟，热度没退（持有人不减、叙事分不明显下降）才继续
+    fast_score: 90                # 叙事分 ≥ 90 的只观察 fast_persist_sec 秒（早点买，而不是等涨上去再买）
+    fast_persist_sec: 60
     min_token_score: 55           # 论证：完整分析的代币评分要 ≥ 55
 
 # ---------------- 自我学习 ----------------
