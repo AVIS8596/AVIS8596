@@ -166,19 +166,22 @@ class SolanaRPC:
                         f"先用 {rest[0]}" if rest else "没有别的节点了，分析改用 GMGN 数据")
         ep.out_until, ep.out_why = time.time() + sec, why
 
-    async def _key_ok(self, ep: Endpoint) -> bool:
-        """密钥本身有没有效（getSlot 能不能成功）。1 分钟内确认过就不再问。"""
+    async def _key_ok(self, ep: Endpoint) -> bool | None:
+        """密钥本身有没有效（getSlot 能不能成功）。1 分钟内确认过就不再问。
+        True = 有效；False = 节点明确拒绝（401 / 403）；None = 这次没问出来（限速 / 超时 / 断线），不能据此判定密钥无效。"""
         if time.time() - ep.key_ok_at < 60:
             return True
         try:
             r = await asyncio.wait_for(self.http.post(ep.svc, ep.http, json_body={
                 "jsonrpc": "2.0", "id": 0, "method": "getSlot", "params": []}, retries=1), 10)
-        except Exception:  # noqa: BLE001
+        except PlanError:
             return False
+        except Exception:  # noqa: BLE001
+            return None
         if isinstance(r, dict) and "result" in r:
             ep.key_ok_at = time.time()
             return True
-        return False
+        return None
 
     async def _post(self, ep: Endpoint, body: dict, retries: int, trade: bool) -> Any:
         method = str(body.get("method"))
@@ -194,11 +197,15 @@ class SolanaRPC:
         except PlanError as e:
             msg = " ".join(str(e.body or "").split())[:120]
             # 401 / 403 可能是密钥无效（整个节点不能用），也可能只是套餐不含这个方法：用 getSlot 验一下密钥
-            if method != "getSlot" and await self._key_ok(ep):
+            ok = await self._key_ok(ep) if method != "getSlot" else False
+            if ok:
                 if ep.can(method):
                     log.warning("Solana 节点 %s 不让用 %s（HTTP %s：%s），1 小时内这个方法改用别的节点",
                                 ep.name, method, e.status, msg)
                 ep.blocked[method] = (time.time() + BAD_KEY_SEC, f"HTTP {e.status}：{msg}")
+            elif ok is None:
+                # 验密钥那一下被限速 / 超时：没法判断，只先停用这个方法 10 分钟，不把整个节点判死 1 小时
+                ep.blocked[method] = (time.time() + OUT_SEC, f"HTTP {e.status}：{msg}")
             else:
                 self._mark_out(ep, f"地址里的密钥无效（HTTP {e.status}：{msg}）：没复制全，或者在节点后台换过密钥",
                                BAD_KEY_SEC)
@@ -210,9 +217,12 @@ class SolanaRPC:
         ep.calls += 1
         if method == "getSlot" or not err:
             ep.key_ok_at = time.time()
-        if ep.out_since:
-            log.info("Solana 节点 %s 恢复（停了 %.0f 分钟）", ep.name, (time.time() - ep.out_since) / 60)
-            ep.out_since, ep.out_why = 0.0, ""
+        if ep.out_since or ep.out_until:
+            if ep.out_since:
+                log.info("Solana 节点 %s 恢复（停了 %.0f 分钟）", ep.name, (time.time() - ep.out_since) / 60)
+            # 能正常返回就说明节点能用：连"停用到什么时候"一起清掉（以前只清了原因，
+            # 同时在路上的请求成功后会留下"❌ ，54 分钟后再试"这种没原因的停用）
+            ep.out_since, ep.out_why, ep.out_until = 0.0, "", 0.0
         return r
 
     async def call(self, method: str, params: list | None = None, retries: int = 3, svc: str = "helius") -> Any:
@@ -246,7 +256,7 @@ class SolanaRPC:
     async def probe(self, ep: Endpoint) -> str:
         """/status 用：这个节点现在通不通。"""
         if ep.out:
-            return f"❌ {ep.out_why}，{(ep.out_until - time.time()) / 60:.0f} 分钟后再试"
+            return f"❌ {ep.out_why or '暂停使用'}，{(ep.out_until - time.time()) / 60:.0f} 分钟后再试"
         try:
             r = await asyncio.wait_for(self._post(ep, {"jsonrpc": "2.0", "id": 0, "method": "getSlot", "params": []},
                                                   0, False), 8)

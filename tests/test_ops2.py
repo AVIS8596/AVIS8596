@@ -1100,6 +1100,25 @@ def test_solana_rpc_failover_between_nodes(monkeypatch):
             assert bodies == [("chainstack", "getTokenAccountsByOwner")]              # 1 小时内直接用别的节点
             assert await rpc.call("getAccountInfo", ["x"], retries=0) == 5            # 别的方法照常用 Helius
             assert "套餐不含：getTokenAccountsByOwner" in await rpc.probe(rpc.eps[0])
+            # 验密钥那一下被限速（429 每秒限流）：不能判定密钥无效，只停用这个方法 10 分钟，节点照常用
+            def rps(self, method, url, **kw):
+                who = "helius" if "helius" in url else "chainstack"
+                m = (kw.get("json") or {}).get("method")
+                if who == "helius" and m == "getProgramAccounts":
+                    return Resp(403, "Method not available on your plan")
+                if who == "helius" and m == "getSlot":
+                    return Resp(429, "exceeded the RPS limit")
+                return Resp(200, '{"jsonrpc":"2.0","id":1,"result":' + ("5" if who == "helius" else "11") + "}")
+            Sess.request = rps
+            rpc.eps[0].key_ok_at = 0
+            assert await rpc.call("getProgramAccounts", ["p"], retries=0) == 11
+            assert not rpc.eps[0].out and not rpc.eps[0].can("getProgramAccounts")
+            assert rpc.eps[0].blocked["getProgramAccounts"][0] - time.time() < 700
+            assert await rpc.call("getAccountInfo", ["x"], retries=0) == 5
+            # 同时在路上的请求成功返回：说明节点能用，连停用时间一起清掉（以前留下"❌ ，54 分钟后再试"）
+            rpc.eps[0].out_until, rpc.eps[0].out_why, rpc.eps[0].out_since = time.time() + 3000, "x", time.time()
+            await rpc._post(rpc.eps[0], {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": []}, 0, False)
+            assert not rpc.eps[0].out and rpc.eps[0].out_until == 0
         finally:
             Sess.request = orig_request
         # key 无效：1 小时内不用它
