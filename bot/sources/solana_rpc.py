@@ -68,6 +68,7 @@ def parse_urls(raw: str) -> list[tuple[str, str]]:
 
 
 # 免费版每月额度 / 30 = 每天预算（Alchemy 按取交易 40 单位折算）。没列的（Shyft 等）当不限次数。
+QUOTA_MONTH_SEC = 6 * 3600     # 月额度用完：6 小时试一次（下个月额度重置后自己恢复）
 DAILY_BUDGET = {"Helius": 33_000, "Chainstack": 100_000, "Alchemy": 25_000}
 
 
@@ -147,10 +148,37 @@ class SolanaRPC:
         return min((ep.out_since for ep in self.eps if ep.out_since), default=0.0)
 
     # ---- WebSocket 选节点 ----
+    def ws_rank(self, ep: Endpoint, now: float | None = None) -> int:
+        """监听优先用哪家：0 = 不限次数的付费 / 免费节点（Shyft 等）；1 = Solana 公共节点（不限次数但限流量）；
+        2 = 有月额度、今天还没超预算的；3 = 有月额度、今天已经超预算的。
+        11-12：Chainstack 按"每推送一条通知算 1 次请求"计费，300 个钱包的通知两天就把一个月 300 万额度用光了
+        （机器人只数了 HTTP 请求，没数推送，所以按天均匀用没起作用）。"""
+        if not self.budgets.get(ep.name):
+            return 1 if (urlparse(ep.http).hostname or "") in PUBLIC_HOSTS else 0
+        return 3 if self._ahead(ep, now) else 2
+
     def ws_pick(self) -> Endpoint:
         now = time.time()
-        ok = [ep for ep in self.eps if ep.ws_out_until <= now]
-        return ok[0] if ok else min(self.eps, key=lambda ep: ep.ws_out_until)
+        ok = [ep for ep in self.eps if ep.ws_out_until <= now and not ep.out]
+        ok = ok or [ep for ep in self.eps if ep.ws_out_until <= now]
+        if ok:
+            return min(ok, key=lambda ep: (self.ws_rank(ep, now), self.eps.index(ep)))
+        return min(self.eps, key=lambda ep: ep.ws_out_until)
+
+    def ws_note(self, ep: Endpoint, n: int = 1) -> None:
+        """监听收到的推送也算进这个节点今天的用量（Chainstack / Helius 都按推送计费）。"""
+        d = int(time.time() // 86400)
+        if ep.day != d:
+            ep.day, ep.today, ep.since = d, 0, time.time()
+        ep.today += n
+
+    def ws_should_move(self, ep: Endpoint) -> bool:
+        """正在用的监听节点有月额度、今天已经超预算（或额度用完），而有更好的节点可用 → 换过去。"""
+        now = time.time()
+        if self.ws_rank(ep, now) < 2 and not ep.out:
+            return False
+        best = self.ws_pick()
+        return best is not ep and (self.ws_rank(best, now) < self.ws_rank(ep, now) or ep.out)
 
     def ws_failed(self, ep: Endpoint, why: str) -> bool:
         """WebSocket 连接被拒 / 断开。被拒（429 / 402 / 额度）时这个节点 10 分钟内先不用；返回是否还有别的节点可以马上试。"""
@@ -213,6 +241,10 @@ class SolanaRPC:
             raise
         except PlanError as e:
             msg = " ".join(str(e.body or "").split())[:120]
+            if is_quota_text(str(e.body or "")):
+                # Chainstack 月额度用完返回的是 403（"monthly quota"），不是密钥无效
+                self._mark_out(ep, "这个月的额度用完了", QUOTA_MONTH_SEC)
+                raise
             # 401 / 403 可能是密钥无效（整个节点不能用），也可能只是套餐不含这个方法：用 getSlot 验一下密钥
             ok = await self._key_ok(ep) if method != "getSlot" else False
             if ok:

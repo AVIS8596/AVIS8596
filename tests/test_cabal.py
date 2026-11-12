@@ -36,3 +36,23 @@ def test_ladder_smooth_vs_organic():
         org.append(px)
     assert ladder(_bars(org), {}) == ""
     assert ladder(smooth[:10], {}) == ""                          # K 线太少不判断
+
+
+def test_ws_prefers_unmetered_nodes():
+    import time
+    from bot.sources.solana_rpc import SolanaRPC
+
+    class H:
+        def set_rate(self, *a, **k):
+            pass
+    sol = SolanaRPC(H(), "k", 10, extra_urls=[("https://solana-mainnet.core.chainstack.com/abcdefabcdefabcdefabcdefabcdefab", ""),
+                                             ("https://api.mainnet-beta.solana.com", "")])
+    names = [e.name for e in sol.eps]
+    assert sol.ws_pick().name == "Solana 公共节点", names       # 不限次数的先用，有月额度的（Helius / Chainstack）放后面
+    pub = sol.eps[-1]
+    pub.ws_out_until = time.time() + 600
+    assert sol.ws_pick().name in ("Helius", "Chainstack")
+    hel = sol.eps[0]
+    sol.ws_note(hel, 10_000_000)                                 # 推送也算用量：Helius 今天超预算了
+    assert sol.ws_pick().name != "Helius"
+    assert sol.ws_should_move(hel)

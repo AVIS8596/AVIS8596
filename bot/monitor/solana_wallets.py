@@ -91,6 +91,10 @@ def ws_error(e: BaseException) -> str:
     return f"{msg}：{body}" if body else msg
 
 
+class MoveNode(Exception):
+    """主动换监听节点（不算断线）。"""
+
+
 class SolanaWalletMonitor:
     def __init__(self, app: "App"):
         self.app = app
@@ -242,6 +246,8 @@ class SolanaWalletMonitor:
                         queue: list[str] = list(wallets)
                         rid_box = [0]
                         sending = [False]
+                        # Solana 公共节点同一个方法每 10 秒最多 40 次：订阅放慢到每秒 3 个
+                        gap = max(SUB_GAP, 0.3) if ep and ep.name == "Solana 公共节点" else SUB_GAP
 
                         async def sender() -> None:
                             # 订阅请求慢慢发（每秒约 8 个）：一口气灌过去会超出节点每秒请求数，大部分订阅被拒，
@@ -256,7 +262,7 @@ class SolanaWalletMonitor:
                                     pending[rid_box[0]] = w
                                     await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid_box[0], "method": "logsSubscribe",
                                                               "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
-                                    await asyncio.sleep(SUB_GAP)
+                                    await asyncio.sleep(gap)
                             finally:
                                 sending[0] = False
 
@@ -272,6 +278,7 @@ class SolanaWalletMonitor:
                             t.add_done_callback(helpers.discard)
 
                         spawn(sender())
+                        nmsg = 0
                         self._up(cid, 0)
                         if ep:
                             sol.ws_ok(ep)
@@ -280,6 +287,12 @@ class SolanaWalletMonitor:
                         try:
                             async for raw in ws:
                                 msg = json.loads(raw)
+                                if ep:
+                                    sol.ws_note(ep)
+                                    nmsg += 1
+                                    if nmsg % 500 == 0 and sol.ws_should_move(ep):
+                                        log.info("Solana 监听：%s 今天的额度快用超了，换到 %s", ep.name, sol.ws_pick().name)
+                                        raise MoveNode()
                                 if "id" in msg and msg.get("id") in pending:
                                     w = pending.pop(msg["id"])
                                     if "result" in msg:
@@ -332,6 +345,9 @@ class SolanaWalletMonitor:
                     raise ConnectionError("连接被节点关闭")
                 except asyncio.CancelledError:
                     raise
+                except MoveNode:
+                    await asyncio.sleep(1)
+                    continue
                 except Exception as e:  # noqa: BLE001
                     why = ws_error(e)
                     if ep:
