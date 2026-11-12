@@ -102,6 +102,7 @@ class SolanaWalletMonitor:
         self._tasks: set[asyncio.Task] = set()
         self.dropped = 0
         self.live: dict[int, int] = {}      # 连接编号 → 这条连接订阅了多少个钱包
+        self.capped = 0                      # 公共节点上只订阅了排名前多少个（0 = 没限）
         self.wanted = 0                      # 应该监听的钱包数
         self.down_since = time.time()        # 一条连接都没有的开始时间（0 = 有连接）
         self.last_err = ""
@@ -146,7 +147,8 @@ class SolanaWalletMonitor:
                 noisy += f"，{len(self.mention_out)} 个只是被别人交易提到的钱包不监听"
             if self.busy_out:
                 noisy += f"，{len(self.busy_out)} 个交易太频繁（1 小时买卖 {self.busy_per_h} 笔以上）的钱包暂停监听"
-            return f"Solana 链上监听{node}：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{bad}{save}{noisy}{tail}"
+            capn = f"（公共节点只订排名前 {self.capped} 个）" if self.capped else ""
+            return f"Solana 链上监听{node}：✅ 已订阅 {h['wallets']}/{h['wanted']} 个钱包{capn}{bad}{save}{noisy}{tail}"
         return (f"Solana 链上监听：❌ 连不上，已断 {h['down_min']:.0f} 分钟（{h['err'] or '还在连接'}）"
                 f"——这期间 Solana 只剩 GMGN 交易流那一点信号")
 
@@ -243,7 +245,12 @@ class SolanaWalletMonitor:
                                                   max_size=10_000_000, open_timeout=15) as ws:
                         pending: dict[int, str] = {}
                         subs: dict[int, str] = {}
-                        queue: list[str] = list(wallets)
+                        public = bool(ep and ep.name == "Solana 公共节点")
+                        cap = int(self.app.cfg.get("smart_money.public_ws_max", 120)) if public else len(wallets)
+                        # 公共节点：每 10 秒 100 次请求（订阅也算），订 300 个要好几分钟、还常被掐断（1002），
+                        # 只订排名靠前的（钱包列表已按跟单战绩排好），断了也能很快订回来
+                        queue: list[str] = list(wallets[:cap])
+                        self.capped = cap if cap < len(wallets) else 0
                         rid_box = [0]
                         sending = [False]
                         # Solana 公共节点同一个方法每 10 秒最多 40 次：订阅放慢到每秒 3 个
@@ -355,6 +362,7 @@ class SolanaWalletMonitor:
                     self._down(cid, why)
                     other = sol.ws_failed(ep, why) if ep else False
                     if other:                    # 换一个节点：马上试
+                        log.info("Solana WS 断开（%s），马上换节点 / 重连", why[:160])
                         await asyncio.sleep(2)
                         continue
                     wait = backoff * (0.7 + 0.6 * random.random())

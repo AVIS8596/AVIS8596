@@ -185,7 +185,9 @@ class SolanaRPC:
         """WebSocket 连接被拒 / 断开。被拒（429 / 402 / 额度）时这个节点 10 分钟内先不用；返回是否还有别的节点可以马上试。"""
         rejected = any(x in why for x in ("HTTP 429", "HTTP 402", "HTTP 401", "HTTP 403")) or is_quota_text(why)
         if rejected and len(self.eps) > 1:
-            ep.ws_out_until, ep.ws_why = time.time() + OUT_SEC, why
+            # 套餐层面的拒绝（月额度用完、Shyft 免费版"同一个密钥的 IP 数到上限"）10 分钟后再试也一样，6 小时后再试
+            long = is_quota_text(why) or "unique ip" in why.lower()
+            ep.ws_out_until, ep.ws_why = time.time() + (QUOTA_MONTH_SEC if long else OUT_SEC), why
             log.warning("Solana 监听：%s 拒绝连接（%s），换下一个节点", ep.name, why[:120])
         return any(e.ws_out_until <= time.time() for e in self.eps if e is not ep)
 
