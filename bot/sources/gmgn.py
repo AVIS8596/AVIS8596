@@ -340,6 +340,10 @@ class Gmgn:
             "chain": CHAIN_MAP[chain], "period": period, "wallet_addresses": wallets[:100]})
         return _rows(d)
 
+    async def created_tokens(self, chain: str, wallet: str) -> Any:
+        """这个地址发过的币（项目方历史战绩）。"""
+        return await self.request("GET", "/v1/user/created_tokens", {"chain": CHAIN_MAP[chain], "wallet_address": wallet})
+
     async def user_info(self) -> Any:
         return await self.request("GET", "/v1/user/info")
 

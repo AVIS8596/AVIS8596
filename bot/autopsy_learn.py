@@ -42,6 +42,10 @@ SNAP_FEATS = [
     ("liquidity", "流动性", [10_000, 30_000, 100_000, 300_000], "usd"),
     ("has_x", "有推特", [1], "{:.0f}"),
     ("score", "代币评分", [40, 55, 70, 85], "{:.0f}"),
+    ("dev_best_mcap", "项目方最好的币市值", [50_000, 300_000, 1_000_000, 5_000_000], "usd"),
+    ("whale_n", "前 20 里大户数", [1, 3, 6, 10], "{:.0f}"),
+    ("same_funder_n", "同一出资人最大一伙", [2, 3, 5, 8], "{:.0f}"),
+    ("tg_members", "TG 人数", [100, 500, 2000, 10000], "{:.0f}"),
 ]
 # 结果档案里的同名特征（回测用）：键 → 从 features 里怎么取
 BASE_MAP = {"age_min": lambda ft: f(ft.get("age_hours")) * 60 if ft.get("age_hours") is not None else None,
@@ -51,7 +55,9 @@ BASE_MAP = {"age_min": lambda ft: f(ft.get("age_hours")) * 60 if ft.get("age_hou
             "has_x": lambda ft: ft.get("has_x"), "score": lambda ft: ft.get("score"),
             "chg60": lambda ft: f(ft.get("change_1h")) / 100 if ft.get("change_1h") is not None else None}
 SNAP_KEYS = ("holders", "top10_pct", "bundle_held_pct", "smart", "liquidity", "has_x", "has_web", "score",
-             "fresh_pct", "bot_pct", "rat_trade_pct", "cabal_pct", "dev_held_pct", "volume_1h", "change_1h")
+             "fresh_pct", "bot_pct", "rat_trade_pct", "cabal_pct", "dev_held_pct", "volume_1h", "change_1h",
+             "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n",
+             "tg_members", "tg_growth_h")
 
 
 def _med(xs: list[float]) -> float:

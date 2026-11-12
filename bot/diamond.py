@@ -38,11 +38,16 @@ log = logging.getLogger("memebot.diamond")
 PREFIX = "钻石手打法"
 INSIDER = {"sniper", "bundler", "rat_trader", "dev"}
 NAMES = ["age_min", "mcap", "chg60", "holders", "top10_pct", "bundle_held_pct", "smart", "liquidity", "has_x",
-         "score", "volume_1h", "buys_1h", "sells_1h", "fresh_pct", "bot_pct"]
+         "score", "volume_1h", "buys_1h", "sells_1h", "fresh_pct", "bot_pct",
+         "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n",
+         "tg_members", "tg_growth_h"]
 GATE_KEYS = ("age_min", "mcap", "chg60")
 LABELS = {"age_min": "发币多久（分钟）", "mcap": "市值", "chg60": "前 1 小时涨跌", "run_up": "1 小时内已拉",
           "holders": "持有人", "top10_pct": "前 10 持仓%", "bundle_held_pct": "捆绑%", "smart": "聪明钱数",
-          "liquidity": "流动性", "has_x": "推特", "score": "代币评分"}
+          "liquidity": "流动性", "has_x": "推特", "score": "代币评分", "dev_best_mcap": "项目方最好的币市值",
+          "dev_good_n": "项目方做到 50 万的币", "dev_tokens_n": "项目方发过几个币", "whale_n": "前 20 里大户",
+          "smart_hold_n": "前 20 里聪明钱", "same_funder_n": "同一出资人最大一伙", "tg_members": "TG 人数",
+          "tg_growth_h": "TG 每小时增长"}
 DEFAULTS = {"enabled": True, "min_profit_usd": 5000, "min_hold_hours": 6, "tokens_per_run": 40, "max_per_day": 10,
             "stop_loss_pct": -50, "min_rows": 400, "min_pos": 20, "retrain_hours": 24}
 
@@ -98,7 +103,8 @@ def base_x(ft: dict) -> dict:
     if ft.get("change_1h") is not None:
         x["chg60"] = f(ft["change_1h"]) / 100
     for k in ("mcap", "holders", "top10_pct", "bundle_held_pct", "liquidity", "score", "volume_1h", "buys_1h",
-              "sells_1h", "fresh_pct", "bot_pct"):
+              "sells_1h", "fresh_pct", "bot_pct", "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n",
+              "smart_hold_n", "fresh_top_n", "same_funder_n", "tg_members", "tg_growth_h"):
         if ft.get(k) is not None:
             x[k] = f(ft[k])
     sm = ft.get("smart")
@@ -341,7 +347,8 @@ class Diamond:
                      f"{sum(d['holding'] for d in ds) / len(ds) * 100:.0f}% 现在还拿着"
                      + (f"，卖出的中位卖在 {_med(sx):.1f} 倍" if sx else ""))
             L.append("  他们买入那一刻：")
-            for k in ("age_min", "mcap", "chg60", "run_up", "holders", "top10_pct", "bundle_held_pct", "smart", "has_x", "score"):
+            for k in ("age_min", "mcap", "chg60", "run_up", "holders", "top10_pct", "bundle_held_pct", "smart", "has_x", "score",
+                      "dev_best_mcap", "whale_n", "same_funder_n", "tg_members"):
                 xs = [f(d["x"][k]) for d in ds if d["x"].get(k) is not None]
                 if len(xs) >= 5:
                     L.append(f"    {LABELS.get(k, k)}：中位 {_fmt(k, _med(xs))}（多数在 {_fmt(k, _q(xs, .25))} ~ {_fmt(k, _q(xs, .75))}，{len(xs)} 笔）")
@@ -395,7 +402,7 @@ class Diamond:
 
 
 def _fmt(k: str, v: float) -> str:
-    if k in ("mcap", "liquidity"):
+    if k in ("mcap", "liquidity", "dev_best_mcap"):
         return fmt_usd(v)
     if k in ("chg60", "run_up"):
         return f"{v * 100:+.0f}%"

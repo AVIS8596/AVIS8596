@@ -15,6 +15,7 @@ from ..sources.evm_rpc import topic_to_addr
 from ..sources.solana_rpc import signer, wallet_deltas
 from ..utils import dig, f
 from . import bundle as bd
+from .intel import INTEL_KEYS, holder_quality
 from .scoring import TokenFacts, evm_safety, score, solana_safety
 
 if TYPE_CHECKING:
@@ -129,6 +130,8 @@ class Analyzer:
         self._cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._inflight: dict[tuple[str, str], asyncio.Future] = {}
         self._sem = asyncio.Semaphore(3)   # 同时最多分析 3 个币，防止打爆接口
+        from .intel import Intel
+        self.intel = Intel(app)
 
     async def analyze(self, chain: str, token: str, source: str = "", force: bool = False) -> dict | None:
         token = norm_addr(chain, token)
@@ -215,6 +218,10 @@ class Analyzer:
         dev = ov.get("dev") or {}
         rep["dev_launches"] = int(f(dev.get("creator_open_count")))           # 项目方以前发过几个币
         rep["dev_sold"] = int(str(dev.get("creator_token_status") or "").lower() in ("sell", "creator_close"))
+        try:      # 项目方历史战绩、Telegram 社区人数（查不到就留空）
+            await self.intel.enrich(rep, ov)
+        except Exception as e:  # noqa: BLE001
+            log.debug("背景信息查询失败: %s", e)
         return rep
 
     # ================================================================== Solana
@@ -358,6 +365,7 @@ class Analyzer:
         # GMGN：burn_status "burn" = 池子已烧，"" = 没烧；GMGN 没返回安全数据时记成 None（不知道）
         ex["lp_burn"] = str(gsec.get("burn_status") or "") if gsec else None
         ex.update(gsec_extra(gsec))
+        ex.update(holder_quality(gholders, "solana"))       # 前 20 大持有人的成色
         # 已知"阴谋地址"/早期发现者现在的持仓（来自大涨币挖矿）：先只记录，让结果档案告诉我们它们在场时是涨是跌
         if g_hold and supply:
             ks = list(g_hold)
@@ -486,6 +494,7 @@ class Analyzer:
         ex = self._extra(res, creator, launch_ts)
         ex["lp_burn"] = str((gsec or {}).get("burn_status") or "")
         ex.update(gsec_extra(gsec))
+        ex.update(holder_quality(gholders, chain))
         return ex
 
     async def _block_at(self, chain: str, ts: float) -> int:
@@ -657,7 +666,7 @@ class Analyzer:
             feats["gang_n"] = rep.get("gang_n", 0)
             for k in ("fresh_pct", "bot_pct", "bluechip_pct", "entrap_pct", "rat_top_pct", "fresh_n", "sniper_tag_n",
                       "has_x", "has_web", "has_tg", "rug_ratio_pct", "rat_trade_pct", "bundler_trade_pct", "wash",
-                      "sniper_n", "exchange"):
+                      "sniper_n", "exchange") + INTEL_KEYS:
                 if k in rep:
                     feats[k] = rep[k]
             from ..trade.trader import pullable_pool

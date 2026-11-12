@@ -205,6 +205,17 @@ class Telegram:
             L.append(f"🔥 池子已烧（{pool}）" if lp == "burn" else
                      (f"⚠️ {e(pullable_pool(rep))}" if pullable_pool(rep) else
                       (f"池子没烧（{pool}，还在发射平台曲线上 / 交易所不明）" if lp == "" else "池子烧没烧：不知道（GMGN 没返回）")))
+        bg = []     # 背景信息：项目方历史战绩、前 20 大持有人成色、Telegram 社区
+        if rep.get("dev_tokens_n") is not None:
+            bg.append(f"项目方发过 {rep['dev_tokens_n']} 个币、最好的涨到 {fmt_usd(rep.get('dev_best_mcap') or 0)}"
+                      f"、{rep.get('dev_good_n', 0)} 个做到 $50 万")
+        if rep.get("whale_n") is not None:
+            bg.append(f"前 20 大户 {rep['whale_n']} 个、聪明钱 {rep.get('smart_hold_n', 0)} 个、新钱包 {rep.get('fresh_top_n', 0)} 个、"
+                      f"同一出资人最大一伙 {rep.get('same_funder_n', 0)} 个")
+        if rep.get("tg_members") is not None:
+            bg.append(f"TG {rep['tg_members']} 人" + (f"（每小时 {rep['tg_growth_h']:+g}）" if rep.get("tg_growth_h") is not None else ""))
+        if bg:
+            L.append("🧭 " + e("｜".join(bg)))
         if rep.get("risks"):
             L.append("⛔ " + e("；".join(rep["risks"])))
         if rep.get("warnings"):
