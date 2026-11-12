@@ -433,6 +433,7 @@ class Telegram:
             sub = args[0].lower() if args else ""
             if sub in ("shadow", "on", "off"):
                 await self.app.db.kv_set("model_mode", sub)
+                await self.app.db.kv_set("model_manual", sub)     # 手动选的：不再自动上岗（自动退回影子照常）
                 note = "（实盘不会自动下单）" if sub == "on" and not self.app.cfg.dry_run else ""
                 await self.send(f"选币模型已改为：{ {'shadow': '影子模式（只记录不下单）', 'on': '模拟盘自己下单', 'off': '关闭'}[sub] }{note}")
             elif sub == "train":

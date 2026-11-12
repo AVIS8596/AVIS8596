@@ -99,6 +99,11 @@ def test_shadow_then_on_and_promotion(tmp_path):
             await db.execute("INSERT INTO model_picks(ts,chain,token,symbol,model,score,price,acted,p60,p240) "
                              "VALUES(?,?,?,?,?,?,?,?,?,?)", (now - 2 * 86400, "solana", f"O{i}", "S", "a", 0.9, 1.0, 0,
                                                              0.5, 0.3))
+        await db.kv_set("model_hold_1112", True)                  # 跳过 11-12 一次性锁影子
+        # 手动发过 /model shadow：成绩再好也不自动上岗
+        await db.kv_set("model_manual", "shadow")
+        assert await sm.promote_check() == "" and await sm.mode() == "shadow"
+        await db.kv_set("model_manual", None)
         msg = await sm.promote_check()
         assert "通过考核" in msg and await sm.mode() == "on"
         await sm._pick("a", "solana", "T9", "NEW", 0.9, 1.0, {"symbol": "NEW", "price": 1.0})

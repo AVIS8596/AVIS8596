@@ -422,8 +422,16 @@ class SelfModel:
     async def promote_check(self) -> str:
         if not self.cfg.dry_run:
             return ""
+        db = self.app.db
+        # 11-12：考核成绩偏乐观（近似算法），用户要求退回影子后又被自动拉上岗。一次性退回影子并锁住，
+        # 以后只有手动发 /model on 才会下单
+        if not await db.kv_get("model_hold_1112", False):
+            await db.kv_set("model_mode", "shadow")
+            await db.kv_set("model_manual", "shadow")
+            await db.kv_set("model_hold_1112", True)
         mode = await self.mode()
-        if mode == "shadow" and bool(self.cfg.get("learning.model_auto_promote", True)):
+        manual = await db.kv_get("model_manual", None)
+        if mode == "shadow" and manual != "shadow" and bool(self.cfg.get("learning.model_auto_promote", True)):
             # 只考最近 24 小时选的币：模型每天重新训练，更早的选择是旧模型做的
             # （比如 11-09 用错误价格数据训练的那一版，一天选 1978 个、中位 -39%），不能拿来给现在的模型打分
             since = time.time() - float(self.cfg.get("learning.model_exam_hours", 24)) * 3600
