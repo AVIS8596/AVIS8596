@@ -56,3 +56,23 @@ def test_dev_stats_and_intel():
         assert out["tg_members"] == 1200 and abs(out["tg_growth_h"] - 200) < 1
         assert await it.tg("https://t.me/+AbCdEf123") == {}      # 私密邀请链接查不了
     asyncio.run(go())
+
+
+def test_gmgn_background_yields_to_foreground():
+    """GMGN 额度：后台研究只用空闲额度，前台（/check、分析新币、持仓取价）先走。"""
+    from bot.sources.gmgn import _Bucket
+
+    async def go():
+        b = _Bucket(10)
+        b.tokens = 0                                   # 额度刚用完
+        order = []
+
+        async def take(name, low):
+            await b.take(5, low=low)
+            order.append(name)
+        bg = asyncio.create_task(take("后台", True))
+        await asyncio.sleep(0.05)
+        fg = asyncio.create_task(take("前台", False))
+        await asyncio.gather(bg, fg)
+        assert order == ["前台", "后台"]
+    asyncio.run(go())

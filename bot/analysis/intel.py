@@ -102,6 +102,10 @@ def dev_stats(rows: list[dict], exclude: str = "") -> dict:
     return {"dev_tokens_n": len(rows), "dev_best_mcap": best, "dev_good_n": good, "dev_dead_n": dead}
 
 
+async def _none() -> dict:
+    return {}
+
+
 class Intel:
     def __init__(self, app: "App"):
         self.app = app
@@ -181,8 +185,11 @@ class Intel:
 
     async def enrich(self, rep: dict, ov: dict) -> None:
         """分析报告补上项目方战绩和社区数据（大户质量在各链的分析里已经算好）。"""
-        rep.update(await self.dev(rep["chain"], str(rep.get("creator") or ""), str(rep.get("address") or "")))
+        import asyncio
         link = (ov.get("link") or {}).get("telegram") or ""
         rep["tg_link"] = int(bool(link))
-        if link:
-            rep.update(await self.tg(str(link)))
+        dev, tg = await asyncio.gather(                       # 两个一起查，不排队
+            self.dev(rep["chain"], str(rep.get("creator") or ""), str(rep.get("address") or "")),
+            self.tg(str(link)) if link else _none())
+        rep.update(dev)
+        rep.update(tg)

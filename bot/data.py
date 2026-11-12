@@ -372,6 +372,17 @@ class DataHub:
         if self.app.gmgn:
             g = self.app.gmgn
             parts.append(f"GMGN 已用权重 {g.weight_used:,}，被限流 {g.bans} 次")
+            an = getattr(self.app, "analyzer", None)
+            ds = [d for d in (getattr(an, "durs", None) or []) if time.time() - d[0] < 600]
+            if ds:         # 分析一个币要多久（排队等空位 + 真正分析）
+                q = sorted(d[1] for d in ds)
+                a = sorted(d[2] for d in ds)
+                parts.append(f"分析新币（最近 10 分钟 {len(ds)} 个）：排队中位 {q[len(q) // 2]:.0f} 秒、"
+                             f"分析中位 {a[len(a) // 2]:.0f} 秒、最慢 {a[-1]:.0f} 秒")
+            n, avg, mx = g.wait_stats()
+            if n:          # 前台请求（/check、分析新币、持仓取价）排队等了多久：越久机器人反应越慢
+                parts.append(f"GMGN 排队（最近 10 分钟 {n} 次前台请求）：平均等 {avg:.1f} 秒、最长 {mx:.0f} 秒"
+                             + ("  ⚠️ 额度不够用，机器人会变慢" if avg > 3 else ""))
             if g.paused_until > time.time():
                 parts.append(f"⚠️ GMGN 限流暂停到 {self.app.fmt_time(g.paused_until)}（期间价格改用 DexScreener，"
                              f"止盈止损照常；{g.last_err[:60]}）")

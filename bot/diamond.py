@@ -375,6 +375,8 @@ class Diamond:
             return False
 
         async def go() -> None:
+            from .sources.gmgn import LOW
+            LOW.set(True)                  # 后台研究：只用空闲的 GMGN 额度
             n = 0
             for chain in [c for c in ("solana", "bsc") if c in self.cfg.enabled_chains]:
                 try:

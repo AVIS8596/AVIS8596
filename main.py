@@ -172,6 +172,17 @@ async def run_bot(cfg) -> None:
         if app.gmgn and c not in NO_FEED_CHAINS:     # 罗宾汉链等 GMGN 还没有聪明钱交易流
             jobs.append((f"{c} GMGN交易流", GmgnFeed(app, c).run))
 
+    # 后台研究 / 学习类任务：GMGN 只用空闲额度，前台（/check、分析新币、持仓取价、信号）有请求在排队就先让路
+    from bot.sources.gmgn import LOW
+    background = {"聪明钱发现", "学来的打法", "钻石手打法", "学习高手", "扩充钱包池", "自我学习", "选币模型",
+                  "钱包体检", "阴谋团伙识别", "影子单", "影子采样", "安全与成本校准"}
+
+    def low(fn):
+        async def go():
+            LOW.set(True)
+            return await fn()
+        return go
+    jobs = [(n, low(fn) if n in background else fn) for n, fn in jobs]
     tasks = [asyncio.create_task(run_forever(n, fn, err), name=n) for n, fn in jobs]
 
     mode = "🧪 模拟盘（不会花真钱）" if cfg.dry_run else "💰 实盘"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import socket
@@ -87,8 +88,13 @@ def sign(message: str, key) -> str:
     raise ValueError("GMGN 私钥只支持 Ed25519 或 RSA")
 
 
+# 后台研究任务（解剖、钻石手、学高手、挖钱包、体检、影子采样……）在自己的任务里设成 True：
+# 它们只用空闲的额度，有前台请求（/check、分析新币、持仓取价、聪明钱信号）在排队就先让路。
+LOW = contextvars.ContextVar("gmgn_low", default=False)
+
+
 class _Bucket:
-    """按权重扣减的漏桶。"""
+    """按权重扣减的漏桶。前台请求优先，后台请求只用空闲额度。"""
 
     def __init__(self, rate: float):
         self.rate = rate
@@ -96,9 +102,26 @@ class _Bucket:
         self.tokens = rate
         self.t = time.monotonic()
         self.lock = asyncio.Lock()
+        self.fg_waiting = 0
 
-    async def take(self, w: float) -> None:
+    def level(self) -> float:
+        return min(self.capacity, self.tokens + (time.monotonic() - self.t) * self.rate)
+
+    async def take(self, w: float, low: bool = False) -> None:
         w = min(w, self.capacity)
+        if low:
+            # 后台：前台有人在排队、或额度没恢复到八成，就先等着（不占锁，不挡前台）
+            while self.fg_waiting or self.lock.locked() or self.level() < self.capacity * 0.8:
+                await asyncio.sleep(0.3)
+        else:
+            self.fg_waiting += 1
+        try:
+            await self._take(w)
+        finally:
+            if not low:
+                self.fg_waiting -= 1
+
+    async def _take(self, w: float) -> None:
         async with self.lock:
             while True:
                 now = time.monotonic()
@@ -129,6 +152,7 @@ class Gmgn:
         self.last_err = ""
         self.disabled: set[str] = set()                    # 当前套餐用不了的接口
         self.weight_used = 0
+        self.fg_waits: list[tuple[float, float]] = []      # 前台请求排队等了多久（/status 看机器人慢不慢）
         self.bans = 0
         self.trade_block_until = 0.0
         self.trade_block_msg = ""
@@ -190,7 +214,14 @@ class Gmgn:
                     signed: bool, trade: bool, dkey: str) -> Any:
         """发一次请求。被限流返回 _RETRY；网络错误 / 服务器错误抛 GmgnError（由调用方决定）。"""
         if True:
-            await self.bucket.take(WEIGHTS.get(path, 2))
+            low = LOW.get()
+            t0 = time.monotonic()
+            await self.bucket.take(WEIGHTS.get(path, 2), low=low)
+            if not low:
+                now = time.time()
+                self.fg_waits.append((now, time.monotonic() - t0))
+                if len(self.fg_waits) > 2000:
+                    self.fg_waits = [x for x in self.fg_waits if now - x[0] < 600]
             self.weight_used += WEIGHTS.get(path, 2)
             ts = int(time.time())
             q = {k: v for k, v in (query or {}).items() if v is not None}
@@ -343,6 +374,12 @@ class Gmgn:
     async def created_tokens(self, chain: str, wallet: str) -> Any:
         """这个地址发过的币（项目方历史战绩）。"""
         return await self.request("GET", "/v1/user/created_tokens", {"chain": CHAIN_MAP[chain], "wallet_address": wallet})
+
+    def wait_stats(self, sec: float = 600) -> tuple[int, float, float]:
+        """最近 sec 秒前台请求：次数、平均排队秒数、最长排队秒数。"""
+        now = time.time()
+        ws = [w for t, w in self.fg_waits if now - t < sec]
+        return len(ws), (sum(ws) / len(ws) if ws else 0.0), max(ws, default=0.0)
 
     async def user_info(self) -> Any:
         return await self.request("GET", "/v1/user/info")

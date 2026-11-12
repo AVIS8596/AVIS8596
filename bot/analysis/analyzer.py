@@ -130,6 +130,9 @@ class Analyzer:
         self._cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._inflight: dict[tuple[str, str], asyncio.Future] = {}
         self._sem = asyncio.Semaphore(3)   # 同时最多分析 3 个币，防止打爆接口
+        self._manual = asyncio.Semaphore(2)
+        from collections import deque
+        self.durs: deque = deque(maxlen=500)     # /status 看分析一个币要多久
         from .intel import Intel
         self.intel = Intel(app)
 
@@ -147,8 +150,12 @@ class Analyzer:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._inflight[key] = fut
         try:
-            async with self._sem:
+            # 手动 /check、/whynot 不排队：自动分析最多同时 3 个，手动的另外走一条道
+            t_q = time.monotonic()
+            async with (self._manual if source in ("manual", "whynot") else self._sem):
+                t0 = time.monotonic()
                 rep = await self._analyze(chain, token, source)
+            self.durs.append((time.time(), t0 - t_q, time.monotonic() - t0))     # (时间, 排队秒数, 分析秒数)
             if rep:
                 self._cache[key] = (time.time(), rep)
                 await self._save(rep, source)

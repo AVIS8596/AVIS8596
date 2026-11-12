@@ -380,6 +380,8 @@ class Autopsy:
             return False
 
         async def go() -> None:
+            from .sources.gmgn import LOW
+            LOW.set(True)                  # 后台研究：只用空闲的 GMGN 额度
             tg = getattr(self.app, "tg", None)
             try:
                 for sec in await self.run(chains, top):    # 每条链一条消息（Telegram 一条最多 4000 字）
