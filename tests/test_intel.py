@@ -20,13 +20,16 @@ def test_holder_quality():
 def test_dev_stats_and_intel():
     st = dev_stats([{"ath_market_cap": "2000000"}, {"market_cap": 30000}, {"usd_market_cap": 600000}])
     assert st == {"dev_tokens_n": 3, "dev_best_mcap": 2e6, "dev_good_n": 2}
+    # 现在这个币不算项目方的"以前的战绩"
+    assert dev_stats([{"address": "NOW", "market_cap": 2e6}, {"address": "OLD", "market_cap": 1e4}], "now") == \
+        {"dev_tokens_n": 1, "dev_best_mcap": 1e4, "dev_good_n": 0}
 
     async def go():
         calls = {"dev": 0, "tg": 0}
 
         async def created_tokens(chain, w):
             calls["dev"] += 1
-            return {"tokens": [{"ath_mc": 800000}]}
+            return {"tokens": [{"ath_mc": 800000, "address": "OLD"}, {"ath_mc": 3e6, "address": "TOK"}]}
 
         async def get(svc, url, params=None, retries=0):
             calls["tg"] += 1
@@ -34,9 +37,9 @@ def test_dev_stats_and_intel():
         app = SimpleNamespace(gmgn=SimpleNamespace(created_tokens=created_tokens), tg=SimpleNamespace(base="https://x"),
                               http=SimpleNamespace(get=get), cfg=SimpleNamespace(get=lambda k, d=None: d))
         it = Intel(app)
-        rep = {"chain": "solana", "creator": "DEV"}
+        rep = {"chain": "solana", "creator": "DEV", "address": "TOK"}
         await it.enrich(rep, {"link": {"telegram": "https://t.me/goodcoin"}})
-        assert rep["dev_good_n"] == 1 and rep["tg_members"] == 1100 and "tg_growth_h" not in rep
+        assert rep["dev_good_n"] == 1 and rep["dev_tokens_n"] == 1 and rep["tg_members"] == 1100 and rep["tg_link"] == 1 and "tg_growth_h" not in rep
         await it.enrich(dict(rep), {"link": {"telegram": "https://t.me/goodcoin"}})
         assert calls == {"dev": 1, "tg": 1}                      # 项目方 24 小时、TG 30 分钟内用缓存
         # 半小时后再查：算出每小时增长

@@ -40,11 +40,18 @@ def _native(v: Any, chain: str) -> float:
     return x
 
 
+_logged_holder = False
+
+
 def holder_quality(holders: list[dict], chain: str, top: int = 20) -> dict:
     """前 20 大持有人（去掉池子 / 交易所）的成色。"""
+    global _logged_holder
     hs = [h for h in (holders or []) if h.get("address") and int(f(h.get("addr_type"))) != 2][:top]
     if not hs:
         return {}
+    if not _logged_holder:
+        _logged_holder = True
+        log.info("GMGN 前 100 持有人字段：%s", sorted(hs[0].keys())[:60])
     whale = smart = fresh = 0
     funders: Counter = Counter()
     for h in hs:
@@ -68,8 +75,13 @@ MCAP_KEYS = ("ath_market_cap", "ath_mc", "max_market_cap", "history_highest_mark
              "market_cap", "usd_market_cap", "mc", "marketcap")
 
 
-def dev_stats(rows: list[dict]) -> dict:
-    """项目方发过的币 → 发过几个、最好的一个涨到多少市值、有几个做到 $50 万以上。"""
+ADDR_KEYS = ("address", "token_address", "mint", "token", "ca")
+
+
+def dev_stats(rows: list[dict], exclude: str = "") -> dict:
+    """项目方以前发过的币（不算现在这个）→ 发过几个、最好的一个涨到多少市值、有几个做到 $50 万以上。"""
+    ex = (exclude or "").lower()
+    rows = [r for r in rows if not ex or all(str(r.get(k) or "").lower() != ex for k in ADDR_KEYS)]
     best, good = 0.0, 0
     for r in rows:
         m = max((f(r.get(k)) for k in MCAP_KEYS), default=0.0)
@@ -95,13 +107,13 @@ class Intel:
         q.append(now)
         return True
 
-    async def dev(self, chain: str, creator: str) -> dict:
+    async def dev(self, chain: str, creator: str, token: str = "") -> dict:
         if not creator or not getattr(self.app, "gmgn", None):
             return {}
         key = f"{chain}:{creator}"
         hit = self._dev.get(key)
         if hit and time.time() - hit[0] < 24 * 3600:
-            return hit[1]
+            return dev_stats(hit[1], token)
         if not self._budget("dev", int(self.app.cfg.get("intel.dev_per_hour", 400) or 400)):
             return {}
         try:
@@ -113,12 +125,14 @@ class Intel:
         rows = _rows(d) if not isinstance(d, dict) or not isinstance(d.get("tokens"), list) else d["tokens"]
         if rows and not self._logged:
             self._logged = True
-            log.info("GMGN 项目方发币记录字段：%s", sorted(rows[0].keys())[:40])
-        out = dev_stats(rows) if isinstance(d, (dict, list)) else {}
+            log.info("GMGN 项目方发币记录字段：%s", sorted(rows[0].keys())[:60])
+        if not isinstance(d, (dict, list)):
+            return {}
+        rows = [{k: r.get(k) for k in ADDR_KEYS + MCAP_KEYS if k in r} for r in rows if isinstance(r, dict)]
         if len(self._dev) > 20000:
             self._dev.clear()
-        self._dev[key] = (time.time(), out)
-        return out
+        self._dev[key] = (time.time(), rows)
+        return dev_stats(rows, token)
 
     async def tg(self, link: str) -> dict:
         """Telegram 公开群 / 频道人数和最近的增长速度（人 / 小时）。私密邀请链接查不了。"""
@@ -155,7 +169,8 @@ class Intel:
 
     async def enrich(self, rep: dict, ov: dict) -> None:
         """分析报告补上项目方战绩和社区数据（大户质量在各链的分析里已经算好）。"""
-        rep.update(await self.dev(rep["chain"], str(rep.get("creator") or "")))
+        rep.update(await self.dev(rep["chain"], str(rep.get("creator") or ""), str(rep.get("address") or "")))
         link = (ov.get("link") or {}).get("telegram") or ""
+        rep["tg_link"] = int(bool(link))
         if link:
             rep.update(await self.tg(str(link)))
