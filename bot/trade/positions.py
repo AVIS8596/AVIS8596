@@ -466,6 +466,15 @@ class PositionManager:
                         await self.app.tg.send(f"🚨 #{pid} {p['symbol']} {gone}，立即全部卖出")
                         self._spawn(self.sell(p, 100, f"{URGENT}{gone}", float(cur.get("price") or 0), urgent=True))
                         return
+                    # 拿着的币后来看出是刷量盘（钓鱼钱包多 / 市值是池子的几十倍 / GMGN 标刷量）：买卖量是假的，
+                    # 买卖力量卖法和"没人交易就走"都会被假成交骗住，一直拿着（11-12 的 XTO、GTA 6）→ 直接卖
+                    from .trader import cabal_signs
+                    fake = cabal_signs(rep, self.cfg.get("trading", {}) or {}) \
+                        if self.cfg.get("exit.sell_cabal", True) else ""
+                    if fake:
+                        why = "刷量盘离场：" + fake.split("：")[0]
+                        self._spawn(self.sell(p, 100, why, float(cur.get("price") or 0)))
+                        return
                 if mode == "live" and p.get("status") == "open":
                     if emerg and not p.get("health_emergency"):
                         await self.app.tg.send(f"🚨 #{pid} {p['symbol']} {emerg}，立即全部卖出")
