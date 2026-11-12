@@ -29,6 +29,7 @@ HELP = """<b>命令列表</b>
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
 /diamond 钻石手打法：学靠一个币拿得住、赚几万 U 的人（他们什么时候买什么样的币、拿多久），模拟盘按学到的打法下单对比；/diamond go 立即找一轮
+/flow 买卖力量打法：早期只排硬性的坑就买，买盘强就拿、卖盘强就走；它的单子和其他来源对比
 /compare [天数] 几套打法放在一起比：真下过的单、影子采样（同一批币同样卖法只比选币）、被拦下的币如果没拦，排出哪套最有希望
 /jobs 后台研究任务：各自用了多少 GMGN 额度、开着还是停着；/jobs off 名字 停掉（重启后也不开）、/jobs on 名字 打开
 /imitate 学来的打法：机器人从 GMGN 盈利地址的交易里自己学的买卖方式，学到了什么、自己的成绩、和其他来源 / 现在的卖出规则对比；/imitate train 立即重新学
@@ -81,7 +82,7 @@ MENU = [
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
     ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
-    ("compare", "[天数]：几套打法放在一起比"), ("jobs", "后台研究任务：额度用量、开关"),
+    ("compare", "[天数]：几套打法放在一起比"), ("flow", "买卖力量打法：成绩对比"), ("jobs", "后台研究任务：额度用量、开关"),
     ("imitate", "学来的打法：学到了什么、成绩对比"), ("diamond", "钻石手打法：学拿得住的大赢家"),
     ("autopsy", "[sol/bsc] [人数]：高收益地址解剖，跟着买能分到多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
@@ -470,6 +471,16 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/flow":
+            from ..flow import DEFAULTS, PREFIX
+            from ..imitate import compare_sources
+            c = {**DEFAULTS, **(self.app.cfg.get("flow", {}) or {})}
+            head = (f"⚡ <b>{PREFIX}</b>（{'开着' if c['enabled'] else '关着'}）：发币 {c['max_age_hours']:g} 小时内、只排硬性的坑"
+                    f"（貔貅 / 池子能撤 / 捆绑 ≥ {c['max_bundle_pct']:g}% / 阴谋地址 / 团伙 / 坏项目方 / 流动性 < ${c['min_liquidity_usd']:,.0f}）就买，"
+                    f"¼ 仓位、每天最多 {c['max_per_day']} 笔；不设固定止盈，最近 5 分钟卖盘明显占优（买卖比 < {c['sell_ratio']:g}）"
+                    f"且从最高点回落 {c['drop_from_high_pct']:g}% 以上、连续 {c['strikes']} 次就卖（赚 {c['half_above_pct']:g}% 以上先卖一半），"
+                    f"止损 -35%")
+            await self.send(head + "\n" + "\n".join(await compare_sources(self.app, PREFIX)))
         elif cmd == "/compare":
             from ..trade.compare import compare
             days = int(args[0]) if args and args[0].isdigit() else 4

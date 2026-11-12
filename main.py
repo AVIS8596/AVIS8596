@@ -139,6 +139,9 @@ async def run_bot(cfg) -> None:
         from bot.diamond import Diamond
         app.diamond = Diamond(app)
         jobs.append(("钻石手打法", app.diamond.run))
+        from bot.flow import FlowLane
+        app.flow = FlowLane(app)
+        jobs.append(("买卖力量记录", app.flow.run))
         jobs.append(("学习高手", app.learner.run))
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)
@@ -174,7 +177,7 @@ async def run_bot(cfg) -> None:
 
     # 后台研究 / 学习类任务：GMGN 只用空闲额度，前台（/check、分析新币、持仓取价、信号）有请求在排队就先让路
     from bot.sources.gmgn import JOB, LOW
-    background = {"聪明钱发现", "学来的打法", "钻石手打法", "学习高手", "扩充钱包池", "自我学习", "选币模型",
+    background = {"聪明钱发现", "学来的打法", "钻石手打法", "买卖力量记录", "学习高手", "扩充钱包池", "自我学习", "选币模型",
                   "钱包体检", "阴谋团伙识别", "影子单", "影子采样", "安全与成本校准"}
 
     def wrap(n, fn):

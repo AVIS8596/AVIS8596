@@ -384,3 +384,24 @@ def test_new_token_experiment_lane():
             == "早期实验仓"
         assert source_of("早期建仓（快毕业，持有人 3 分钟 100→140 +40%）、代币评分 70 | 一般") == "早期建仓"
     asyncio.run(go())
+
+
+def test_check_lite_only_hard_traps(tmp_path):
+    """买卖力量打法的买入检查：不管评分 / 持有人 / 追高这些质量条件，只拦硬性的坑。"""
+    async def go():
+        db = DB(tmp_path / "l.db")
+        await db.open()
+        app = _app(db, [])
+        try:
+            tr = Trader(app)
+            tr.exec = {"solana": object()}
+            weak = {**GOOD, "score": 20, "holders": 30, "change_1h": 900, "buys_1h": 10, "sells_1h": 100}
+            assert await tr.check_lite("solana", "T", weak) == ""                     # 质量差但不是坑：照买
+            assert "致命风险" in await tr.check_lite("solana", "T", {**weak, "risks": ["貔貅"]})
+            assert "捆绑" in await tr.check_lite("solana", "T", {**weak, "bundle_held_pct": 32})
+            assert "项目方已经在卖" in await tr.check_lite("solana", "T", {**weak, "dev_sold": 1})
+            assert "流动性" in await tr.check_lite("solana", "T", {**weak, "liquidity": 2000})
+            assert "池子" in await tr.check_lite("solana", "T", {**weak, "chain": "solana", "lp_burn": "", "exchange": "raydium"})
+        finally:
+            await db.close()
+    asyncio.run(go())

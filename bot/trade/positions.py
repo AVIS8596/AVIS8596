@@ -366,12 +366,15 @@ class PositionManager:
                 p["high_price"] = px
             dyn = dyn_state(p, dc, now) if mode == "live" else None
             rules = None
-            for attr, pre in (("imitate", "学来的打法"), ("diamond", "钻石手打法")):
+            for attr, pre in (("imitate", "学来的打法"), ("diamond", "钻石手打法"), ("flow", "买卖力量打法")):
                 im = getattr(self.app, attr, None)
                 if im and str(p.get("reason") or "").startswith(pre):
                     rules = im.exit_rules(p["chain"], self.exit_cfg)
-            if rules:      # 学来的打法 / 钻石手打法：用学到的卖出规则（不套档位规则）
+            if rules:      # 学来的打法 / 钻石手打法 / 买卖力量打法：用各自的卖出规则（不套档位规则）
                 pct, why = decide_exit({**p, "tier": None}, px, rules, now, dyn)
+                fl = getattr(self.app, "flow", None)
+                if not pct and fl and str(p.get("reason") or "").startswith("买卖力量打法"):
+                    pct, why = await fl.exit_signal(p, px, now)       # 买盘强就拿、卖盘强就走
             else:
                 pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
             if not self._confirmed(p["id"], why, px, float(p["entry_price"] or 0)):

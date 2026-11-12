@@ -30,6 +30,7 @@ SKIP_CATS = [("池子没烧", "池子能被撤"), ("论证：叙事分", "强叙
 
 
 EXPERIMENT = "新币实验仓"
+FLOW = "买卖力量打法"
 CURVE_WORDS = ("dbc", "launchlab", "bonding", "curve", "moonshot", "boop", "bonk")
 CURVE_NAMES = ("pump", "pumpfun", "pump_fun", "pump.fun")
 
@@ -216,6 +217,54 @@ class Trader:
             return "冷却期内（这个币止损过，24 小时内不再买）"
         return ""
 
+    async def check_lite(self, chain: str, token: str, rep: dict, reason: str = "") -> str:
+        """买卖力量打法的买入检查：只排硬性的坑，不管评分、持有人多少、涨了多少这些"质量"条件。
+        排：交易开关 / 暂停 / 市场冷、致命风险（貔貅、能增发、高税……）、池子能被撤、捆绑 ≥ 30%、阴谋地址、团伙、
+        坏项目方 / 批量发币、项目方已经在卖、流动性太小（< $5000，卖不出去）、已有持仓、持仓满、冷却期。"""
+        t = self.cfg.get("trading", {}) or {}
+        fl = self.cfg.get("flow", {}) or {}
+        if not t.get("enabled", False):
+            return "交易总开关关闭"
+        if chain not in self.exec:
+            return "该链执行器不可用"
+        p = await self.is_paused()
+        if p:
+            return p
+        from .regime import regime
+        if (await regime(self.app)).get("pause"):
+            return "市场冷，暂停买入（最近买入 1 小时后大多在跌）"
+        if rep.get("risks"):
+            return "致命风险：" + "；".join(rep["risks"])
+        pull = pullable_pool(rep)
+        if pull:
+            return pull
+        bmax = float(fl.get("max_bundle_pct", 30))
+        if float(rep.get("bundle_held_pct") or 0) >= bmax:
+            return f"捆绑地址持有 {float(rep['bundle_held_pct']):.0f}%（上限 {bmax:g}%）"
+        cmax = float(t.get("max_cabal_pct", 20))
+        if cmax and float(rep.get("cabal_pct") or 0) >= cmax:
+            return f"阴谋地址持有 {float(rep['cabal_pct']):.0f}%（上限 {cmax:g}%）"
+        gmax = int(t.get("max_gang_members", 3))
+        if gmax and int(rep.get("gang_n") or 0) >= gmax:
+            return f"团伙盘：早期买家里有同一个团伙的 {int(rep['gang_n'])} 个成员"
+        if int(rep.get("dev_sold") or 0):
+            return "项目方已经在卖"
+        if float(rep.get("liquidity") or 0) < float(fl.get("min_liquidity_usd", 5000)):
+            return f"流动性 ${float(rep.get('liquidity') or 0):,.0f} 太小，卖不出去"
+        bad = await self.bad_actor(chain, token, rep)
+        if bad:
+            return bad
+        db = self.app.db
+        if await db.has_open_position(chain, token):
+            return "已有持仓"
+        cap = int(t.get("max_open_positions_dry", 0) or 0) if self.cfg.dry_run else 0
+        cap = cap or int(t.get("max_open_positions", 10))
+        if len(await db.open_positions()) >= cap:
+            return "持仓数量已满"
+        if time.time() - await db.last_closed_at(chain, token) < float(t.get("token_cooldown_min", 120)) * 60:
+            return "冷却期内"
+        return ""
+
     async def bad_actor(self, chain: str, token: str, rep: dict) -> str:
         t = self.cfg.get("trading", {}) or {}
         db = self.app.db
@@ -297,6 +346,13 @@ class Trader:
                 if rep is None:
                     return
                 probe = PROBE in reason            # 主动建仓那边已经判定为试探仓
+                if reason.startswith(FLOW):        # 买卖力量打法：只排硬性的坑（阴谋盘 / 貔貅 / 池子能撤 / 捆绑多……）
+                    why = await self.check_lite(chain, token, rep, reason)
+                    if why:
+                        await self.skip(chain, token, rep, reason, why)
+                        return
+                    await self._buy(chain, token, rep, reason, wallets, tier, probe=False)
+                    return
                 why = await self.check(chain, token, rep, wallets, reason, relax=probe)
                 if why and not probe and why.startswith(STRUCT_PREFIX) \
                         and self.probe_ok(rep, wallets, reason):

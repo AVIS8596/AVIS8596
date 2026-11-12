@@ -691,7 +691,7 @@ class Analyzer:
                 except Exception as e:  # noqa: BLE001
                     log.debug("模型打分失败: %s", e)
             # 学来的打法 / 钻石手打法：看这个币像不像盈利地址 / 钻石手会买的好单
-            for attr in ("imitate", "diamond"):
+            for attr in ("imitate", "diamond", "flow"):
                 im = getattr(self.app, attr, None)
                 if im:
                     try:

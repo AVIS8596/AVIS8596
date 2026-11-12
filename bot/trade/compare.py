@@ -147,6 +147,10 @@ async def compare(app: "App", days: float = 4) -> str:
             mark = " ⚠️" if st["n"] >= MIN_N and st["ex_best"] > 0.05 and st["med"] > -0.1 else ""
             L.append(line(cat, st) + mark)
 
+    # ---- 卖法对比：真实入场按"买卖力量卖法"重放
+    from ..flow import replay_report
+    L += await replay_report(app, days)
+
     # ---- 结论
     good = [(n, s) for n, s in ranking if s.get("n", 0) >= MIN_N]
     good.sort(key=lambda x: -(x[1]["ex_best"] + 0.5 * x[1]["med"]))
