@@ -110,7 +110,7 @@ class Trader:
         return ""
 
     async def check(self, chain: str, token: str, rep: dict, wallets: list[str] | None = None, reason: str = "",
-                    relax: bool = False) -> str:
+                    relax: bool = False, allow_pull: bool = False) -> str:
         """返回拒绝原因；空字符串表示可以买。relax=True：前10持仓 / 捆绑地址按"试探仓"的宽松上限判断（埋伏地址不放宽）。"""
         t = self.cfg.get("trading", {}) or {}
         if relax:
@@ -130,7 +130,7 @@ class Trader:
             return "市场冷，暂停买入（最近买入 1 小时后大多在跌）"
         if rep.get("risks"):
             return "致命风险：" + "；".join(rep["risks"])
-        if bool(t.get("block_pullable_pool", True)):
+        if bool(t.get("block_pullable_pool", True)) and not allow_pull:
             pull = pullable_pool(rep)
             if pull:
                 return pull
@@ -338,6 +338,8 @@ class Trader:
         key = f"{chain}:{token}"
         if key in self._buying:
             return
+        if chain in (self.cfg.get("trading.paused_chains", []) or []):
+            return          # 这条链暂停买入（监听、分析、学习照常）
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             self._buying.add(key)
@@ -354,6 +356,15 @@ class Trader:
                     await self._buy(chain, token, rep, reason, wallets, tier, probe=False)
                     return
                 why = await self.check(chain, token, rep, wallets, reason, relax=probe)
+                pe = self.cfg.get("trading.pullable_experiment", {}) or {}
+                if why.startswith("池子没烧") and pe.get("enabled") and not probe:
+                    # 池子没烧实验仓：别的条件都过了、只差池子没烧的，¼ 仓位买，单独记账
+                    n = await self.app.db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
+                                                   ("%池子没烧实验仓%", self.app.day_start()))
+                    if (not n or n["n"] < int(pe.get("max_per_day", 20))) and \
+                            not await self.check(chain, token, rep, wallets, reason, relax=probe, allow_pull=True):
+                        reason = f"{reason}（池子没烧实验仓）"
+                        why = ""
                 if why and not probe and why.startswith(STRUCT_PREFIX) \
                         and self.probe_ok(rep, wallets, reason):
                     # 信号很强、只是筹码结构稍微超限（刚发币时前10 / 捆绑天然偏高）：小仓位先建仓，再观察

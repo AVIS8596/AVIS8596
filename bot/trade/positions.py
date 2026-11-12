@@ -47,6 +47,12 @@ def learned_rules(cfg: dict) -> dict:
     return {**base, **LEARNED_DEFAULT, **((cfg or {}).get("learned") or {})}
 
 
+def active_rules(cfg: dict) -> dict:
+    """原有来源（跟单 / 新币 / 早期建仓 / 强叙事）现在实际用的卖出规则：开了 use_learned_rules 就是高手规则，
+    否则是一般档的规则。影子单 / 影子采样用同一套，比出来才公平。"""
+    return learned_rules(cfg) if (cfg or {}).get("use_learned_rules") else exit_rules(cfg, "normal")
+
+
 def exit_rules(cfg: dict, tier: str | None) -> dict:
     """某个档位实际生效的卖出规则 = 全局 exit 配置 + 档位默认 + config 里的档位覆盖。
     tier 为空（分档功能上线前买的老持仓）时只用全局配置，行为和以前一样。"""
@@ -370,6 +376,8 @@ class PositionManager:
                 im = getattr(self.app, attr, None)
                 if im and str(p.get("reason") or "").startswith(pre):
                     rules = im.exit_rules(p["chain"], self.exit_cfg)
+            if not rules and self.exit_cfg.get("use_learned_rules"):
+                rules = learned_rules(self.exit_cfg)        # 原有来源：用"高手规则"卖出（和观察模式里比的那套一样）
             if rules:      # 学来的打法 / 钻石手打法 / 买卖力量打法：用各自的卖出规则（不套档位规则）
                 pct, why = decide_exit({**p, "tier": None}, px, rules, now, dyn)
                 fl = getattr(self.app, "flow", None)

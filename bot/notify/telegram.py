@@ -29,6 +29,7 @@ HELP = """<b>命令列表</b>
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
 /diamond 钻石手打法：学靠一个币拿得住、赚几万 U 的人（他们什么时候买什么样的币、拿多久），模拟盘按学到的打法下单对比；/diamond go 立即找一轮
+/whyloss [天数] 为什么买的亏、拦下的赚：把差距拆成"模拟太乐观""买晚了""挑币挑反了"三块（要查 K 线，1~3 分钟）
 /flow 买卖力量打法：早期只排硬性的坑就买，买盘强就拿、卖盘强就走；它的单子和其他来源对比
 /compare [天数] 几套打法放在一起比：真下过的单、影子采样（同一批币同样卖法只比选币）、被拦下的币如果没拦，排出哪套最有希望
 /jobs 后台研究任务：各自用了多少 GMGN 额度、开着还是停着；/jobs off 名字 停掉（重启后也不开）、/jobs on 名字 打开
@@ -82,7 +83,7 @@ MENU = [
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
     ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
-    ("compare", "[天数]：几套打法放在一起比"), ("flow", "买卖力量打法：成绩对比"), ("jobs", "后台研究任务：额度用量、开关"),
+    ("compare", "[天数]：几套打法放在一起比"), ("whyloss", "为什么买的亏、拦下的赚"), ("flow", "买卖力量打法：成绩对比"), ("jobs", "后台研究任务：额度用量、开关"),
     ("imitate", "学来的打法：学到了什么、成绩对比"), ("diamond", "钻石手打法：学拿得住的大赢家"),
     ("autopsy", "[sol/bsc] [人数]：高收益地址解剖，跟着买能分到多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
@@ -471,6 +472,13 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/whyloss":
+            from ..sources.gmgn import LOW
+            from ..trade.whyloss import whyloss
+            LOW.set(True)                  # 要查不少 K 线：只用空闲额度
+            days = int(args[0]) if args and args[0].isdigit() else 4
+            await self.send("🔍 正在把真实单子和影子单放在一起算（要查 K 线，大约 1~3 分钟）……")
+            await self.send(await whyloss(self.app, min(max(days, 1), 7)))
         elif cmd == "/flow":
             from ..flow import DEFAULTS, PREFIX
             from ..imitate import compare_sources

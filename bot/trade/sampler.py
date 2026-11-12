@@ -17,8 +17,8 @@ import time
 from typing import TYPE_CHECKING
 
 from ..utils import f
-from .positions import exit_rules
-from .replay import candles, simulate, to_path
+from .positions import active_rules
+from .replay import candles, fair_entry, simulate
 
 if TYPE_CHECKING:
     from ..app import App
@@ -80,15 +80,15 @@ async def run_batch(app: "App", limit: int = 20) -> int:
             continue
         ret = NODATA
         try:
-            path = to_path(await candles(app, r["chain"], r["token"], float(r["ts"])))
+            px0, path = fair_entry(await candles(app, r["chain"], r["token"], float(r["ts"])), float(r["ts"]))
             await asyncio.sleep(0.5)                       # 后台慢慢采，别和交易抢 GMGN 额度
         except Exception as e:  # noqa: BLE001
             log.debug("影子采样取 K 线失败 %s: %s", r["token"], e)
-            path = []
-        if len(path) >= 8 and 0.1 < path[0][1] / float(r["price"]) < 10:
+            px0, path = 0.0, []
+        if len(path) >= 8 and px0 > 0 and 0.1 < px0 / float(r["price"]) < 10:
             path = dead_tail(path, float(r["ts"]), now, r["p240"] is not None and float(r["p240"]) < 0)
-            entry = float(r["price"]) * 1.01
-            m = simulate(entry, float(r["ts"]), path, dict(exit_rules(exit_cfg, "normal")), None, 100, cost)
+            entry = px0 * 1.01               # 30 秒后第一根完整 K 线的开盘价 + 买入滑点（和真买一样要等）
+            m = simulate(entry, float(r["ts"]), path, dict(active_rules(exit_cfg)), None, 100, cost)
             ret = m - 1 if m < 200 else NODATA
         await db.execute("UPDATE token_outcomes SET sim_ret=? WHERE id=?", (ret, r["id"]))
         done += 1

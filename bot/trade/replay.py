@@ -60,6 +60,25 @@ def to_path(candles: list[dict]) -> list[tuple[float, float]]:
     return pts
 
 
+def after(candles: list[dict], t0: float) -> list[dict]:
+    """只留 t0 之后才开始的 K 线。
+    11-12 查出的偏差：入场那一刻所在的那根 5 分钟 K 线被拆成 4 个点时，点的时间是人为排的，这根 K 线里
+    入场之前就已经出现的最高价会被当成"入场之后"——拉得快的币一上来就"碰到"止盈，模拟出来的收益虚高。"""
+    def t(c: dict) -> float:
+        x = f(c.get("time"))
+        return x / 1000 if x > 1e12 else x
+    return sorted((c for c in candles if t(c) >= t0), key=t)
+
+
+def fair_entry(candles: list[dict], t0: float, delay: float = 30) -> tuple[float, list[tuple[float, float]]]:
+    """影子单 / 影子采样的公平入场：t0 + delay（真买要等 30 秒确认期）之后第一根完整 K 线的开盘价，
+    路径也从这根开始。不用当时记下的价格（分析报告可能是几分钟前缓存的，拉得快的币会被低估入场价）。"""
+    cs = after(candles, t0 + delay)
+    if not cs:
+        return 0.0, []
+    return f(cs[0].get("open")) or f(cs[0].get("close")), to_path(cs)
+
+
 def simulate(entry: float, t0: float, path: list[tuple[float, float]], rules: dict, follow_t: float | None,
              follow_pct: float, cost: float) -> float:
     """返回收益倍数（1.0 = 不赚不亏）。"""
@@ -134,7 +153,8 @@ async def collect(app: "App", days: float = 3) -> tuple[list[dict], int]:
     out = []
     for p in pos:
         try:
-            path = to_path(await candles(app, p["chain"], p["token"], float(p["opened_at"])))
+            # 入场所在的那根 K 线不要（里面入场前的高点会被当成入场后），从下一根开始重放
+            path = to_path(after(await candles(app, p["chain"], p["token"], float(p["opened_at"])), float(p["opened_at"])))
         except Exception:  # noqa: BLE001
             continue
         if len(path) < 8:
