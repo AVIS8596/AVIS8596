@@ -294,7 +294,12 @@ class SolanaRPC:
             used = f"，今天已用约 {ep.today:,} 次" if ep.today else ""
             return "✅ 正常" + used + (f"（套餐不含：{'、'.join(no)}，这些改用别的节点 / GMGN）" if no else "")
         except Exception as e:  # noqa: BLE001
-            return f"❌ {ep.out_why or str(e)[:150] or type(e).__name__}"
+            msg = str(e)
+            if "RPS" in msg or ("429" in msg and "quota" not in msg.lower() and "usage" not in msg.lower()):
+                # 每秒请求数超了：只是这一秒太挤（刚重启订阅钱包时常见），请求会自动换到别的节点，不是断了
+                used = f"，今天已用约 {ep.today:,} 次" if ep.today else ""
+                return "⚠️ 能用，刚才这一秒被限速（请求自动换到别的节点）" + used
+            return f"❌ {ep.out_why or msg[:150] or type(e).__name__}"
 
     # ---------------- 读 ----------------
     async def get_transaction(self, sig: str) -> dict | None:
