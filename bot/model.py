@@ -402,7 +402,8 @@ class SelfModel:
                                      [(px.get(r["token"]) or -1, r["rowid"]) for r in lst])
 
     async def record(self, since: float = 0, k: str | None = None, last: int = 0) -> dict:
-        q = "SELECT * FROM model_picks WHERE p240 IS NOT NULL AND p240>0 AND ts>=?"
+        # 之后取不到价格（-1，多半归零 / 撤池子）的也算进来、按亏光算：以前只算活下来的，考核成绩偏高
+        q = "SELECT * FROM model_picks WHERE p240 IS NOT NULL AND p240<>0 AND ts>=?"
         args: list[Any] = [since]
         if k:
             q += " AND model=?"
@@ -411,7 +412,7 @@ class SelfModel:
         if last:
             q += f" LIMIT {int(last)}"
         rows = await self.app.db.fetchall(q, tuple(args))
-        rs = sorted(r for r in (proxy_return(f(x["price"]), f(x["p60"]) if f(x["p60"]) > 0 else None, f(x["p240"]))
+        rs = sorted(r for r in (proxy_return(f(x["price"]), f(x["p60"]) or None, f(x["p240"]), dead=True)
                                 for x in rows) if r is not None)
         if not rs:
             return {"n": 0}
