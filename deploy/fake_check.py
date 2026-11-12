@@ -55,5 +55,5 @@ for feats, px, p60, p240, p1440 in rows:
         ml.setdefault("＜10 倍" if r < 10 else "10~30 倍" if r < 30 else "≥30 倍", []).append(out)
 
 print(f"最近 4 天 Solana 分析过的币：{len(rows)} 个")
-show("钓鱼钱包%（≥50% 会被拦）", [(k, ent.get(k, [])) for k in ("0~10%", "10~30%", "30~50%", "50~80%", "≥80%")])
+show("钓鱼钱包%（≥10% 会被拦）", [(k, ent.get(k, [])) for k in ("0~10%", "10~30%", "30~50%", "50~80%", "≥80%")])
 show("市值 / 池子（≥30 倍会被拦）", [(k, ml.get(k, [])) for k in ("＜10 倍", "10~30 倍", "≥30 倍")])

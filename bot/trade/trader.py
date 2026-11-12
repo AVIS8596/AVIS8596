@@ -65,7 +65,7 @@ def cabal_signs(rep: dict, t: dict) -> str:
     钓鱼钱包 78%~99%、XTO 发币 57 分钟市值 $1.2 亿但池子只有 $83 万——买卖量都是自己人刷出来的。"""
     if int(rep.get("wash") or 0):
         return "刷量盘：GMGN 标记这个币在刷交易量"
-    em = float(t.get("max_entrap_pct", 50))
+    em = float(t.get("max_entrap_pct", 10))
     if em and float(rep.get("entrap_pct") or 0) >= em:
         return (f"钓鱼钱包 {float(rep['entrap_pct']):.0f}%（上限 {em:g}%）：一堆假钱包在刷买卖、引人接盘，"
                 "看到的买盘不是真的")
