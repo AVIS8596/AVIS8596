@@ -150,6 +150,8 @@ async def compare(app: "App", days: float = 4) -> str:
     # ---- 卖法对比：真实入场按"买卖力量卖法"重放
     from ..flow import replay_report
     L += await replay_report(app, days)
+    from ..lanes import lane_report
+    L += await lane_report(app, days)
 
     # ---- 结论
     good = [(n, s) for n, s in ranking if s.get("n", 0) >= MIN_N]

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from .autopsy_learn import kline_features
 from .chains import norm_addr
+from .lanes import lane_score
 from .imitate import _clamp, _med, _q, compare_sources
 from .model import auc, fit, score
 from .analysis.intel import INTEL_KEYS
@@ -313,8 +314,10 @@ class Diamond:
         m = self.m[chain]
         x = base_x(rep)
         if in_gate(x, m["gate"]):
+            await lane_score(self.app.db, rep.get("_oid"), PREFIX, -1)
             return
         p = score(m["entry"]["model"], vec(x))
+        await lane_score(self.app.db, rep.get("_oid"), PREFIX, p)
         if p < float(m["entry"]["cut"]):
             return
         n = await self.app.db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",

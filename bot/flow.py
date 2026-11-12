@@ -19,6 +19,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from .lanes import lane_score
 from .utils import dig, f
 
 if TYPE_CHECKING:
@@ -148,13 +149,14 @@ class FlowLane:
     # ---------------- 买入
     async def on_analysis(self, chain: str, token: str, rep: dict) -> None:
         c = self.c()
-        if not c.get("enabled") or rep.get("risks"):
+        if not c.get("enabled"):
             return
         age = f(rep.get("age_hours"))
-        if rep.get("age_hours") is None or age > float(c["max_age_hours"]):
+        if rep.get("risks") or rep.get("age_hours") is None or age > float(c["max_age_hours"]) \
+                or float(rep.get("bundle_held_pct") or 0) >= float(c["max_bundle_pct"]):
+            await lane_score(self.app.db, rep.get("_oid"), PREFIX, -1)
             return
-        if float(rep.get("bundle_held_pct") or 0) >= float(c["max_bundle_pct"]):
-            return
+        await lane_score(self.app.db, rep.get("_oid"), PREFIX, 1)
         now = time.time()
         if now - self._seen.get(f"{chain}:{token}", 0) < 1800:
             return

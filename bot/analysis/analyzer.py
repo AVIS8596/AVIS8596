@@ -16,6 +16,7 @@ from ..sources.solana_rpc import signer, wallet_deltas
 from ..utils import dig, f
 from . import bundle as bd
 from .intel import INTEL_KEYS, holder_quality
+from ..lanes import lane_score
 from .scoring import TokenFacts, evm_safety, score, solana_safety
 
 if TYPE_CHECKING:
@@ -678,16 +679,18 @@ class Analyzer:
                     feats[k] = rep[k]
             from ..trade.trader import pullable_pool
             feats["lp_pullable"] = int(bool(pullable_pool(rep)))
-            await db.execute(
+            oid = await db.execute(
                 "INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features) VALUES(?,?,?,?,?,?,?)",
                 (t, rep["chain"], rep["address"], rep.get("symbol", ""), source, float(rep["price"]),
                  json.dumps(feats, default=str)))
+            rep["_oid"] = oid               # 各套打法打的分记到 lane_scores（合成总打法用）
             model = getattr(self.app, "model", None)     # 自己的选币模型打分（影子模式只记录）
             if model:
                 try:
                     p = await model.on_analysis(rep["chain"], rep["address"], rep, feats, source)
                     if p is not None:
                         rep["model_p"] = p
+                        await lane_score(db, oid, "选币模型", p)
                 except Exception as e:  # noqa: BLE001
                     log.debug("模型打分失败: %s", e)
             # 学来的打法 / 钻石手打法：看这个币像不像盈利地址 / 钻石手会买的好单

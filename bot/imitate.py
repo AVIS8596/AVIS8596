@@ -30,6 +30,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .autopsy_learn import kline_features
+from .lanes import lane_score
 from .model import auc, fit, score
 from .analysis.intel import INTEL_KEYS
 from .utils import f
@@ -220,6 +221,7 @@ class Imitator:
         x0 = {"age_min": f(rep.get("age_hours")) * 60 if rep.get("age_hours") is not None else None,
               "mcap": rep.get("mcap")}
         if in_gate(x0, self.m[chain]["gate"]):
+            await lane_score(self.app.db, rep.get("_oid"), PREFIX, -1)
             return                                       # 不花额度就知道不在范围里
         self._evals = [t for t in self._evals if now - t < 3600]
         if len(self._evals) >= int(self.c()["max_evals_per_hour"]):
@@ -250,8 +252,10 @@ class Imitator:
             x = self.features_now(cs, rep, x0, now)
             m = self.m[chain]
             if in_gate(x, m["gate"]):
+                await lane_score(self.app.db, rep.get("_oid"), PREFIX, -1)
                 return
             p = score(m["entry"]["model"], vec(x))
+            await lane_score(self.app.db, rep.get("_oid"), PREFIX, p)
             if p < float(m["entry"]["cut"]):
                 return
             db = self.app.db

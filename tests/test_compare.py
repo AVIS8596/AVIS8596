@@ -73,3 +73,27 @@ def test_jobs_command(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_lane_scores(tmp_path):
+    """每套打法给每个币打的分统一记下，/compare 里看分数高低和之后结果的关系（合成总打法的原料）。"""
+    from bot.lanes import lane_report, lane_score
+
+    async def go():
+        db = DB(tmp_path / "l.db")
+        await db.open()
+        try:
+            now = time.time()
+            for i in range(30):
+                oid = await db.execute("INSERT INTO token_outcomes(ts,chain,token,symbol,source,price,features,sim_ret) "
+                                       "VALUES(?,?,?,?,?,?,?,?)", (now, "solana", f"T{i}", "T", "x", 1.0, "{}",
+                                                                   0.5 if i >= 20 else -0.3))
+                await lane_score(db, oid, "钻石手打法", i / 30)
+                await lane_score(db, oid, "买卖力量打法", 1 if i % 2 else -1)
+            await lane_score(db, None, "钻石手打法", 1)                     # 没有结果档案 id：不记
+            txt = "\n".join(await lane_report(SimpleNamespace(db=db), 4))
+            assert "钻石手打法：分数最高的 1/3 平均 +50.0% vs 最低的 1/3 -30.0%" in txt
+            assert "买卖力量打法" in txt and "范围外" in txt
+        finally:
+            await db.close()
+    asyncio.run(go())

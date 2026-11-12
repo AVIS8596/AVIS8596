@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS wallet_hits (
 CREATE TABLE IF NOT EXISTS early_obs (ts REAL, chain TEXT, token TEXT, price REAL, holders INTEGER, volume REAL,
   rug REAL, top10 REAL, bundler REAL, insider REAL, creator REAL, wash INTEGER, smart INTEGER, kol INTEGER, created REAL);
 CREATE INDEX IF NOT EXISTS idx_early_obs ON early_obs(ts);
+-- 每套打法当时给这个币打的分（结果档案的 id → 打法 → 分数）。两天后合成"总打法"用：
+-- 哪几套打法同时看好时最准、哪套打法说了也白说。分数 -1 = 不在这套打法的出手范围
+CREATE TABLE IF NOT EXISTS lane_scores (oid INTEGER, lane TEXT, score REAL, ts REAL, PRIMARY KEY (oid, lane));
+
 CREATE TABLE IF NOT EXISTS early_tok (chain TEXT, token TEXT, first_ts REAL, p60 REAL, p240 REAL,
   PRIMARY KEY (chain, token));
 
