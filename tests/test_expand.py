@@ -117,3 +117,30 @@ def test_mining_and_quality_flow(tmp_path):
             await db.close()
 
     asyncio.run(go())
+
+
+def test_follow_quality_counts_dead_and_ranks_wallets(tmp_path):
+    """跟单战绩：1 小时后取不到价格的按 -100% 算；监听名单 / 聪明钱库按"跟着买赚不赚"调整排名。"""
+    from bot.discovery.expand import quality_from
+    rows = [{"wallet": "A", "token": f"T{i}", "price": 1.0, "p60": -1 if i < 6 else 1.5} for i in range(10)]
+    q = quality_from(rows)
+    assert q["A"]["n"] == 10 and q["A"]["ret"] == -1.0 and q["A"]["dump"] == 0.6
+
+    async def go():
+        db = DB(tmp_path / "r.db")
+        await db.open()
+        try:
+            # 评分高但跟着买亏（GOOD_PNL）vs 评分稍低但跟着买赚（FOLLOW）vs 样本不够（NEW）
+            for addr, sc, n, ret, hit, dump in (("GOOD_PNL", 80, 20, -0.3, 0.1, 0.5), ("FOLLOW", 60, 12, 0.2, 0.4, 0.1),
+                                                ("NEW", 70, 3, -0.9, 0, 1)):
+                await db.upsert_wallet("solana", addr, status="active", source="t", realized_usd=1, win_rate=0.5,
+                                       trades=10, score=sc)
+                await db.execute("UPDATE wallets SET sig_n=?, sig_ret=?, sig_hit=?, sig_dump=? WHERE address=?",
+                                 (n, ret, hit, dump, addr))
+            order = [w["address"] for w in await db.active_wallets("solana", 10)]
+            assert order == ["FOLLOW", "NEW", "GOOD_PNL"]       # 60+20+6=86 / 70（样本不够不调）/ 80-30-8=42
+            from bot.db import rank_score
+            assert abs(rank_score(await db.wallet("solana", "FOLLOW")) - 86) < 1e-9
+        finally:
+            await db.close()
+    asyncio.run(go())

@@ -41,10 +41,11 @@ def quality_from(rows: list[dict]) -> dict[str, dict]:
     by: dict[str, list[float]] = {}
     for r in rows:
         k = (r["wallet"], r["token"])
-        if k in seen or f(r["price"]) <= 0 or f(r["p60"]) <= 0:
+        if k in seen or f(r["price"]) <= 0 or not f(r["p60"]):
             continue
         seen.add(k)
-        by.setdefault(r["wallet"], []).append(f(r["p60"]) / f(r["price"]) - 1)
+        # 1 小时后取不到价格（-1，多半归零 / 撤池子）按 -100% 算：以前直接跳过，买到归零币的钱包反而显得不错
+        by.setdefault(r["wallet"], []).append(-1.0 if f(r["p60"]) < 0 else f(r["p60"]) / f(r["price"]) - 1)
     out = {}
     for w, rs in by.items():
         rs.sort()
@@ -85,15 +86,16 @@ class WalletExpander:
         rows = await db.fetchall(
             "SELECT s.wallet, s.token, o.price, o.p60 FROM signals s JOIN token_outcomes o "
             "ON o.chain=s.chain AND o.token=s.token AND o.ts BETWEEN s.ts - 60 AND s.ts + 600 "
-            "WHERE s.chain=? AND s.side='buy' AND s.ts>? AND o.p60>0 ORDER BY s.ts",
+            "WHERE s.chain=? AND s.side='buy' AND s.ts>? AND o.p60 IS NOT NULL AND o.p60<>0 ORDER BY s.ts",
             (chain, time.time() - 7 * 86400))
         q = quality_from([dict(r) for r in rows])
         removed = 0
         for w, st in q.items():
             await db.execute("UPDATE wallets SET sig_n=?, sig_ret=?, sig_hit=?, sig_dump=? WHERE chain=? AND address=?",
                              (st["n"], st["ret"], st["hit"], st["dump"], chain, w))
-            # 样本够多、跟它买明显亏钱 → 移出监听（手动添加的不动）
-            if st["n"] >= 15 and st["ret"] <= -0.2 and st["dump"] > st["hit"] * 2:
+            # 样本够多、跟它买明显亏钱 → 移出监听（手动添加的不动）。
+            # 11-12 收紧：10 个币以上、中位亏 15% 以上、大跌比大涨多（以前要 15 个、亏 20%、大跌是大涨 2 倍）
+            if st["n"] >= 10 and st["ret"] <= -0.15 and st["dump"] > st["hit"]:
                 cur = await db.wallet(chain, w)
                 if cur and cur["status"] == "active":
                     await db.execute("UPDATE wallets SET status='inactive' WHERE chain=? AND address=?", (chain, w))
@@ -211,7 +213,7 @@ class WalletExpander:
         db = self.app.db
         if await db.kv_get("pool_restore_1112", False):
             return 0
-        bad = "COALESCE(sig_n,0)>=15 AND COALESCE(sig_ret,0)<=-0.2 AND COALESCE(sig_dump,0)>COALESCE(sig_hit,0)*2"
+        bad = "COALESCE(sig_n,0)>=10 AND COALESCE(sig_ret,0)<=-0.15 AND COALESCE(sig_dump,0)>COALESCE(sig_hit,0)"
         rows = await db.fetchall(f"SELECT chain, address FROM wallets WHERE status='inactive' AND source LIKE 'mining:%' "
                                  f"AND NOT ({bad})")
         for r in rows:
@@ -252,6 +254,8 @@ class WalletExpander:
                             if c in NO_FEED_CHAINS or (n and n["n"] < 20):
                                 thin.append(c)
                     chains = ["solana"] + thin
+                    if name == "q":           # 跟单战绩每条链都算（只查数据库，不花额度）
+                        chains = list(dict.fromkeys(["solana"] + list(self.app.cfg.enabled_chains)))
                     for c in chains:
                         if c != "solana" or "solana" in self.app.cfg.enabled_chains:
                             try:

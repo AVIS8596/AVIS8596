@@ -155,6 +155,23 @@ POSITION_COLUMNS = [
 ]
 
 
+
+# 钱包排名（11-12）：以前只按 GMGN 盈利排行算出的评分排，混进了很多项目方 / 狙击手 / 快进快出的机器人。
+# 现在样本够（跟它买过 ≥ 8 个币）的钱包，按"跟着它买、1 小时后实际赚不赚"加减分：
+#   中位收益每 +1% 加 1 分（最多 ±40），大涨率减大跌率每 10% 加减 2 分；样本不够的按原评分。
+# 监听名单（取前 300 个）和聪明钱库（留 600 个）都按这个排。
+RANK_SQL = ("(COALESCE(score,0) + CASE WHEN COALESCE(sig_n,0)>=8 THEN "
+            "MAX(-40, MIN(40, COALESCE(sig_ret,0)*100)) + 20*(COALESCE(sig_hit,0)-COALESCE(sig_dump,0)) ELSE 0 END)")
+
+
+def rank_score(w: dict) -> float:
+    """和 RANK_SQL 一样的算法（Python 版，给 /wallets 等显示用）。"""
+    s = float(w.get("score") or 0)
+    if int(w.get("sig_n") or 0) >= 8:
+        s += max(-40.0, min(40.0, float(w.get("sig_ret") or 0) * 100))
+        s += 20 * (float(w.get("sig_hit") or 0) - float(w.get("sig_dump") or 0))
+    return s
+
 class DB:
     def __init__(self, path: Path):
         self.path = path
@@ -249,7 +266,7 @@ class DB:
     async def active_wallets(self, chain: str, limit: int) -> list[dict]:
         return await self.fetchall(
             "SELECT * FROM wallets WHERE chain=? AND status IN ('active','manual') "
-            "ORDER BY (status='manual') DESC, score DESC LIMIT ?", (chain, limit))
+            f"ORDER BY (status='manual') DESC, {RANK_SQL} DESC LIMIT ?", (chain, limit))
 
     async def wallet(self, chain: str, address: str) -> dict | None:
         return await self.fetchone("SELECT * FROM wallets WHERE chain=? AND address=?", (chain, address))

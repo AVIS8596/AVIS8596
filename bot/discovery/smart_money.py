@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from ..analysis.analyzer import on_curve
 from ..chains import norm_addr
 from ..sources.birdeye import BudgetExceeded
+from ..db import RANK_SQL
 from ..utils import dig
 
 if TYPE_CHECKING:
@@ -203,5 +204,5 @@ class SmartMoney:
         n = max(cap, int(self.cfg.get("smart_money.pool_per_chain", cap * 2) or cap * 2))
         await self.app.db.execute(
             """UPDATE wallets SET status='inactive' WHERE chain=? AND status='active' AND address NOT IN (
-                 SELECT address FROM wallets WHERE chain=? AND status='active' ORDER BY score DESC LIMIT ?)""",
+                 SELECT address FROM wallets WHERE chain=? AND status='active' ORDER BY """ + RANK_SQL + """ DESC LIMIT ?)""",
             (chain, chain, n))
