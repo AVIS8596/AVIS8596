@@ -12,6 +12,7 @@ from .executors import DryRunExecutor, EvmExecutor, Fill, GmgnExecutor, SolanaEx
 from .health import snapshot
 from .positions import exit_rules
 from .probe import PROBE, STRUCT_PREFIX, probe_cfg, probe_note
+from ..utils import f
 
 if TYPE_CHECKING:
     from ..app import App
@@ -26,7 +27,8 @@ SKIP_CATS = [("池子没烧", "池子能被撤"), ("论证：叙事分", "强叙
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
-             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过"), ("共振但评分不够", "共振但评分不够")]
+             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过"), ("共振但评分不够", "共振但评分不够"),
+             ("刷量盘", "刷量盘"), ("钓鱼钱包", "钓鱼钱包多"), ("市值是池子", "市值虚高"), ("拉盘太平滑", "拉盘太平滑")]
 
 
 EXPERIMENT = "新币实验仓"
@@ -56,6 +58,43 @@ def skip_cat(why: str) -> str:
         if why.startswith(pre):
             return name
     return "其他"
+
+
+def cabal_signs(rep: dict, t: dict) -> str:
+    """一眼能看出的阴谋盘 / 刷量盘（不用多查接口）。11-12 买卖力量打法买进的 fomo、XTO、GTA 6：
+    钓鱼钱包 78%~99%、XTO 发币 57 分钟市值 $1.2 亿但池子只有 $83 万——买卖量都是自己人刷出来的。"""
+    if int(rep.get("wash") or 0):
+        return "刷量盘：GMGN 标记这个币在刷交易量"
+    em = float(t.get("max_entrap_pct", 50))
+    if em and float(rep.get("entrap_pct") or 0) >= em:
+        return (f"钓鱼钱包 {float(rep['entrap_pct']):.0f}%（上限 {em:g}%）：一堆假钱包在刷买卖、引人接盘，"
+                "看到的买盘不是真的")
+    liq, mcap = float(rep.get("liquidity") or 0), float(rep.get("mcap") or 0)
+    ml = float(t.get("max_mcap_liq_ratio", 30))
+    if ml and liq > 0 and mcap / liq >= ml:
+        return (f"市值是池子的 {mcap / liq:.0f} 倍（市值 ${mcap:,.0f}，池子 ${liq:,.0f}，上限 {ml:g} 倍）："
+                "池子撑不住这个市值，价格是拉出来的")
+    return ""
+
+
+def ladder(cs: list[dict], t: dict) -> str:
+    """拉盘太平滑：最近 40 根 1 分钟 K 线几乎根根收阳、一路没回调——真人买卖做不出这种走势，是机器人在一笔笔往上推
+    （11-12 的 fomo、GTA 6 就是这样，一条直线往上爬）。返回原因，正常返回空。"""
+    rows = sorted((c for c in cs if f(c.get("close")) > 0 and f(c.get("open")) > 0), key=lambda c: f(c.get("time")))
+    rows = rows[-int(t.get("ladder_bars", 40)):]
+    if len(rows) < int(t.get("ladder_min_bars", 15)):
+        return ""
+    green = sum(1 for c in rows if f(c["close"]) >= f(c["open"])) / len(rows)
+    hi, pull = 0.0, 0.0
+    for c in rows:
+        hi = max(hi, f(c["close"]))
+        pull = max(pull, 1 - f(c["close"]) / hi)
+    rise = f(rows[-1]["close"]) / f(rows[0]["open"]) - 1
+    if green >= float(t.get("ladder_green", 0.8)) and pull < float(t.get("ladder_max_pull", 0.08)) \
+            and rise >= float(t.get("ladder_min_rise", 0.3)):
+        return (f"拉盘太平滑：最近 {len(rows)} 分钟 {green * 100:.0f}% 收阳、最大回调只有 {pull * 100:.0f}%、"
+                f"涨了 {rise * 100:.0f}%——像机器人一笔笔推上去的，不是真人在买")
+    return ""
 
 
 def looks_fake(rep: dict, t: dict) -> str:
@@ -156,7 +195,7 @@ class Trader:
         young = reason.startswith("早期建仓") or (reason.startswith("强叙事") and age < 1)
         if not young and chg > float(t.get("max_change_1h_pct", 300)) and n_smart < int(t.get("chase_ok_smart", 3)):
             return f"1 小时已涨 {chg:.0f}%，不追高（3 个以上聪明钱一起买才追）"
-        fake = looks_fake(rep, t)
+        fake = looks_fake(rep, t) or cabal_signs(rep, t)
         if fake:
             return fake
         b, sl = int(rep.get("buys_1h") or 0), int(rep.get("sells_1h") or 0)
@@ -215,11 +254,31 @@ class Trader:
         if last and str(last["close_reason"] or "").startswith(("止损", "🚨", "取不到价格")) and \
                 time.time() - float(last["closed_at"] or 0) < float(t.get("stoploss_cooldown_hours", 24)) * 3600:
             return "冷却期内（这个币止损过，24 小时内不再买）"
-        return ""
+        return await self.ladder_check(chain, token, t)
+
+    async def ladder_check(self, chain: str, token: str, t: dict) -> str:
+        """最后一步（要多查一次 K 线）：拉盘太平滑的不买。查不到 K 线不拦。"""
+        if not t.get("block_ladder", True):
+            return ""
+        now = time.time()
+        cache = self.__dict__.setdefault("_ladder", {})
+        hit = cache.get((chain, token))
+        if hit and now - hit[0] < 60:          # 同一次下单里会检查好几遍，1 分钟内不重复查 K 线
+            return hit[1]
+        try:
+            cs = await self.app.gmgn.kline(chain, token, "1m", int(now - 45 * 60), int(now)) or []
+        except Exception:  # noqa: BLE001
+            return ""
+        why = ladder(cs, t)
+        if len(cache) > 2000:
+            cache.clear()
+        cache[(chain, token)] = (now, why)
+        return why
 
     async def check_lite(self, chain: str, token: str, rep: dict, reason: str = "") -> str:
         """买卖力量打法的买入检查：只排硬性的坑，不管评分、持有人多少、涨了多少这些"质量"条件。
         排：交易开关 / 暂停 / 市场冷、致命风险（貔貅、能增发、高税……）、池子能被撤、捆绑 ≥ 30%、阴谋地址、团伙、
+        埋伏地址多、刷量盘 / 钓鱼钱包多 / 市值是池子的几十倍 / 拉盘太平滑（买卖量是假的）、
         坏项目方 / 批量发币、项目方已经在卖、流动性太小（< $5000，卖不出去）、已有持仓、持仓满、冷却期。"""
         t = self.cfg.get("trading", {}) or {}
         fl = self.cfg.get("flow", {}) or {}
@@ -249,8 +308,13 @@ class Trader:
             return f"团伙盘：早期买家里有同一个团伙的 {int(rep['gang_n'])} 个成员"
         if int(rep.get("dev_sold") or 0):
             return "项目方已经在卖"
+        if float(rep.get("insider_held_pct") or 0) > float(t.get("max_insider_pct", 20)):
+            return f"埋伏地址持有 {rep['insider_held_pct']}% 超限"
         if float(rep.get("liquidity") or 0) < float(fl.get("min_liquidity_usd", 5000)):
             return f"流动性 ${float(rep.get('liquidity') or 0):,.0f} 太小，卖不出去"
+        fake = looks_fake(rep, t) or cabal_signs(rep, t)     # 买卖力量打法靠买卖量判断，刷量盘最能骗它
+        if fake:
+            return fake
         bad = await self.bad_actor(chain, token, rep)
         if bad:
             return bad
@@ -263,7 +327,7 @@ class Trader:
             return "持仓数量已满"
         if time.time() - await db.last_closed_at(chain, token) < float(t.get("token_cooldown_min", 120)) * 60:
             return "冷却期内"
-        return ""
+        return await self.ladder_check(chain, token, t)
 
     async def bad_actor(self, chain: str, token: str, rep: dict) -> str:
         t = self.cfg.get("trading", {}) or {}
@@ -324,6 +388,8 @@ class Trader:
             (young or chg <= float(t.get("max_change_1h_pct", 300)),
              f"1 小时涨幅 {chg:.0f}%（要 ≤ {t.get('max_change_1h_pct', 300)}%" + ("，发币不到 1 小时不查）" if young else "）")),
             (not looks_fake(rep, t), looks_fake(rep, t) or "市值和成交量匹配"),
+            (not cabal_signs(rep, t), cabal_signs(rep, t) or
+             f"刷量 / 钓鱼钱包 {float(rep.get('entrap_pct') or 0):.0f}% / 市值和池子：正常"),
             (not (sl >= 30 and sl > b * float(t.get("max_sell_buy_ratio", 1.5))), f"1 小时买 {b} 笔 / 卖 {sl} 笔"),
             (int(rep.get("holders") or 0) >= int(t.get("min_holders", 80)),
              f"持有人 {rep.get('holders')}（要 ≥ {t.get('min_holders', 80)}）"),
@@ -541,8 +607,21 @@ class Trader:
              tier, json.dumps(snapshot(rep), ensure_ascii=False), time.time()))
         await self.app.db.execute("UPDATE token_outcomes SET bought=1 WHERE chain=? AND token=? AND ts>?",
                                   (chain, token, time.time() - 3600))
-        await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason,
-                                    exit_rules(self.cfg.get("exit", {}) or {}, tier))
+        await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason, self.rules_for(chain, reason, tier))
+
+    def rules_for(self, chain: str, reason: str, tier: str | None) -> dict:
+        """这笔单子实际会用的卖出规则（和持仓管理里的选法一样），买入通知里写的卖出计划要和它一致。"""
+        ex = self.cfg.get("exit", {}) or {}
+        for attr, pre in (("imitate", "学来的打法"), ("diamond", "钻石手打法"), ("flow", FLOW)):
+            lane = getattr(self.app, attr, None)
+            if lane and reason.startswith(pre):
+                r = lane.exit_rules(chain, ex)
+                if r:
+                    return r
+        if ex.get("use_learned_rules"):
+            from .positions import learned_rules
+            return learned_rules(ex)
+        return exit_rules(ex, tier)
 
     async def on_smart_sell(self, s: "Signal") -> None:
         """带单的聪明钱卖出时跟卖。多个钱包一起带单的，要过半数卖出才跟——

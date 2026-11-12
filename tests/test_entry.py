@@ -402,6 +402,8 @@ def test_check_lite_only_hard_traps(tmp_path):
             assert "项目方已经在卖" in await tr.check_lite("solana", "T", {**weak, "dev_sold": 1})
             assert "流动性" in await tr.check_lite("solana", "T", {**weak, "liquidity": 2000})
             assert "池子" in await tr.check_lite("solana", "T", {**weak, "chain": "solana", "lp_burn": "", "exchange": "raydium"})
+            assert "钓鱼钱包" in await tr.check_lite("solana", "T", {**weak, "entrap_pct": 98.9})   # 刷量盘：买卖量是假的
+            assert "埋伏" in await tr.check_lite("solana", "T", {**weak, "insider_held_pct": 40})
         finally:
             await db.close()
     asyncio.run(go())

@@ -97,6 +97,10 @@ trading:
   chase_ok_smart: 3
   fake_mcap_min_usd: 3000000      # 市值 ≥ $3M 且超过 1 小时成交量的 500 倍 → 市值虚高，不买也不推送
   fake_mcap_vol_ratio: 500
+  # 11-12 买卖力量打法买进 fomo / XTO / GTA 6：买卖量都是刷出来的。下面几条所有来源都查，被拦的照样记影子单，过几天看拦得对不对
+  max_entrap_pct: 50              # GMGN"钓鱼钱包"≥ 50% 不买（那三个是 78%~99%）
+  max_mcap_liq_ratio: 30          # 市值是池子的 30 倍以上不买（XTO：$1.2 亿 / $83 万 = 147 倍；正常盘一般 2~6 倍）
+  block_ladder: true              # 拉盘太平滑（最近 40 分钟 ≥ 80% 收阳、回调 ＜ 8%、涨 ≥ 30%）不买：机器人一笔笔推上去的
   max_sell_buy_ratio: 1.5         # 1 小时卖出笔数超过买入的 1.5 倍（且 ≥ 30 笔）不买
   min_holders: 80                 # 持有人太少不买
   loss_streak: 4                  # 连亏熔断：连续 4 笔亏损平仓，暂停买入 60 分钟

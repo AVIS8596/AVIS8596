@@ -291,6 +291,12 @@ class Telegram:
                 ts = float(rules.get("trailing_start_pct", 60))
                 plan += (f" | 涨过 +{ts:g}% 后回撤 {float(rules.get('trailing_drop_pct', 30)):g}% 先卖一半\n"
                          if ts < 1000 else "\n")
+            else:
+                ts = float(rules.get("trailing_start_pct", 60))
+                if ts < 1000:
+                    plan += f"不设固定止盈 | 涨过 +{ts:g}% 后从最高点回撤 {float(rules.get('trailing_drop_pct', 30)):g}% 卖\n"
+            if reason.startswith("买卖力量打法"):
+                plan += "买盘强就一直拿；卖盘连续占优就卖（赚 20% 以上先卖一半）；拿了半小时还没怎么涨、又没人交易了也卖\n"
         await self.send(
             f"{self.mode()} ✅ <b>买入 #{pid}</b> {self.tok_link(chain, rep['address'], rep.get('symbol') or '?')}\n"
             f"原因：{e(reason)} | 评分 {rep['score']}\n"
