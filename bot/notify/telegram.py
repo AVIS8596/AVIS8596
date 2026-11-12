@@ -28,6 +28,7 @@ HELP = """<b>命令列表</b>
 /me 你自己手动的实盘：画像、每笔期望、你买过机器人没买的币卡在哪，成交也算进实盘成本；/me add 链 地址 加别的钱包
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
+/lag [天数] 延迟和实盘成本实测：比带单的聪明钱晚多少秒、这段时间涨了多少、晚到的单子是不是更亏；换成实盘小金额（Solana 0.05 SOL）后固定费用吃掉多少、模拟成绩还剩多少
 /backup 立即把数据备份发到这里（每天也会自动发）；/restore 用备份恢复
 /model 自己的选币模型：训练成绩、影子期选了哪些币、表现如何；/model train 立即训练
 /tune 自我学习：学到了哪些参数、样本多少；/tune now 立即学一次；/tune reset 全部恢复
@@ -74,7 +75,7 @@ MENU = [
     ("why", "编号：持仓的健康分和卖出规则"), ("sell", "编号 [百分比]：手动卖出"),
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
-    ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"),
+    ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
     ("size", "查看 / 修改每笔买入金额"), ("pause", "暂停买入（止盈止损照常）"), ("resume", "恢复买入"),
     ("alerts", "off / on：关闭 / 打开聪明钱和新币提醒"), ("dynamic", "动态持仓管理"),
@@ -408,6 +409,11 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/lag":
+            from ..trade.latency import lag_text
+            days = int(args[0]) if args and args[0].isdigit() else 7
+            await self.send("正在查 K 线算延迟，大概要半分钟……")
+            await self.send(await lag_text(self.app, min(max(days, 1), 14)))
         elif cmd == "/costs":
             from ..trade.costs import calibrate, text as cost_text
             self.app.live_costs = await calibrate(self.app)

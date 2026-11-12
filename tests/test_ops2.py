@@ -1533,3 +1533,48 @@ def test_capped_node_paced_over_the_day():
     cs.since, cs.today = now - 600, 5_000                # 刚重启 10 分钟就用了 5 千：超
     assert rpc._ahead(cs, now)
     assert not rpc._ahead(Endpoint("Shyft", "https://s", "wss://s", "s"), now)   # 不限次数的永远不算超
+
+
+def test_lag_report(tmp_path):
+    """/lag：比带单钱包晚多少秒、这段时间涨了多少、晚到的是不是更亏；换成实盘小金额后固定费用吃掉多少。"""
+    from bot.trade.latency import lag_text, measure
+
+    async def go():
+        db = DB(tmp_path / "lag.db")
+        await db.open()
+        try:
+            now = time.time()
+            calls = []
+
+            async def kline(chain, token, res, t0, t1):
+                calls.append(token)
+                return [{"time": (t0 + 150) * 1000, "open": 1.0, "close": 1.0}]       # 聪明钱买入那一分钟价格 1.0
+            app = SimpleNamespace(db=db, gmgn=SimpleNamespace(kline=kline),
+                                  cfg=PCfg({"trading": {"sim_fixed_fee_native": {"solana": 0.0005}}}))
+
+            async def npx(chain):
+                return 150.0
+            app.native_price = npx
+            # A：聪明钱买后 40 秒买到，价格 1.1（+10%），赚 50%；B：晚 300 秒，价格 1.5（+50%），亏 40%
+            for pid, tok, lag, q, real in ((1, "A", 40, 1.1, 150), (2, "B", 300, 1.5, 60)):
+                t_open = now - 3600 + pid
+                await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                                 (t_open - lag, "solana", "W", tok, "buy", f"s{pid}"))
+                await db.execute("INSERT INTO positions(id,chain,token,symbol,status,dry_run,reason,source_wallets,"
+                                 "cost_native,cost_usd,realized_usd,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 (pid, "solana", tok, tok, "closed", 1, "跟单 | 一般", '["W"]', 0.6, 100, real, t_open))
+                await db.execute("INSERT INTO trades(ts,chain,token,side,price_usd,usd_value,dry_run,ok,quote_price) "
+                                 "VALUES(?,?,?,?,?,?,?,?,?)", (t_open, "solana", tok, "buy", q * 1.02, 100, 1, 1, q))
+            recs = {r["symbol"]: r for r in await measure(app)}
+            assert abs(recs["A"]["lag"] - 40) < 1 and abs(recs["A"]["move"] - 0.1) < 1e-9
+            assert abs(recs["B"]["move"] - 0.5) < 1e-9
+            n = len(calls)
+            await measure(app)
+            assert len(calls) == n                                   # 已平仓的结果缓存，不再查 K 线
+            txt = await lag_text(app)
+            assert "跟单：2 笔" in txt and "1/2 笔已经涨了 20% 以上" in txt
+            # 固定费用：实盘 0.05 SOL，优先费 0.0005 + 小费 0.001 = 0.0015，一买一卖占 6%；模拟单 0.6 SOL 只占 0.2%
+            assert "一买一卖占实盘金额 6.0%" in txt and "模拟单只占 0.2%" in txt
+        finally:
+            await db.close()
+    asyncio.run(go())
