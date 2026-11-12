@@ -454,12 +454,18 @@ class Telegram:
                 msgs = await br.tune_once(force=True)
                 await self.send("\n".join(msgs) or "没有结果")
             elif sub == "apply":
-                pend = await self.app.db.kv_get("tune_pending", None)
-                if not pend:
+                ps = await br.pending()
+                if not ps:
                     await self.send("没有待确认的建议")
                     return
+                idx = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
+                if not 1 <= idx <= len(ps):       # 必须带编号：免得同意错了哪一条
+                    await self.send("请带上建议的编号，比如 /tune apply 1：\n"
+                                    + "\n".join(f"{i}. {e(p['why'])}" for i, p in enumerate(ps, 1)))
+                    return
+                pend = ps.pop(idx - 1)
                 await br.apply(pend["key"], pend["new"], pend["why"])
-                await self.app.db.kv_set("tune_pending", None)
+                await self.app.db.kv_set("tune_pending", ps or None)
                 await self.send("✅ 已采纳：" + e(pend["why"]))
             elif sub == "reset":
                 n = await br.reset()

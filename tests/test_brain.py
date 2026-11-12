@@ -207,3 +207,20 @@ def test_entry_cases_count_dead_and_use_shadow(tmp_path):
         assert rets[0] == -1.0 and -0.3 in rets
         await db.close()
     asyncio.run(go())
+
+
+def test_tune_pending_multiple(tmp_path):
+    """同时有好几条调参建议：各自有编号，同一参数的新建议替换旧的。"""
+    async def go():
+        db = DB(tmp_path / "p.db")
+        await db.open()
+        br = Brain(SimpleNamespace(db=db, cfg=Cfg({"trading": {}})))
+        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -25, "why": "止损"}) == 1
+        assert await br.add_pending({"key": "trading.min_smart", "new": 1, "why": "聪明钱"}) == 2
+        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -20, "why": "止损2"}) == 2
+        ps = await br.pending()
+        assert [p["why"] for p in ps] == ["聪明钱", "止损2"]
+        await db.kv_set("tune_pending", {"key": "x", "new": 1, "why": "旧格式"})
+        assert len(await br.pending()) == 1
+        await db.close()
+    asyncio.run(go())

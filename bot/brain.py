@@ -369,10 +369,28 @@ class Brain:
                 await db.kv_set("tune_pending", None)
                 log.info("旧算法的调参建议已作废（新算法会重新算）")
             await db.kv_set("tune_dead_fix_1112", True)
+        # 11-12 待确认建议改成可以同时存好几条、按编号采纳：旧格式只存了最后一条，分不清是哪条，作废重算
+        if isinstance(await db.kv_get("tune_pending", None), dict):
+            await db.kv_set("tune_pending", None)
         for k, v in tuned.items():
             set_cfg(self.cfg.raw, k, v)
         if tuned:
             log.info("已加载学到的参数：%s", tuned)
+
+    async def pending(self) -> list[dict]:
+        """待确认的调参建议（可能同时有好几条：买入一条、卖出一条……），按编号 1、2、3 排。"""
+        p = await self.app.db.kv_get("tune_pending", None)
+        if not p:
+            return []
+        return [p] if isinstance(p, dict) else list(p)
+
+    async def add_pending(self, rec: dict) -> int:
+        """加一条待确认的建议（同一个参数的旧建议被替换），返回它的编号。
+        以前只存最后一条：同时出两条建议时，/tune apply 采纳的是后来那条，不一定是你想同意的那条。"""
+        ps = [p for p in await self.pending() if p.get("key") != rec["key"]]
+        ps.append(rec)
+        await self.app.db.kv_set("tune_pending", ps)
+        return len(ps)
 
     async def mode(self) -> str:
         m = await self.app.db.kv_get("tune_mode", None) or str(self.cfg.get("learning.auto_tune", "auto"))
@@ -529,9 +547,9 @@ class Brain:
             out.append("🧠 <b>自我调参</b>（模拟盘自动生效）\n" + html.escape(why)
                        + "\n不满意可以发 /tune reset 恢复配置文件里的值")
         else:
-            await db.kv_set("tune_pending", {"key": r["key"], "new": r["new"], "why": why, "ts": time.time()})
+            n = await self.add_pending({"key": r["key"], "new": r["new"], "why": why, "ts": time.time()})
             out.append("🧠 <b>调参建议</b>（" + ("实盘" if not self.cfg.dry_run else "建议模式") + "不自动改）\n"
-                       + html.escape(why) + "\n同意就发 /tune apply")
+                       + html.escape(why) + f"\n同意就发 /tune apply {n}")
         return out
 
     # ---------------- 卖出规则自动调整（用真实入场回放 K 线）
@@ -605,8 +623,8 @@ class Brain:
         if await self.mode() == "auto" and self.cfg.dry_run:
             await self.apply(r["key"], r["new"], why)
             return ["🧠 <b>自我调参</b>（模拟盘自动生效）\n" + html.escape(why) + "\n不满意可以发 /tune reset"]
-        await self.app.db.kv_set("tune_pending", {"key": r["key"], "new": r["new"], "why": why, "ts": time.time()})
-        return ["🧠 <b>调参建议</b>（不自动改）\n" + html.escape(why) + "\n同意就发 /tune apply"]
+        n = await self.add_pending({"key": r["key"], "new": r["new"], "why": why, "ts": time.time()})
+        return ["🧠 <b>调参建议</b>（不自动改）\n" + html.escape(why) + f"\n同意就发 /tune apply {n}"]
 
     async def status_text(self) -> str:
         db = self.app.db
@@ -623,9 +641,8 @@ class Brain:
             lines += [f"  {labels.get(k, k)}：{_fmt(base.get(k))} → {_fmt(v)}" for k, v in tuned.items()]
         else:
             lines.append("还没有改过参数（数据够多、结论可信才会改）")
-        pend = await db.kv_get("tune_pending", None)
-        if pend:
-            lines.append("待确认的建议：" + html.escape(pend["why"]) + "（/tune apply 采纳）")
+        for i, pend in enumerate(await self.pending(), 1):
+            lines.append(f"待确认的建议 {i}：" + html.escape(pend["why"]) + f"（/tune apply {i} 采纳）")
         for h in (await db.kv_get("tune_log", []) or [])[-5:][::-1]:
             lines.append(f"  {time.strftime('%m-%d %H:%M', time.localtime(h['ts']))} "
                          f"{labels.get(h['key'], h['key'])} {_fmt(h['old'])} → {_fmt(h['new'])}")
@@ -634,7 +651,7 @@ class Brain:
         n2 = await db.fetchone("SELECT COUNT(*) n FROM early_tok WHERE p240 IS NOT NULL AND p240>0 AND first_ts>?",
                                (time.time() - 4 * 86400,))
         lines.append(f"学习样本（最近 4 天）：结果档案 {n1['n']} 个，早期观察 {n2['n']} 个")
-        lines.append("命令：/tune now 立即学一次｜/tune auto / suggest / off｜/tune apply 采纳建议｜/tune reset 全部恢复")
+        lines.append("命令：/tune now 立即学一次｜/tune auto / suggest / off｜/tune apply 编号 采纳建议｜/tune reset 全部恢复")
         return "\n".join(lines)
 
     async def run(self) -> None:
