@@ -28,6 +28,7 @@ HELP = """<b>命令列表</b>
 /me 你自己手动的实盘：画像、每笔期望、你买过机器人没买的币卡在哪，成交也算进实盘成本；/me add 链 地址 加别的钱包
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
+/autopsy [sol|bsc] [人数] 高收益地址解剖：GMGN 赚钱的地址，跟着它买的人能分到多少（晚 30/60/120 秒）、哪类钱包和单子跟得上（后台跑 1~2 小时，跑完自动发）；不带参数看上次结果
 /lag [天数] 延迟和实盘成本实测：比带单的聪明钱晚多少秒、这段时间涨了多少、晚到的单子是不是更亏；换成实盘小金额（Solana 0.05 SOL）后固定费用吃掉多少、模拟成绩还剩多少
 /backup 立即把数据备份发到这里（每天也会自动发）；/restore 用备份恢复
 /model 自己的选币模型：训练成绩、影子期选了哪些币、表现如何；/model train 立即训练
@@ -76,6 +77,7 @@ MENU = [
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
     ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
+    ("autopsy", "[sol/bsc] [人数]：高收益地址解剖，跟着买能分到多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
     ("size", "查看 / 修改每笔买入金额"), ("pause", "暂停买入（止盈止损照常）"), ("resume", "恢复买入"),
     ("alerts", "off / on：关闭 / 打开聪明钱和新币提醒"), ("dynamic", "动态持仓管理"),
@@ -409,6 +411,34 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/autopsy":
+            ap = getattr(self.app, "autopsy", None)
+            if not ap:
+                await self.send("GMGN 没启用，做不了解剖")
+                return
+            alias = {"sol": "solana", "solana": "solana", "bsc": "bsc", "bnb": "bsc"}
+            chains = [alias[x.lower()] for x in args if x.lower() in alias]
+            top = next((int(x) for x in args if x.isdigit()), 0)
+            if not chains and not top:
+                if ap.task and not ap.task.done():
+                    await self.send(f"🔬 解剖还在跑：{ap.progress or '准备中'}，跑完会自动发结果")
+                    return
+                last = await ap.last()
+                if last:
+                    for sec in last:
+                        await self.send(sec)
+                    await self.send("重新跑一次：/autopsy go（或 /autopsy sol 20 只看 Solana、每类 20 个钱包）")
+                    return
+            chains = [c for c in (chains or ["solana", "bsc"]) if c in self.app.cfg.enabled_chains]
+            top = min(max(top or 20, 5), 40)
+            if not chains:
+                await self.send("这条链没启用")
+                return
+            if not ap.start(chains, top):
+                await self.send(f"🔬 解剖已经在跑：{ap.progress or '准备中'}")
+                return
+            await self.send(f"🔬 开始解剖：{'、'.join(CHAINS[c].name for c in chains)}，每条链 GMGN 高收益地址前 {top} 个"
+                            f" + 我们监听排名前 {top} 个。后台慢慢跑（不挤占机器人额度），大约 1~2 小时，跑完自动发结果")
         elif cmd == "/lag":
             from ..trade.latency import lag_text
             days = int(args[0]) if args and args[0].isdigit() else 7

@@ -131,6 +131,8 @@ async def run_bot(cfg) -> None:
         app.strategies = strat
         from bot.learn import Learner
         app.learner = Learner(app)
+        from bot.autopsy import Autopsy
+        app.autopsy = Autopsy(app)          # 高收益地址解剖：只在 /autopsy 时运行
         jobs.append(("学习高手", app.learner.run))
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)
