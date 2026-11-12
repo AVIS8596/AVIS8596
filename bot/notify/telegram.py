@@ -29,6 +29,8 @@ HELP = """<b>命令列表</b>
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
 /diamond 钻石手打法：学靠一个币拿得住、赚几万 U 的人（他们什么时候买什么样的币、拿多久），模拟盘按学到的打法下单对比；/diamond go 立即找一轮
+/compare [天数] 几套打法放在一起比：真下过的单、影子采样（同一批币同样卖法只比选币）、被拦下的币如果没拦，排出哪套最有希望
+/jobs 后台研究任务：各自用了多少 GMGN 额度、开着还是停着；/jobs off 名字 停掉（重启后也不开）、/jobs on 名字 打开
 /imitate 学来的打法：机器人从 GMGN 盈利地址的交易里自己学的买卖方式，学到了什么、自己的成绩、和其他来源 / 现在的卖出规则对比；/imitate train 立即重新学
 /autopsy [sol|bsc] [人数] 高收益地址解剖：GMGN 赚钱的地址，跟着它买的人能分到多少（晚 30/60/120 秒）、哪类钱包和单子跟得上（后台跑 1~2 小时，跑完自动发）；不带参数看上次结果
 /lag [天数] 延迟和实盘成本实测：比带单的聪明钱晚多少秒、这段时间涨了多少、晚到的单子是不是更亏；换成实盘小金额（Solana 0.05 SOL）后固定费用吃掉多少、模拟成绩还剩多少
@@ -79,6 +81,7 @@ MENU = [
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
     ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
+    ("compare", "[天数]：几套打法放在一起比"), ("jobs", "后台研究任务：额度用量、开关"),
     ("imitate", "学来的打法：学到了什么、成绩对比"), ("diamond", "钻石手打法：学拿得住的大赢家"),
     ("autopsy", "[sol/bsc] [人数]：高收益地址解剖，跟着买能分到多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
@@ -355,6 +358,41 @@ class Telegram:
                     self._cmd_tasks.add(t)
                     t.add_done_callback(self._cmd_tasks.discard)
 
+    async def _jobs(self, args: list[str]) -> str:
+        """后台研究任务：GMGN 用量、开关。只能停后台研究，交易相关的（监听、持仓、分析新币）不能停。"""
+        bg = sorted(getattr(self.app, "background_jobs", set()) or [])
+        if not bg:
+            return "后台任务信息不可用"
+        off = set(await self.app.db.kv_get("jobs_off", []) or [])
+        if len(args) >= 2 and args[0].lower() in ("on", "off"):
+            name = " ".join(args[1:])
+            if name not in bg:
+                return "没有这个后台任务（只能开关后台研究）。可选：" + "、".join(bg)
+            if args[0].lower() == "off":
+                off.add(name)
+                t = (getattr(self.app, "job_tasks", {}) or {}).get(name)
+                if t and not t.done():
+                    t.cancel()
+                msg = f"⏸ 已停掉「{name}」（重启后也不开，/jobs on {name} 打开）"
+            else:
+                off.discard(name)
+                self.app.start_job(name)
+                msg = f"▶️ 已打开「{name}」"
+            await self.app.db.kv_set("jobs_off", sorted(off))
+            return msg
+        g = getattr(self.app, "gmgn", None)
+        used = dict(getattr(g, "by_job", {}) or {})
+        tot = sum(used.values()) or 1
+        lines = [f"<b>后台研究任务</b>（GMGN 额度：这次启动以来共 {tot:,}，按任务分）"]
+        for n in sorted(bg, key=lambda n: -used.get(n, 0)):
+            st = "⏸ 停着" if n in off else "▶️ 开着"
+            lines.append(f"  {st} {e(n)}：{used.get(n, 0):,}（{used.get(n, 0) / tot * 100:.0f}%）")
+        fg = sorted(((k, v) for k, v in used.items() if k not in bg), key=lambda kv: -kv[1])[:6]
+        if fg:
+            lines.append("前台（交易相关，不能停）：" + "、".join(f"{e(k)} {v:,}" for k, v in fg))
+        lines.append("停掉：/jobs off 名字　打开：/jobs on 名字")
+        return "\n".join(lines)
+
     async def _restore_doc(self, msg: dict) -> None:
         from ..safety import restore_receive
         try:
@@ -432,6 +470,12 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/compare":
+            from ..trade.compare import compare
+            days = int(args[0]) if args and args[0].isdigit() else 4
+            await self.send(await compare(self.app, min(max(days, 1), 10)))
+        elif cmd == "/jobs":
+            await self.send(await self._jobs(args))
         elif cmd == "/diamond":
             dm = getattr(self.app, "diamond", None)
             if not dm:

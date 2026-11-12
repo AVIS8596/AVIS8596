@@ -91,6 +91,7 @@ def sign(message: str, key) -> str:
 # 后台研究任务（解剖、钻石手、学高手、挖钱包、体检、影子采样……）在自己的任务里设成 True：
 # 它们只用空闲的额度，有前台请求（/check、分析新币、持仓取价、聪明钱信号）在排队就先让路。
 LOW = contextvars.ContextVar("gmgn_low", default=False)
+JOB = contextvars.ContextVar("gmgn_job", default="命令 / 其他")      # 哪个任务在用 GMGN（/jobs 看谁最费额度）
 
 
 class _Bucket:
@@ -152,6 +153,7 @@ class Gmgn:
         self.last_err = ""
         self.disabled: set[str] = set()                    # 当前套餐用不了的接口
         self.weight_used = 0
+        self.by_job: dict[str, int] = {}
         self.fg_waits: list[tuple[float, float]] = []      # 前台请求排队等了多久（/status 看机器人慢不慢）
         self.bans = 0
         self.trade_block_until = 0.0
@@ -223,6 +225,8 @@ class Gmgn:
                 if len(self.fg_waits) > 2000:
                     self.fg_waits = [x for x in self.fg_waits if now - x[0] < 600]
             self.weight_used += WEIGHTS.get(path, 2)
+            j = JOB.get()
+            self.by_job[j] = self.by_job.get(j, 0) + WEIGHTS.get(path, 2)
             ts = int(time.time())
             q = {k: v for k, v in (query or {}).items() if v is not None}
             q.update(timestamp=ts, client_id=str(uuid.uuid4()))

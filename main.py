@@ -173,17 +173,33 @@ async def run_bot(cfg) -> None:
             jobs.append((f"{c} GMGN交易流", GmgnFeed(app, c).run))
 
     # 后台研究 / 学习类任务：GMGN 只用空闲额度，前台（/check、分析新币、持仓取价、信号）有请求在排队就先让路
-    from bot.sources.gmgn import LOW
+    from bot.sources.gmgn import JOB, LOW
     background = {"聪明钱发现", "学来的打法", "钻石手打法", "学习高手", "扩充钱包池", "自我学习", "选币模型",
                   "钱包体检", "阴谋团伙识别", "影子单", "影子采样", "安全与成本校准"}
 
-    def low(fn):
+    def wrap(n, fn):
         async def go():
-            LOW.set(True)
+            JOB.set(n)                     # /jobs：按任务统计 GMGN 用量
+            if n in background:
+                LOW.set(True)
             return await fn()
         return go
-    jobs = [(n, low(fn) if n in background else fn) for n, fn in jobs]
-    tasks = [asyncio.create_task(run_forever(n, fn, err), name=n) for n, fn in jobs]
+    app.background_jobs = background
+    app.job_fns = {n: wrap(n, fn) for n, fn in jobs}
+    app.job_tasks = {}
+
+    def start_job(n: str) -> None:
+        t = app.job_tasks.get(n)
+        if t and not t.done():
+            return
+        app.job_tasks[n] = asyncio.create_task(run_forever(n, app.job_fns[n], err), name=n)
+    app.start_job = start_job
+    off = set(await app.db.kv_get("jobs_off", []) or [])      # /jobs off 停掉的后台研究，重启后也不开
+    for n in app.job_fns:
+        if n in background and n in off:
+            log.info("后台任务 %s 已被停用（/jobs on %s 打开）", n, n)
+            continue
+        start_job(n)
 
     mode = "🧪 模拟盘（不会花真钱）" if cfg.dry_run else "💰 实盘"
     src = "GMGN" if app.data.use_gmgn else "Birdeye"
@@ -210,6 +226,7 @@ async def run_bot(cfg) -> None:
     log.info("收到停止信号，正在退出……")
     await app.tg.send("🛑 机器人已停止（持仓不会自动卖出）")
     await asyncio.sleep(2)
+    tasks = list(app.job_tasks.values())          # 包括 /jobs on 之后新开的
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
