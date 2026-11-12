@@ -69,7 +69,8 @@ def parse_urls(raw: str) -> list[tuple[str, str]]:
 
 # 免费版每月额度 / 30 = 每天预算（Alchemy 按取交易 40 单位折算）。没列的（Shyft 等）当不限次数。
 QUOTA_MONTH_SEC = 6 * 3600     # 月额度用完：6 小时试一次（下个月额度重置后自己恢复）
-DAILY_BUDGET = {"Helius": 33_000, "Chainstack": 100_000, "Alchemy": 25_000}
+DAILY_BUDGET = {"Helius": 33_000, "Chainstack": 100_000, "Alchemy": 25_000,
+                "QuickNode": 11_000}   # QuickNode 试用：1000 万额度 / 每次 30 / 30 天
 
 
 @dataclass
