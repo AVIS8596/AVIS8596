@@ -120,7 +120,7 @@ def evm_hint(err: str) -> str:
     return "多半是节点或网络临时故障，机器人会一直自动重连；持续很久的话把这条消息发给 Claude。"
 
 
-BUDGET = {"Helius": 33_000, "Chainstack": 100_000, "Alchemy": 25_000}   # 免费版每月额度 / 30（Alchemy 按取交易 40 单位折算）
+from ..sources.solana_rpc import DAILY_BUDGET as BUDGET   # 免费版每月额度 / 30
 
 
 class Watchdog:

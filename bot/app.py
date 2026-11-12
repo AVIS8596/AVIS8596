@@ -40,6 +40,7 @@ class App:
             from .sources.solana_rpc import parse_urls
             self.sol = SolanaRPC(self.http, s.helius_key, float(b.get("helius_rps", 6)),
                                  float(b.get("helius_trade_rps", 3)), parse_urls(s.solana_rpc_urls))
+            self.sol.budgets.update(self.cfg.get("safety.node_daily_budget", {}) or {})
         from .chains import PUBLIC_RPC
         # 用内置免费公共节点时限速低一些，免得被节点封
         self.evm: dict[str, EvmRPC] = {

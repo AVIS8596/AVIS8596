@@ -1505,3 +1505,20 @@ def test_evm_monitor_status_line():
     assert "BSC" in t and "publicnode" in t and "监听 27 个钱包" in t and "转账 2 笔" in t and "买卖 1 笔" in t
     m.ok, m.down_since, m.last_err = False, now - 600, "HTTP 429"
     assert "❌ 断开 10 分钟" in m.status_text()
+
+
+def test_capped_node_paced_over_the_day():
+    """有月额度的节点（Chainstack）今天用得比预算快：排到最后，先用不限次数的节点（Shyft）。"""
+    from bot.sources.solana_rpc import Endpoint, SolanaRPC
+    rpc = SolanaRPC.__new__(SolanaRPC)
+    rpc.budgets = {"Chainstack": 100_000}
+    now = 86400 * 20000 + 6 * 3600                       # UTC 早上 6 点
+    cs = Endpoint("Chainstack", "https://c", "wss://c", "c")
+    cs.day, cs.since = 20000, now - 6 * 3600
+    cs.today = 20_000                                    # 6 小时该用 2.5 万（+1 小时余地 = 2.9 万）：没超
+    assert not rpc._ahead(cs, now)
+    cs.today = 40_000
+    assert rpc._ahead(cs, now)
+    cs.since, cs.today = now - 600, 5_000                # 刚重启 10 分钟就用了 5 千：超
+    assert rpc._ahead(cs, now)
+    assert not rpc._ahead(Endpoint("Shyft", "https://s", "wss://s", "s"), now)   # 不限次数的永远不算超

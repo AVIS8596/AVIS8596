@@ -67,6 +67,10 @@ def parse_urls(raw: str) -> list[tuple[str, str]]:
     return out
 
 
+# 免费版每月额度 / 30 = 每天预算（Alchemy 按取交易 40 单位折算）。没列的（Shyft 等）当不限次数。
+DAILY_BUDGET = {"Helius": 33_000, "Chainstack": 100_000, "Alchemy": 25_000}
+
+
 @dataclass
 class Endpoint:
     name: str
@@ -101,6 +105,7 @@ class SolanaRPC:
     def __init__(self, http: Http, helius_key: str, rps: float, trade_rps: float = 3,
                  extra_urls: list[tuple[str, str]] | None = None):
         self.http = http
+        self.budgets: dict[str, float] = dict(DAILY_BUDGET)   # 有月额度的节点按天均匀用（main 里可用配置覆盖）
         self.eps: list[Endpoint] = []
         if helius_key:
             self.eps.append(Endpoint("Helius", f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
@@ -166,6 +171,17 @@ class SolanaRPC:
             log.warning("Solana 节点 %s 用不了（%s），%d 分钟后再试；%s", ep.name, why, sec // 60,
                         f"先用 {rest[0]}" if rest else "没有别的节点了，分析改用 GMGN 数据")
         ep.out_until, ep.out_why = time.time() + sec, why
+
+    def _ahead(self, ep: Endpoint, now: float | None = None) -> bool:
+        """这个节点今天用得比预算快（按开始计数以来的时间折算，留 1 小时的量做余地）。"""
+        cap = float(self.budgets.get(ep.name, 0) or 0)
+        if not cap:
+            return False
+        now = now or time.time()
+        if ep.day != int(now // 86400):
+            return False
+        start = max(ep.since or now, now - now % 86400)
+        return ep.today > cap * ((now - start) / 86400 + 1 / 24)
 
     async def _key_ok(self, ep: Endpoint) -> bool | None:
         """密钥本身有没有效（getSlot 能不能成功）。1 分钟内确认过就不再问。
@@ -237,6 +253,11 @@ class SolanaRPC:
             k = self._rr % len(avail)
             self._rr += 1
             avail = avail[k:] + avail[:k]
+            # 有月额度的节点（Chainstack 等）按天均匀用：今天已经用超"按时间该用到的量"，就排到最后，
+            # 先用不限次数的（Shyft），别的都不行时才用它。不然几天就把一个月的额度用光，连链上监听都会断
+            over = [ep for ep in avail if self._ahead(ep)]
+            if over and len(over) < len(avail):
+                avail = [ep for ep in avail if ep not in over] + over
         for i, ep in enumerate(avail):
             tried += 1
             self._id += 1
