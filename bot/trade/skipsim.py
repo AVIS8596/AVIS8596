@@ -75,7 +75,7 @@ async def recompute_fair(app: "App", days: float = 3) -> int:
     import json
     from .sampler import dead_tail
     db = app.db
-    if await db.kv_get("fair_sim_1112", False):
+    if await db.kv_get("fair_sim_1113", False):
         return 0
     exit_cfg = app.cfg.get("exit", {}) or {}
     cost = float(exit_cfg.get("shadow_cost_pct", 2)) / 100
@@ -92,14 +92,17 @@ async def recompute_fair(app: "App", days: float = 3) -> int:
             if c:
                 px0, path = fair_entry(json.loads(c["data"]), float(r["ts"]))
                 if len(path) >= 8 and px0 > 0 and 0.1 < px0 / float(r["price"] or 0 or 1) < 10:
-                    path = dead_tail(path, float(r["ts"]), now, False)
+                    # 之后取不到价格（结果档案 4 小时 / 24 小时记成 -1）= 撤池子 / 归零：K 线断的地方补归零点
+                    g = await db.fetchone("SELECT 1 FROM token_outcomes WHERE chain=? AND token=? AND (p240<0 OR p1440<0) "
+                                          "LIMIT 1", (r["chain"], r["token"]))
+                    path = dead_tail(path, float(r["ts"]), now, bool(g))
                     m = simulate(px0 * 1.01, float(r["ts"]), path, dict(rules), None, 100, cost)
                     ret = m - 1 if m < 200 else -9.0
             await db.execute(f"UPDATE {table} SET sim_ret=? WHERE id=?", (ret, r["id"]))
             n += ret is not None
             if n % 200 == 0:
                 await asyncio.sleep(0)
-    await db.kv_set("fair_sim_1112", True)
+    await db.kv_set("fair_sim_1113", True)
     log.info("影子单 / 影子采样按公平入场重算了 %d 条", n)
     return n
 

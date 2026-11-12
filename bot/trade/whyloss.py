@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from ..utils import f
 from .positions import active_rules
 from .replay import after, candles, fair_entry, simulate, to_path
+from .sampler import dead_tail
 
 if TYPE_CHECKING:
     from ..app import App
@@ -57,6 +58,9 @@ async def whyloss(app: "App", days: float = 4, limit: int = 60) -> str:
         path = to_path(after(cs, t_open))
         if len(path) < 8:
             continue
+        urgent = str(p["close_reason"] or "").startswith("🚨")
+        # 撤池子 / 归零的：K 线在撤池子之后就断了，模拟会拿断之前的高价卖——要在断的地方补一个归零点
+        path = dead_tail(path, t_open, now, urgent)
         b = simulate(entry, t_open, path, dict(rules), None, 100, cost) - 1
         c = None
         delay = runup = None
@@ -68,19 +72,20 @@ async def whyloss(app: "App", days: float = 4, limit: int = 60) -> str:
                 cs1 = await candles(app, p["chain"], p["token"], t1) if t_open - t1 > 300 else cs
                 await asyncio.sleep(0.3)
                 px0, path1 = fair_entry(cs1, t1)
+                path1 = dead_tail(path1, t1, now, urgent)
                 if px0 > 0 and len(path1) >= 8:
                     c = simulate(px0 * 1.01, t1, path1, dict(rules), None, 100, cost) - 1
             except Exception:  # noqa: BLE001
                 pass
-        rows.append({"a": a, "b": b, "c": c, "delay": delay, "runup": runup, "urgent": str(p["close_reason"] or "").startswith("🚨")})
+        rows.append({"a": a, "b": b, "c": c, "delay": delay, "runup": runup, "urgent": urgent})
     L = [f"🔍 <b>为什么买的亏、拦下的赚</b>（最近 {days:g} 天 {len(rows)} 笔已平仓的真实单子，都扣过成本）"]
     if len(rows) < 5:
         return L[0] + "\n单子太少，过两天再看"
     A = [r["a"] for r in rows]
     B = [r["b"] for r in rows]
     L.append(f"A. 实际结果：每笔平均 {_avg(A) * 100:+.1f}%、中位 {_med(A) * 100:+.0f}%")
-    L.append(f"B. 同一笔入场按影子单的方法模拟：平均 {_avg(B) * 100:+.1f}%、中位 {_med(B) * 100:+.0f}%"
-             f"（差 {(_avg(B) - _avg(A)) * 100:+.1f} 个点 = 模拟比真实乐观多少）")
+    L.append(f"B. 同一笔入场按影子单的方法模拟（卖法用现在的高手规则）：平均 {_avg(B) * 100:+.1f}%、中位 {_med(B) * 100:+.0f}%"
+             f"（差 {(_avg(B) - _avg(A)) * 100:+.1f} 个点 = 卖法不同 + 模拟比真实乐观）")
     urg = [r for r in rows if r["urgent"]]
     if urg:
         L.append(f"   其中 {len(urg)} 笔是紧急卖出（撤池子 / 归零）：实际平均 {_avg([r['a'] for r in urg]) * 100:+.0f}%，"
