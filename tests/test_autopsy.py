@@ -93,7 +93,8 @@ def test_autopsy_run(tmp_path):
             app = SimpleNamespace(db=db, gmgn=gm, cfg=Cfg({"autopsy.call_gap_sec": 0}), tg=SimpleNamespace(send=send))
             ap = Autopsy(app)
             secs = await ap.run(["solana"], 5)
-            txt = secs[0]
+            assert "学高收益地址的买币逻辑" in secs[0] and "1. 它们买入那一刻" in secs[0]
+            txt = secs[1]
             assert "2 个钱包、12 笔" in txt and "跟着也能赚 1 个" in txt and "自己赚、跟不上 1 个" in txt
             assert "W1…W1" in txt or "W1" in txt
             assert (await ap.last())[0].startswith("（上次解剖")
@@ -105,3 +106,34 @@ def test_autopsy_run(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_learn_buy_logic():
+    """学买币逻辑：K 线还原买入那一刻的样子；赚钱的单 vs 亏钱的单；学成规则在全部币上回测。"""
+    from bot.autopsy_learn import candidate_rules, kline_features, profile, separating, test_rules
+    t = 1_760_000_000.0
+    # 买入前 1 小时：从 1.0 涨到 2.0，最高 2.5；买入前 5 分钟 1.8 → 2.0
+    cs = [{"time": (t - 3600) * 1000, "open": 1.0, "close": 1.0, "high": 1.0, "low": 1.0, "volume": 100},
+          {"time": (t - 1200) * 1000, "open": 2.4, "close": 2.4, "high": 2.5, "low": 2.3, "volume": 100},
+          {"time": (t - 300) * 1000, "open": 1.8, "close": 1.8, "high": 1.9, "low": 1.8, "volume": 500},
+          {"time": (t - 60) * 1000, "open": 2.0, "close": 2.0, "high": 2.0, "low": 2.0, "volume": 700}]
+    x = kline_features(cs, t, t - 1800, 1e6, 2.0)
+    assert x["age_min"] == 30 and x["mcap"] == 2e6
+    assert abs(x["chg5"] - (2.0 / 1.8 - 1)) < 1e-9 and abs(x["chg60"] - 1.0) < 1e-9
+    assert abs(x["dd"] - 0.2) < 1e-9 and abs(x["run_up"] - 1.0) < 1e-9 and x["vol5"] == 1200
+    # 40 笔：发币 10~30 分钟买的赚（+80%），2 小时以上买的亏（-40%）
+    trs = [{"own": 0.8, "x": {"age_min": 10 + i, "mcap": 50_000, "holders": 200 + i}} for i in range(20)] + \
+          [{"own": -0.4, "x": {"age_min": 200 + i, "mcap": 60_000, "holders": 210 + i}} for i in range(20)]
+    prof = "\n".join(profile(trs))
+    assert "赚 30% 以上 20 笔、亏钱 20 笔" in prof and "发币多久" in prof
+    sep = separating(trs)
+    assert sep and sep[0].startswith("  发币多久")                      # 最能分好坏的是发币多久
+    rules = candidate_rules(trs)
+    age = next(r for r in rules if r[0] == "age_min")
+    assert 10 <= age[2] <= age[3] <= 29
+    # 全部币：发币 10~30 分钟的之后 +50%，其余 -20%
+    base = [{"x": {"age_min": 15.0}, "ret": 0.5} for _ in range(60)] + [{"x": {"age_min": 300.0}, "ret": -0.2}
+                                                                         for _ in range(200)]
+    out = "\n".join(test_rules([age], base))
+    assert "全部 260 个币" in out and "✅ 发币多久" in out
+    assert "太少" in test_rules([age], base[:50])[0]

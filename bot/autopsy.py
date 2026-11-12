@@ -1,4 +1,5 @@
-"""高收益地址解剖（/autopsy）：GMGN 上赚钱的地址，钱是怎么赚的？跟着它买的人能分到多少？
+"""高收益地址解剖（/autopsy）：GMGN 上赚钱的地址在什么时机、买什么样的币（学来给机器人自己选币用，见 autopsy_learn），
+以及跟着它买的人能分到多少。
 
 只读研究，不改任何买卖规则。做法：
 1. 选钱包：GMGN 聪明钱 / KOL 交易流里出现的地址，按最近 30 天已实现利润取前 N 名；再加上我们正在监听、排名最靠前的 N 个。
@@ -81,7 +82,8 @@ def build_trades(acts: list[dict], holds: list[dict], now: float, days: float = 
         m = meta.get(tok, {})
         out.append({"token": tok, "symbol": p["symbol"], "t_buy": t_buy, "px_buy": px_buy, "t_sell": sells[0][0],
                     "t_last": sells[-1][0], "own": min(CAP, income / cost - 1), "cost": cost,
-                    "hold_min": (sells[-1][0] - t_buy) / 60,
+                    "hold_min": (sells[-1][0] - t_buy) / 60, "created": m.get("created") or None,
+                    "supply": m.get("supply") or None,
                     "age_min": (t_buy - m["created"]) / 60 if m.get("created") and t_buy >= m["created"] else None,
                     "mcap": px_buy * m["supply"] if m.get("supply") else None})
     out.sort(key=lambda x: -x["t_buy"])
@@ -226,17 +228,22 @@ class Autopsy:
         except Exception as e:  # noqa: BLE001
             log.debug("持仓查询失败 %s: %s", addr, e)
         out = []
+        from .autopsy_learn import kline_features, snapshot
         for tr in build_trades(acts, holds, time.time())[:MAX_POS_PER_WALLET]:
             span = tr["t_sell"] - tr["t_buy"]
-            if span <= 5 * 3600:                     # 拿得不久：一次 K 线就能盖住买入和卖出
-                c = await self._kline(chain, tr["token"], tr["t_buy"] - 180, tr["t_sell"] + 300)
+            # 买入前 1 小时的 K 线：还原它买入那一刻这个币的样子（涨了多少、离高点多远、成交额）
+            if span <= 4 * 3600:                     # 拿得不久：一次 K 线就能盖住买入前 1 小时到卖出
+                c = await self._kline(chain, tr["token"], tr["t_buy"] - 3600, tr["t_sell"] + 300)
                 ce = cx = c
             else:
-                ce = await self._kline(chain, tr["token"], tr["t_buy"] - 180, tr["t_buy"] + 300)
+                ce = await self._kline(chain, tr["token"], tr["t_buy"] - 3600, tr["t_buy"] + 300)
                 cx = await self._kline(chain, tr["token"], tr["t_sell"] - 180, tr["t_sell"] + 300)
             fol = follower_returns(tr, ce, cx, cost)
-            if fol:
-                out.append({**tr, "fol": fol})
+            if not fol:
+                continue
+            x = kline_features(ce, tr["t_buy"], tr["created"], tr["supply"], tr["px_buy"])
+            x.update(await snapshot(self.app, chain, tr["token"], tr["t_buy"]))
+            out.append({**tr, "fol": fol, "x": x})
         return out
 
     async def run(self, chains: list[str], top: int) -> list[str]:
@@ -244,6 +251,9 @@ class Autopsy:
         db = self.app.db
         await db.execute("CREATE TABLE IF NOT EXISTS autopsy (chain TEXT, address TEXT, ts REAL, source TEXT, "
                          "realized REAL, stats TEXT, PRIMARY KEY(chain, address))")
+        # 每笔仓位都存下来（它买入那一刻的特征 + 它自己的收益 + 跟单收益），以后可以拿来训练选币
+        await db.execute("CREATE TABLE IF NOT EXISTS autopsy_trades (chain TEXT, wallet TEXT, token TEXT, symbol TEXT, "
+                         "t_buy REAL, own REAL, hold_min REAL, x TEXT, fol TEXT, PRIMARY KEY(chain, wallet, token, t_buy))")
         sections = []
         for chain in chains:
             cands = await self.candidates(chain, top)
@@ -261,17 +271,44 @@ class Autopsy:
                 st = wallet_summary(trs)
                 rows.append((addr, src, realized, st))
                 all_trs += [{**t, "src": src} for t in trs]
+                await db.executemany(
+                    "INSERT OR REPLACE INTO autopsy_trades(chain,wallet,token,symbol,t_buy,own,hold_min,x,fol) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    [(chain, addr, t["token"], t["symbol"], t["t_buy"], t["own"], t["hold_min"],
+                      json.dumps(t["x"], default=str), json.dumps(t["fol"])) for t in trs])
                 await db.execute("INSERT OR REPLACE INTO autopsy(chain,address,ts,source,realized,stats) VALUES(?,?,?,?,?,?)",
                                  (chain, addr, time.time(), src, realized, json.dumps(st)))
+            sections.append(await self.learn_report(chain, rows, all_trs))
             sections.append(self.report(chain, rows, all_trs, cost))
         await db.kv_set("autopsy_report", {"ts": time.time(), "sections": sections})
         return sections
+
+    async def learn_report(self, chain: str, rows: list, trs: list[dict]) -> str:
+        """主要部分：它们在什么时机买什么样的币；哪些特征分得出好坏；学成规则后在全部币上回测。"""
+        from .autopsy_learn import baseline, candidate_rules, profile, separating, test_rules
+        name = CHAINS[chain].name
+        if not trs:
+            return f"<b>{name}</b>：没拿到可用的数据（钱包最近 {LOOKBACK_DAYS} 天没有卖完的仓位，或 K 线取不到）"
+        L = [f"🧠 <b>{name}：学高收益地址的买币逻辑</b>（{len(rows)} 个钱包、{len(trs)} 笔已卖完的仓位，最近 {LOOKBACK_DAYS} 天）"]
+        L.append("<b>1. 它们买入那一刻，币是什么样的</b>")
+        L += profile(trs)
+        sep = separating(trs)
+        if sep:
+            L.append("<b>2. 同样是它们挑的币，哪些特征分得出赚钱的单和亏钱的单</b>（胜率 = 赚 30% 以上的比例）")
+            L += sep
+        rules = candidate_rules(trs)
+        if rules:
+            L.append(f"<b>3. 学成规则，放到机器人最近 {LOOKBACK_DAYS} 天见过的全部币上回测</b>"
+                     "（规则 = 赚钱的单在这个特征上的中间一半范围）")
+            L += test_rules(rules, await baseline(self.app, chain, LOOKBACK_DAYS))
+        L.append("（只是研究结果，没改任何买卖规则。✅ 的规则可以先放进观察模式验证，再决定要不要用）")
+        return "\n".join(L)
 
     def report(self, chain: str, rows: list[tuple[str, str, float, dict]], trs: list[dict], cost: float) -> str:
         name = CHAINS[chain].name
         if not trs:
             return f"<b>{name}</b>：没拿到可用的数据（钱包最近 {LOOKBACK_DAYS} 天没有卖完的仓位，或 K 线取不到）"
-        L = [f"🔬 <b>{name} 高收益地址解剖</b>：{len(rows)} 个钱包、{len(trs)} 笔已卖完的仓位"
+        L = [f"🔬 <b>{name}：跟着它们买能分到多少</b>：{len(rows)} 个钱包、{len(trs)} 笔已卖完的仓位"
              f"（最近 {LOOKBACK_DAYS} 天；跟单收益已扣一买一卖成本 {cost * 100:.0f}%）"]
         own = [t["own"] for t in trs]
         L.append(f"<b>1. 它们自己</b>：每笔平均 {_avg(own) * 100:+.0f}%、中位 {_med(own) * 100:+.0f}%、"
