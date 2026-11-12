@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("memebot.intel")
 
-INTEL_KEYS = ("dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n",
-              "same_funder_n", "tg_members", "tg_growth_h")
+INTEL_KEYS = ("dev_tokens_n", "dev_best_mcap", "dev_good_n", "dev_dead_n", "whale_n", "smart_hold_n", "fresh_top_n",
+              "old_top_n", "sus_top_n", "same_funder_n", "tg_members", "tg_growth_h")
 WHALE_NATIVE = {"solana": 100.0, "bsc": 10.0, "ethereum": 5.0, "base": 5.0}
 
 
@@ -40,7 +40,7 @@ def _native(v: Any, chain: str) -> float:
     return x
 
 
-_logged_holder = False
+_logged_holder = False      # 每次启动只在日志里记一次字段名和样例（核对单位用）
 
 
 def holder_quality(holders: list[dict], chain: str, top: int = 20) -> dict:
@@ -52,9 +52,19 @@ def holder_quality(holders: list[dict], chain: str, top: int = 20) -> dict:
     if not _logged_holder:
         _logged_holder = True
         log.info("GMGN 前 100 持有人字段：%s", sorted(hs[0].keys())[:60])
-    whale = smart = fresh = 0
+        log.info("GMGN 持有人样例：native_balance=%s created_at=%s is_new=%s is_suspicious=%s",
+                 [h.get("native_balance") for h in hs[:3]], [h.get("created_at") for h in hs[:3]],
+                 [h.get("is_new") for h in hs[:3]], [h.get("is_suspicious") for h in hs[:3]])
+    whale = smart = fresh = old = sus = 0
+    now = time.time()
     funders: Counter = Counter()
     for h in hs:
+        ca = f(h.get("created_at"))
+        ca = ca / 1000 if ca > 1e12 else ca
+        if ca and now - ca > 180 * 86400:        # 钱包建了半年以上的老钱包
+            old += 1
+        if h.get("is_suspicious") in (True, 1, "1", "true"):
+            sus += 1
         tags = " ".join(str(t).lower() for t in (h.get("maker_token_tags") or []) + (h.get("tags") or []))
         nb = h.get("native_balance", h.get("sol_balance", h.get("balance_native")))
         if nb is not None and _native(nb, chain) >= WHALE_NATIVE.get(chain, 10):
@@ -67,27 +77,29 @@ def holder_quality(holders: list[dict], chain: str, top: int = 20) -> dict:
         src = dig(nt, "address", "from_address", "from", default="") if isinstance(nt, dict) else ""
         if src:
             funders[src] += 1
-    return {"whale_n": whale, "smart_hold_n": smart, "fresh_top_n": fresh,
+    return {"whale_n": whale, "smart_hold_n": smart, "fresh_top_n": fresh, "old_top_n": old, "sus_top_n": sus,
             "same_funder_n": max(funders.values()) if funders else 0}
 
 
-MCAP_KEYS = ("ath_market_cap", "ath_mc", "max_market_cap", "history_highest_market_cap", "highest_market_cap",
-             "market_cap", "usd_market_cap", "mc", "marketcap")
+MCAP_KEYS = ("token_ath_mc", "ath_market_cap", "ath_mc", "max_market_cap", "history_highest_market_cap", "highest_market_cap",
+             "market_cap", "marcket_cap", "usd_market_cap", "mc", "marketcap")
+DEAD_KEYS = ("liquidity_less_4k",)      # GMGN：池子只剩不到 $4K（基本死了 / 撤了）
 
 
 ADDR_KEYS = ("address", "token_address", "mint", "token", "ca")
 
 
 def dev_stats(rows: list[dict], exclude: str = "") -> dict:
-    """项目方以前发过的币（不算现在这个）→ 发过几个、最好的一个涨到多少市值、有几个做到 $50 万以上。"""
+    """项目方以前发过的币（不算现在这个）→ 发过几个、最好的一个涨到多少市值、有几个做到 $50 万以上、几个已经死了。"""
     ex = (exclude or "").lower()
     rows = [r for r in rows if not ex or all(str(r.get(k) or "").lower() != ex for k in ADDR_KEYS)]
-    best, good = 0.0, 0
+    best, good, dead = 0.0, 0, 0
     for r in rows:
         m = max((f(r.get(k)) for k in MCAP_KEYS), default=0.0)
         best = max(best, m)
         good += int(m >= 500_000)
-    return {"dev_tokens_n": len(rows), "dev_best_mcap": best, "dev_good_n": good}
+        dead += int(any(r.get(k) in (True, 1, "1", "true") for k in DEAD_KEYS))
+    return {"dev_tokens_n": len(rows), "dev_best_mcap": best, "dev_good_n": good, "dev_dead_n": dead}
 
 
 class Intel:
@@ -128,7 +140,7 @@ class Intel:
             log.info("GMGN 项目方发币记录字段：%s", sorted(rows[0].keys())[:60])
         if not isinstance(d, (dict, list)):
             return {}
-        rows = [{k: r.get(k) for k in ADDR_KEYS + MCAP_KEYS if k in r} for r in rows if isinstance(r, dict)]
+        rows = [{k: r.get(k) for k in ADDR_KEYS + MCAP_KEYS + DEAD_KEYS if k in r} for r in rows if isinstance(r, dict)]
         if len(self._dev) > 20000:
             self._dev.clear()
         self._dev[key] = (time.time(), rows)

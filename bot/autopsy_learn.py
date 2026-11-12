@@ -17,6 +17,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from .analysis.intel import INTEL_KEYS
 from .utils import f, fmt_usd
 
 if TYPE_CHECKING:
@@ -56,8 +57,7 @@ BASE_MAP = {"age_min": lambda ft: f(ft.get("age_hours")) * 60 if ft.get("age_hou
             "chg60": lambda ft: f(ft.get("change_1h")) / 100 if ft.get("change_1h") is not None else None}
 SNAP_KEYS = ("holders", "top10_pct", "bundle_held_pct", "smart", "liquidity", "has_x", "has_web", "score",
              "fresh_pct", "bot_pct", "rat_trade_pct", "cabal_pct", "dev_held_pct", "volume_1h", "change_1h",
-             "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n",
-             "tg_members", "tg_growth_h")
+             *INTEL_KEYS)
 
 
 def _med(xs: list[float]) -> float:

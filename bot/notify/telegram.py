@@ -210,10 +210,11 @@ class Telegram:
             bg.append("项目方以前没发过别的币")
         elif rep.get("dev_tokens_n") is not None:
             bg.append(f"项目方以前发过 {rep['dev_tokens_n']} 个币、最好的涨到 {fmt_usd(rep.get('dev_best_mcap') or 0)}"
-                      f"、{rep.get('dev_good_n', 0)} 个做到 $50 万")
+                      f"、{rep.get('dev_good_n', 0)} 个做到 $50 万、{rep.get('dev_dead_n', 0)} 个已经死了")
         if rep.get("whale_n") is not None:
-            bg.append(f"前 20 大户 {rep['whale_n']} 个、聪明钱 {rep.get('smart_hold_n', 0)} 个、新钱包 {rep.get('fresh_top_n', 0)} 个、"
-                      f"同一出资人最大一伙 {rep.get('same_funder_n', 0)} 个")
+            bg.append(f"前 20 持有人：大户 {rep['whale_n']} 个、聪明钱 {rep.get('smart_hold_n', 0)} 个、"
+                      f"半年以上老钱包 {rep.get('old_top_n', 0)} 个、新钱包 {rep.get('fresh_top_n', 0)} 个、"
+                      f"GMGN 标可疑 {rep.get('sus_top_n', 0)} 个、同一出资人最大一伙 {rep.get('same_funder_n', 0)} 个")
         if rep.get("tg_members") is not None:
             bg.append(f"TG {rep['tg_members']} 人" + (f"（每小时 {rep['tg_growth_h']:+g}）" if rep.get("tg_growth_h") is not None else ""))
         elif rep.get("tg_link") == 0:

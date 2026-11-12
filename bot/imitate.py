@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from .autopsy_learn import kline_features
 from .model import auc, fit, score
+from .analysis.intel import INTEL_KEYS
 from .utils import f
 
 if TYPE_CHECKING:
@@ -42,14 +43,14 @@ PREFIX = "学来的打法"
 NAMES = ["age_min", "mcap", "chg5", "chg15", "chg60", "run_up", "dd", "vol5", "holders", "top10_pct",
          "bundle_held_pct", "smart", "liquidity", "has_x", "score",
          # 11-12 加的背景信息：项目方历史战绩、大户质量、Telegram 社区（新数据才有，旧数据留空）
-         "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n",
-         "tg_members", "tg_growth_h"]
+         *INTEL_KEYS]
 LABELS = {"age_min": "发币多久", "mcap": "市值", "chg5": "前 5 分钟涨跌", "chg15": "前 15 分钟涨跌",
           "chg60": "前 1 小时涨跌", "run_up": "1 小时内已拉", "dd": "离高点回撤", "vol5": "前 5 分钟成交额",
           "holders": "持有人", "top10_pct": "前 10 持仓", "bundle_held_pct": "捆绑", "smart": "聪明钱数",
           "liquidity": "流动性", "has_x": "推特", "score": "代币评分", "dev_tokens_n": "项目方发过几个币",
           "dev_best_mcap": "项目方最好的币市值", "dev_good_n": "项目方做到 50 万的币", "whale_n": "大户数",
           "smart_hold_n": "前 20 里聪明钱", "fresh_top_n": "前 20 里新钱包", "same_funder_n": "同一出资人最大一伙",
+          "dev_dead_n": "项目方死掉的币", "old_top_n": "前 20 里老钱包", "sus_top_n": "前 20 里可疑钱包",
           "tg_members": "TG 人数", "tg_growth_h": "TG 每小时增长"}
 GATE_KEYS = ("age_min", "mcap", "run_up", "chg60")
 GOOD = 0.15                # 晚 30 秒跟进、扣成本后赚 15% 以上算"好的买入"
@@ -234,8 +235,7 @@ class Imitator:
     def features_now(self, candles: list[dict], rep: dict, x0: dict, now: float) -> dict:
         x = kline_features(candles, now + 31, None, None, f(rep.get("price")))   # +31：把最新一根 K 线也算进"之前"
         x.update(x0)
-        for k in ("holders", "top10_pct", "bundle_held_pct", "liquidity", "score", "dev_tokens_n", "dev_best_mcap",
-                  "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n", "tg_members", "tg_growth_h"):
+        for k in ("holders", "top10_pct", "bundle_held_pct", "liquidity", "score", *INTEL_KEYS):
             if rep.get(k) is not None:
                 x[k] = f(rep[k])
         x["smart"] = len(rep.get("smart_buyers") or [])

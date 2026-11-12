@@ -13,16 +13,24 @@ def test_holder_quality():
             "maker_token_tags": ["fresh_wallet"] if i in (5, 6) else [],
             "native_transfer": {"from_address": "FUNDER" if i < 4 else f"F{i}"}} for i in range(10)]
     q = holder_quality(hs, "solana")
-    assert q == {"whale_n": 3, "smart_hold_n": 1, "fresh_top_n": 2, "same_funder_n": 4}
+    assert q == {"whale_n": 3, "smart_hold_n": 1, "fresh_top_n": 2, "old_top_n": 0, "sus_top_n": 0, "same_funder_n": 4}
+    hs[1]["created_at"] = time.time() - 400 * 86400
+    hs[2]["is_suspicious"] = True
+    q = holder_quality(hs, "solana")
+    assert q["old_top_n"] == 1 and q["sus_top_n"] == 1
     assert holder_quality([], "solana") == {}
 
 
 def test_dev_stats_and_intel():
     st = dev_stats([{"ath_market_cap": "2000000"}, {"market_cap": 30000}, {"usd_market_cap": 600000}])
-    assert st == {"dev_tokens_n": 3, "dev_best_mcap": 2e6, "dev_good_n": 2}
+    assert st == {"dev_tokens_n": 3, "dev_best_mcap": 2e6, "dev_good_n": 2, "dev_dead_n": 0}
+    # GMGN 实际字段：token_address、token_ath_mc、liquidity_less_4k
+    st = dev_stats([{"token_address": "A", "token_ath_mc": "900000", "liquidity_less_4k": True},
+                    {"token_address": "B", "market_cap": 1000, "liquidity_less_4k": True}])
+    assert st == {"dev_tokens_n": 2, "dev_best_mcap": 9e5, "dev_good_n": 1, "dev_dead_n": 2}
     # 现在这个币不算项目方的"以前的战绩"
     assert dev_stats([{"address": "NOW", "market_cap": 2e6}, {"address": "OLD", "market_cap": 1e4}], "now") == \
-        {"dev_tokens_n": 1, "dev_best_mcap": 1e4, "dev_good_n": 0}
+        {"dev_tokens_n": 1, "dev_best_mcap": 1e4, "dev_good_n": 0, "dev_dead_n": 0}
 
     async def go():
         calls = {"dev": 0, "tg": 0}

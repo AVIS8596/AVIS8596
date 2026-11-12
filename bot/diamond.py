@@ -28,6 +28,7 @@ from .autopsy_learn import kline_features
 from .chains import norm_addr
 from .imitate import _clamp, _med, _q, compare_sources
 from .model import auc, fit, score
+from .analysis.intel import INTEL_KEYS
 from .utils import f, fmt_usd
 
 if TYPE_CHECKING:
@@ -39,8 +40,7 @@ PREFIX = "钻石手打法"
 INSIDER = {"sniper", "bundler", "rat_trader", "dev"}
 NAMES = ["age_min", "mcap", "chg60", "holders", "top10_pct", "bundle_held_pct", "smart", "liquidity", "has_x",
          "score", "volume_1h", "buys_1h", "sells_1h", "fresh_pct", "bot_pct",
-         "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n", "smart_hold_n", "fresh_top_n", "same_funder_n",
-         "tg_members", "tg_growth_h"]
+         *INTEL_KEYS]
 GATE_KEYS = ("age_min", "mcap", "chg60")
 LABELS = {"age_min": "发币多久（分钟）", "mcap": "市值", "chg60": "前 1 小时涨跌", "run_up": "1 小时内已拉",
           "holders": "持有人", "top10_pct": "前 10 持仓%", "bundle_held_pct": "捆绑%", "smart": "聪明钱数",
@@ -103,8 +103,7 @@ def base_x(ft: dict) -> dict:
     if ft.get("change_1h") is not None:
         x["chg60"] = f(ft["change_1h"]) / 100
     for k in ("mcap", "holders", "top10_pct", "bundle_held_pct", "liquidity", "score", "volume_1h", "buys_1h",
-              "sells_1h", "fresh_pct", "bot_pct", "dev_tokens_n", "dev_best_mcap", "dev_good_n", "whale_n",
-              "smart_hold_n", "fresh_top_n", "same_funder_n", "tg_members", "tg_growth_h"):
+              "sells_1h", "fresh_pct", "bot_pct", *INTEL_KEYS):
         if ft.get(k) is not None:
             x[k] = f(ft[k])
     sm = ft.get("smart")
