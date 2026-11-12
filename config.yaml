@@ -333,3 +333,12 @@ learning:
 safety:
   tg_backup: true                 # 每天把精简版数据库备份发到 Telegram（异地保存，服务器坏了能恢复）
   withdraw_above_native: {}       # 实盘钱包余额超过多少就提醒转出，如 { solana: 3, bsc: 0.5 }（空 = 不提醒）
+
+# 对照仓（11-12）：只要不是阴谋盘 / 貔貅 / 池子能撤 / 刷量盘，分析到的币随机抽一部分直接买（¼ 仓位），多收集真实数据，
+# 也当对照组（卖法和原有来源一样用高手规则）：和跟单 / 新币 / 早期建仓比，看挑币有没有比随便买好。见 bot/control.py
+control:
+  enabled: true
+  sample_rate: 0.2      # 分析过的币随机抽 20%（再过只排硬坑的检查）
+  max_per_day: 40
+  max_per_hour: 3
+  max_open: 12          # 同时最多拿 12 个，不挤占其他来源的名额

@@ -414,7 +414,7 @@ class Trader:
                 if rep is None:
                     return
                 probe = PROBE in reason            # 主动建仓那边已经判定为试探仓
-                if reason.startswith(FLOW):        # 买卖力量打法：只排硬性的坑（阴谋盘 / 貔貅 / 池子能撤 / 捆绑多……）
+                if reason.startswith((FLOW, "对照仓")):   # 买卖力量打法 / 对照仓：只排硬性的坑（阴谋盘 / 貔貅 / 池子能撤 / 捆绑多……）
                     why = await self.check_lite(chain, token, rep, reason)
                     if why:
                         await self.skip(chain, token, rep, reason, why)
