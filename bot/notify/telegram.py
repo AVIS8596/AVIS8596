@@ -453,21 +453,30 @@ class Telegram:
             elif sub == "now":
                 await self.send("开始学习：用最近 4 天的结果档案和早期观察样本，逐个参数试放宽 / 收紧一档……")
                 msgs = await br.tune_once(force=True)
-                await self.send("\n".join(msgs) or "没有结果")
+                await self.send("\n".join(msgs) or await br.status_text())   # 没有新建议：列出还在等确认的
             elif sub == "apply":
                 ps = await br.pending()
                 if not ps:
                     await self.send("没有待确认的建议")
                     return
                 idx = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
-                if not 1 <= idx <= len(ps):       # 必须带编号：免得同意错了哪一条
-                    await self.send("请带上建议的编号，比如 /tune apply 1：\n"
-                                    + "\n".join(f"{i}. {e(p['why'])}" for i, p in enumerate(ps, 1)))
+                pend = next((p for p in ps if int(p.get("id") or 0) == idx), None)
+                if not pend:                      # 必须带编号：免得同意错了哪一条
+                    await self.send("请带上建议的编号，比如 /tune apply " + str(ps[0]["id"]) + "：\n"
+                                    + "\n".join(f"{p['id']}. {e(p['why'])}" for p in ps))
                     return
-                pend = ps.pop(idx - 1)
                 await br.apply(pend["key"], pend["new"], pend["why"])
-                await self.app.db.kv_set("tune_pending", ps or None)
+                await self.app.db.kv_set("tune_pending", [p for p in ps if p is not pend] or None)
                 await self.send("✅ 已采纳：" + e(pend["why"]))
+            elif sub == "no":
+                idx = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
+                hit = await br.reject(idx)
+                if not hit:
+                    ps = await br.pending()
+                    await self.send("没有这个编号的建议。" + ("待确认的：\n" + "\n".join(f"{p['id']}. {e(p['why'])}" for p in ps)
+                                                       if ps else "现在没有待确认的建议"))
+                    return
+                await self.send("🚫 已否决，7 天内不再提：" + e(hit["why"]))
             elif sub == "reset":
                 n = await br.reset()
                 await self.send(f"已恢复 {n} 个参数为配置文件里的值")

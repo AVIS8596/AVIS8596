@@ -210,17 +210,23 @@ def test_entry_cases_count_dead_and_use_shadow(tmp_path):
 
 
 def test_tune_pending_multiple(tmp_path):
-    """同时有好几条调参建议：各自有编号，同一参数的新建议替换旧的。"""
+    """同时有好几条调参建议：编号固定；同一条不重复提醒；否决过的 7 天内不再提。"""
     async def go():
         db = DB(tmp_path / "p.db")
         await db.open()
         br = Brain(SimpleNamespace(db=db, cfg=Cfg({"trading": {}})))
-        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -25, "why": "止损"}) == 1
-        assert await br.add_pending({"key": "trading.min_smart", "new": 1, "why": "聪明钱"}) == 2
-        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -20, "why": "止损2"}) == 2
+        await db.kv_set("tune_pending", [{"key": "old", "new": 1, "why": "旧格式"}])     # 没有编号的旧数据
+        assert [p["id"] for p in await br.pending()] == [1]
+        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -25, "why": "止损", "ts": 1}) == 2
+        assert await br.add_pending({"key": "trading.min_smart", "new": 1, "why": "聪明钱", "ts": 1}) == 3
+        assert await br.add_pending({"key": "trading.min_smart", "new": 1, "why": "聪明钱2", "ts": 2}) == 0   # 一样的：不再提醒
+        assert await br.add_pending({"key": "exit.stop_loss_pct", "new": -20, "why": "止损2", "ts": 1}) == 4
         ps = await br.pending()
-        assert [p["why"] for p in ps] == ["聪明钱", "止损2"]
-        await db.kv_set("tune_pending", {"key": "x", "new": 1, "why": "旧格式"})
-        assert len(await br.pending()) == 1
+        assert [(p["id"], p["why"]) for p in ps] == [(1, "旧格式"), (3, "聪明钱2"), (4, "止损2")]   # 编号不跟着变
+        hit = await br.reject(3)
+        assert hit and hit["key"] == "trading.min_smart" and [p["id"] for p in await br.pending()] == [1, 4]
+        assert await br.add_pending({"key": "trading.min_smart", "new": 1, "why": "又来", "ts": 3}) == 0   # 否决过：不再提
+        assert await br.add_pending({"key": "trading.min_smart", "new": 3, "why": "收紧", "ts": 3}) == 5   # 不同的改法照常提
+        assert await br.reject(99) is None
         await db.close()
     asyncio.run(go())
