@@ -492,8 +492,10 @@ class Telegram:
             await self.send(await diag_text(self.app, min(max(days, 1), 10)))
         elif cmd == "/funnel":
             from ..trade.review import funnel_text
-            days = int(args[0]) if args and args[0].isdigit() else 4
-            await self.send(await funnel_text(self.app, min(max(days, 1), 7)))
+            alias = {"sol": "solana", "solana": "solana", "bsc": "bsc", "bnb": "bsc", "eth": "ethereum", "base": "base"}
+            chain = next((alias[x.lower()] for x in args if x.lower() in alias), "")
+            days = next((int(x) for x in args if x.isdigit()), 4)
+            await self.send(await funnel_text(self.app, min(max(days, 1), 7), chain))
         elif cmd == "/dynamic":
             await self._dynamic(args)
         elif cmd == "/pause":

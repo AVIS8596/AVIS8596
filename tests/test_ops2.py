@@ -754,6 +754,16 @@ def test_funnel_shows_where_volume_goes(tmp_path):
             assert td["sig"] == 3 and td["gone"] == 0 and not td["buys"]
             txt = await funnel_text(app, 2)
             assert "其中 40 条来自现在已不再监听的 1 个钱包" in txt and "买入 3 笔" in txt and "买入 0 笔" in txt
+            assert yd["toks"] == 41 and yd["multi"] == 1 and "2 个以上聪明钱一起买的 1 个" in txt   # 只有 TA 是 2 个钱包
+            # 只看一条链：BSC 的信号 / 买入不混进 Solana
+            await db.execute("INSERT INTO signals(ts,chain,wallet,token,side,tx) VALUES(?,?,?,?,?,?)",
+                             (y + 900, "bsc", "B1", "0xb", "buy", "txb"))
+            await db.execute("INSERT INTO positions(chain,token,symbol,status,dry_run,reason,cost_usd,realized_usd,"
+                             "opened_at) VALUES('bsc','0xb','B','open',1,'跟单',10,0,?)", (y + 60,))
+            sol = (await funnel(app, 2, "solana"))[0]
+            assert sol["sig"] == 44 and sum(sol["buys"].values()) == 3
+            assert (await funnel(app, 2))[0]["sig"] == 45
+            assert "只看 Solana" in await funnel_text(app, 2, "solana")
         finally:
             await db.close()
     asyncio.run(go())
