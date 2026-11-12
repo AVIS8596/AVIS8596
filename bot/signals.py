@@ -156,6 +156,14 @@ class SignalHub:
             t.add_done_callback(self._tasks.discard)
         elif solo_why:
             await self.app.trader.skip(s.chain, s.token, rep, "跟单", solo_why)
+        elif is_cluster:
+            # 以前这种情况什么都不记，/funnel 里就成了"没留下拦截记录"，查不出为什么没买
+            mins = float(self.cfg.get("trading.copy_min_wallet_score", 55))
+            await self.app.trader.skip(
+                s.chain, s.token, rep, "跟单",
+                f"共振但评分不够：{len(cluster)} 个聪明钱一起买，但这次带单的钱包评分 {float(w['score'] or 0):.0f}"
+                f"（跟单要 ≥ {mins:g}），代币评分 {rep.get('score')}（共振买入要 ≥ "
+                f"{float(self.cfg.get('trading.auto_min_score', 75)):g}）")
 
     async def _confirm(self, s: Signal, rep: dict, reason: str) -> None:
         await self.confirm_and_buy(s.chain, s.token, rep, reason, watch_wallet=s.wallet, since=s.ts)

@@ -764,6 +764,7 @@ def test_funnel_shows_where_volume_goes(tmp_path):
             assert sol["sig"] == 44 and sum(sol["buys"].values()) == 3
             assert (await funnel(app, 2))[0]["sig"] == 45
             assert "只看 Solana" in await funnel_text(app, 2, "solana")
+            assert sol["mact"] == 1 and sol["mfate"] == {"没留下拦截记录": 1}      # TA：W1、W2 一起买，没买也没拦截记录
         finally:
             await db.close()
     asyncio.run(go())

@@ -187,6 +187,23 @@ async def funnel(app: "App", days: int = 3, chain: str = "") -> list[dict]:
         # 有几个币是 2 个以上聪明钱一起买的（单个钱包买的要过"快手 / 战绩差"那关，2 个以上直接进风控）
         multi = await db.fetchone("SELECT COUNT(*) n FROM (SELECT token FROM signals WHERE side='buy' AND ts>=? AND ts<?"
                                   + cw + " GROUP BY chain, token HAVING COUNT(DISTINCT wallet)>=2)", (a, b) + ca)
+        # 只看现在仍在监听的钱包：2 个以上一起买的币，最后去哪了（买了 / 被哪条拦 / 没留下记录）
+        mrows = await db.fetchall(
+            "SELECT s.chain, s.token FROM signals s JOIN wallets w ON w.chain=s.chain AND w.address=s.wallet "
+            "WHERE s.side='buy' AND s.ts>=? AND s.ts<? AND w.status IN ('active','manual')" + sw
+            + " GROUP BY s.chain, s.token HAVING COUNT(DISTINCT s.wallet)>=2", (a, b) + ca)
+        mfate: Counter = Counter()
+        if chain and mrows:
+            mset = {r["token"] for r in mrows}
+            bought = {r["token"] for r in await db.fetchall(
+                "SELECT token FROM positions WHERE chain=? AND opened_at>=? AND opened_at<?", (chain, a, b + 3600))}
+            last: dict[str, str] = {}
+            for r in await db.fetchall("SELECT token, cat FROM skipped WHERE chain=? AND ts>=? AND ts<? ORDER BY ts",
+                                       (chain, a, b + 3600)):
+                if r["token"] in mset:
+                    last[r["token"]] = r["cat"] or "其他"
+            for tk in mset:
+                mfate["买了" if tk in bought else (last.get(tk) or "没留下拦截记录")] += 1
         toks = await db.fetchone("SELECT COUNT(DISTINCT chain || token) n FROM signals WHERE side='buy' AND ts>=? AND ts<?"
                                  + cw, (a, b) + ca)
         seen: dict[str, float] = {}
@@ -217,7 +234,7 @@ async def funnel(app: "App", days: int = 3, chain: str = "") -> list[dict]:
         out.append({"start": a, "sig": sig["n"], "wallets": sig["w"], "gone": gone["n"], "gone_w": gone["w"],
                     "top10": sum(r["n"] for r in top), "chains": [(r["chain"], r["n"]) for r in chains],
                     "seen": len(seen), "high": sum(1 for v in seen.values() if v >= cut), "cut": cut,
-                    "toks": toks["n"] if toks else 0, "multi": multi["n"] if multi else 0, "skips": skips, "buys": buys, "bychain": bychain, "pnl": pnl, "open": still})
+                    "toks": toks["n"] if toks else 0, "mfate": mfate, "mact": len(mrows), "multi": multi["n"] if multi else 0, "skips": skips, "buys": buys, "bychain": bychain, "pnl": pnl, "open": still})
     return out
 
 
@@ -239,6 +256,10 @@ async def funnel_text(app: "App", days: int = 3, chain: str = "") -> str:
             lines.append("  按链：" + "、".join(f"{CHAINS[c].name if c in CHAINS else c} {n:,}" for c, n in d["chains"]))
         if d.get("toks"):
             lines.append(f"  聪明钱买的币 {d['toks']:,} 个，其中 2 个以上聪明钱一起买的 {d['multi']:,} 个")
+        mf = d.get("mfate") or {}
+        if mf:
+            lines.append(f"  其中现在仍在监听的 2 个以上钱包一起买的 {d['mact']:,} 个，去向："
+                         + "、".join(f"{k} {v}" for k, v in mf.most_common(8)))
         lines.append(f"  分析过的币 {d['seen']:,} 个，评分 ≥ {d['cut']:g} 的 {d['high']} 个")
         for src, c in sorted(d["skips"].items(), key=lambda kv: -sum(kv[1].values())):
             lines.append(f"  {src}被拦 {sum(c.values()):,} 个币：" + "、".join(f"{k} {n}" for k, n in c.most_common(4)))

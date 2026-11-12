@@ -26,7 +26,7 @@ SKIP_CATS = [("池子没烧", "池子能被撤"), ("论证：叙事分", "强叙
              ("跟这个钱包", "快手/战绩差钱包"), ("KOL 单独", "KOL 单独买入"), ("致命风险", "安全风险"), ("流动性", "流动性低"), ("捆绑", "捆绑多"),
              ("埋伏", "埋伏多"), ("前10", "筹码集中"), ("卖出税", "卖出税高"), ("代币上线", "上线太久"),
              ("1 小时已涨", "已经涨太多"), ("市值虚高", "市值虚高"), ("卖盘", "卖压大"), ("持有人", "持有人太少"),
-             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过")]
+             ("从 2 小时内高点", "接飞刀"), ("从发币价", "涨幅已兑现"), ("最近 5 分钟", "正在砸盘"), ("项目方", "坏项目方"), ("同名币", "同名币"), ("下单前复查", "复查拿不到数据"), ("团伙盘", "团伙盘"), ("阴谋地址持有", "阴谋地址多"), ("带单钱包体检", "钱包体检不过"), ("共振但评分不够", "共振但评分不够")]
 
 
 EXPERIMENT = "新币实验仓"
@@ -341,9 +341,10 @@ class Trader:
         if why.startswith(NOT_QUALITY):
             return
         db = self.app.db
-        if await db.fetchone("SELECT 1 FROM skipped WHERE chain=? AND token=? AND ts>?",
-                             (chain, token, time.time() - 1800)):
-            return   # 同一个币半小时内只记一次
+        cat = skip_cat(why)
+        if await db.fetchone("SELECT 1 FROM skipped WHERE chain=? AND token=? AND cat=? AND ts>?",
+                             (chain, token, cat, time.time() - 1800)):
+            return   # 同一个币、同一个原因半小时内只记一次（换了原因要记：比如先是单个钱包被拦，后来 2 个一起买又被别的拦）
         price = float(rep.get("price") or 0)
         if price <= 0:
             try:
@@ -352,7 +353,7 @@ class Trader:
                 price = 0.0
         await db.execute(
             "INSERT INTO skipped(ts,chain,token,symbol,trigger,cat,reason,price) VALUES(?,?,?,?,?,?,?,?)",
-            (time.time(), chain, token, rep.get("symbol", ""), trigger, skip_cat(why), why, price))
+            (time.time(), chain, token, rep.get("symbol", ""), trigger, cat, why, price))
 
     def tier(self, rep: dict, wallets: list[str]) -> str:
         """按标的质量分档：best 优质 / good 较好 / normal 一般。"""
