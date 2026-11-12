@@ -196,10 +196,12 @@ async def funnel(app: "App", days: int = 3) -> list[dict]:
             src = FUNNEL_SRC.get(source_of(r["trigger"]), "其他")
             skips.setdefault(src, Counter())[r["cat"]] += r["n"]
         buys: Counter = Counter()
+        bychain: Counter = Counter()
         pnl, still = 0.0, 0
-        for p in await db.fetchall("SELECT reason, status, cost_usd, realized_usd FROM positions WHERE opened_at>=? "
+        for p in await db.fetchall("SELECT chain, reason, status, cost_usd, realized_usd FROM positions WHERE opened_at>=? "
                                    "AND opened_at<? AND dry_run=?", (a, b, dry)):
             buys[source_of(p["reason"])] += 1
+            bychain[p["chain"]] += 1
             if p["status"] == "open":
                 still += 1
             else:
@@ -207,7 +209,7 @@ async def funnel(app: "App", days: int = 3) -> list[dict]:
         out.append({"start": a, "sig": sig["n"], "wallets": sig["w"], "gone": gone["n"], "gone_w": gone["w"],
                     "top10": sum(r["n"] for r in top), "chains": [(r["chain"], r["n"]) for r in chains],
                     "seen": len(seen), "high": sum(1 for v in seen.values() if v >= cut), "cut": cut,
-                    "skips": skips, "buys": buys, "pnl": pnl, "open": still})
+                    "skips": skips, "buys": buys, "bychain": bychain, "pnl": pnl, "open": still})
     return out
 
 
@@ -233,6 +235,10 @@ async def funnel_text(app: "App", days: int = 3) -> str:
         if n:
             tail = f"，已平仓的合计 {fmt_usd(d['pnl'])}" + (f"（还有 {d['open']} 笔持仓中）" if d["open"] else "")
             lines.append(f"  买入 {n} 笔：" + "、".join(f"{k} {v}" for k, v in d["buys"].most_common()) + tail)
+            bc = d.get("bychain") or {}
+            if bc:
+                lines.append("  买入按链：" + "、".join(f"{CHAINS[c].name if c in CHAINS else c} {v}"
+                                                   for c, v in bc.most_common()))
         else:
             lines.append("  买入 0 笔")
     lines.append("看法：信号少 = 源头的问题（钱包少 / 监听掉线）；信号多但被拦得多 = 看拦下那一类的影子单是赚是亏；"
