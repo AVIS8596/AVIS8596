@@ -26,7 +26,7 @@ def candle(ts, px):
 
 def test_build_and_follow():
     now = time.time()
-    t0 = now - 3600
+    t0 = (now - 3600) // 60 * 60 + 5            # 对齐到一分钟开头：晚 30 秒还在同一根 K 线里
     acts = [act("buy", "A", t0, 1.0, 100), act("sell", "A", t0 + 600, 2.0, 100), act("sell", "A", t0 + 900, 3.0, 150),
             act("buy", "B", t0, 1.0, 100), act("sell", "B", t0 + 60, 1.1, 50),        # B 只卖了一半：不算
             act("buy", "OLD", now - 10 * 86400, 1.0, 100), act("sell", "OLD", now - 9 * 86400, 2.0, 200)]
@@ -55,7 +55,7 @@ def test_autopsy_run(tmp_path):
         await db.open()
         try:
             now = time.time()
-            t0 = now - 7200
+            t0 = (now - 7200) // 60 * 60 + 5
 
             async def smartmoney(chain, n):
                 return [{"maker": "W1"}, {"maker": "W2"}]

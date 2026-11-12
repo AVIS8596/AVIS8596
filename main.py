@@ -136,6 +136,9 @@ async def run_bot(cfg) -> None:
         from bot.imitate import Imitator
         app.imitate = Imitator(app)
         jobs.append(("学来的打法", app.imitate.run))
+        from bot.diamond import Diamond
+        app.diamond = Diamond(app)
+        jobs.append(("钻石手打法", app.diamond.run))
         jobs.append(("学习高手", app.learner.run))
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)

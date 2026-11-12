@@ -158,7 +158,7 @@ async def daily_review(app: "App", start: float) -> str:
 
 MODE_TEXT = {"off": "已关闭", "shadow": "观察中，只记录不执行", "live": "已接管卖出"}
 FUNNEL_SRC = {"跟单": "跟单", "聪明钱共振+高评分": "跟单", "新币高评分": "新币", "新币实验仓": "新币", "早期建仓": "主动建仓", "早期实验仓": "主动建仓", "强叙事": "主动建仓",
-              "模型买入": "模型", "学来的打法": "学来的打法"}
+              "模型买入": "模型", "学来的打法": "学来的打法", "钻石手打法": "钻石手打法"}
 
 
 async def funnel(app: "App", days: int = 3, chain: str = "") -> list[dict]:

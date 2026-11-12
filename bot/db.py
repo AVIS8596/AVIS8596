@@ -197,8 +197,11 @@ class DB:
         if "sim_ret" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE skipped ADD COLUMN sim_ret REAL")    # 影子单：按真实卖出规则模拟的收益
         cur = await self.conn.execute("PRAGMA table_info(token_outcomes)")
-        if "sim_ret" not in {r[1] for r in await cur.fetchall()}:
+        tocols = {r[1] for r in await cur.fetchall()}
+        if "sim_ret" not in tocols:
             await self.conn.execute("ALTER TABLE token_outcomes ADD COLUMN sim_ret REAL")   # 影子采样：按真实卖出规则模拟的收益
+        if "p1440" not in tocols:
+            await self.conn.execute("ALTER TABLE token_outcomes ADD COLUMN p1440 REAL")     # 24 小时后的价格（钻石手打法学"能不能拿得住"）
         cur = await self.conn.execute("PRAGMA table_info(trades)")
         if "quote_price" not in {r[1] for r in await cur.fetchall()}:
             await self.conn.execute("ALTER TABLE trades ADD COLUMN quote_price REAL")    # 下单那一刻的报价

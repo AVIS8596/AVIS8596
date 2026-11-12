@@ -261,7 +261,6 @@ class Imitator:
 
     # ---------------- 报告：学到了什么 + 自己的成绩 + 和其他来源 / 现在的卖出规则对比
     async def text(self) -> str:
-        from .trade.sizing import source_of
         L = [f"🎓 <b>{PREFIX}</b>（从 GMGN 盈利地址的交易里自己学的买卖方式，模拟盘 ¼ 仓位单独记账）"]
         if not self.m:
             return L[0] + "\n还没学过：先跑一次 /autopsy go 收集数据，跑完会自动学"
@@ -284,29 +283,7 @@ class Imitator:
                          + (f"最高涨过 {ext['trailing_start_pct']:+.0f}% 后回撤 {ext['trailing_drop_pct']:.0f}% 卖；"
                             if ext["trailing_start_pct"] < 10000 else "")
                          + f"最长拿 {ext['max_hold_hours']:g} 小时（学自赚钱的单 {ext['_n'][0]} 笔、亏钱的单 {ext['_n'][1]} 笔）")
-        # ---- 自己的成绩 vs 同期其他来源
-        db = self.app.db
-        dry = int(bool(self.cfg.dry_run))
-        mine = await db.fetchall("SELECT * FROM positions WHERE reason LIKE ? AND dry_run=? ORDER BY opened_at",
-                                 (PREFIX + "%", dry))
-        if mine:
-            since = f(mine[0]["opened_at"])
-            allp = await db.fetchall("SELECT reason, status, cost_usd, realized_usd FROM positions WHERE opened_at>=? "
-                                     "AND dry_run=? AND status='closed'", (since, dry))
-            by: dict[str, list[float]] = {}
-            for p in allp:
-                c = f(p["cost_usd"])
-                if c > 0:
-                    by.setdefault(source_of(p["reason"]), []).append(f(p["realized_usd"]) / c - 1)
-            L.append(f"<b>成绩对比</b>（{time.strftime('%m-%d %H:%M', time.localtime(since))} 起，已平仓，扣过成本）")
-            n_open = sum(1 for p in mine if p["status"] == "open")
-            for src, rs in sorted(by.items(), key=lambda kv: (kv[0] != PREFIX, -len(kv[1]))):
-                L.append(f"  {'👉 ' if src == PREFIX else ''}{src}：{len(rs)} 笔，每笔平均 {sum(rs) / len(rs) * 100:+.1f}%、"
-                         f"中位 {_med(rs) * 100:+.0f}%、赚钱 {sum(1 for r in rs if r > 0) / len(rs) * 100:.0f}%")
-            if n_open:
-                L.append(f"  {PREFIX}还有 {n_open} 笔持仓中")
-        else:
-            L.append("还没有按学来的打法买过（买入判断检验合格、碰到合适的币才会买）")
+        L += await compare_sources(self.app, PREFIX)
         # ---- 卖出规则对比：机器人最近的真实入场，按两套卖出规则回放
         try:
             L += await self.exit_compare()
@@ -367,3 +344,30 @@ def _fmt(k: str, v: float) -> str:
     if k in ("run_up", "chg60", "chg5", "chg15", "dd"):
         return f"{v * 100:+.0f}%"
     return f"{v:.0f}"
+
+
+async def compare_sources(app: "App", prefix: str) -> list[str]:
+    """这个打法自己的单子 vs 同期其他买入来源（已平仓、扣过成本）。"""
+    from .trade.sizing import source_of
+    db = app.db
+    dry = int(bool(app.cfg.dry_run))
+    mine = await db.fetchall("SELECT opened_at, status FROM positions WHERE reason LIKE ? AND dry_run=? ORDER BY opened_at",
+                             (prefix + "%", dry))
+    if not mine:
+        return [f"还没有按{prefix}买过（买入判断检验合格、碰到合适的币才会买）"]
+    since = f(mine[0]["opened_at"])
+    allp = await db.fetchall("SELECT reason, status, cost_usd, realized_usd FROM positions WHERE opened_at>=? "
+                             "AND dry_run=? AND status='closed'", (since, dry))
+    by: dict[str, list[float]] = {}
+    for p in allp:
+        c = f(p["cost_usd"])
+        if c > 0:
+            by.setdefault(source_of(p["reason"]), []).append(f(p["realized_usd"]) / c - 1)
+    L = [f"<b>成绩对比</b>（{time.strftime('%m-%d %H:%M', time.localtime(since))} 起，已平仓，扣过成本）"]
+    for src, rs in sorted(by.items(), key=lambda kv: (kv[0] != prefix, -len(kv[1]))):
+        L.append(f"  {'👉 ' if src == prefix else ''}{src}：{len(rs)} 笔，每笔平均 {sum(rs) / len(rs) * 100:+.1f}%、"
+                 f"中位 {_med(rs) * 100:+.0f}%、赚钱 {sum(1 for r in rs if r > 0) / len(rs) * 100:.0f}%")
+    n_open = sum(1 for p in mine if p["status"] == "open")
+    if n_open:
+        L.append(f"  {prefix}还有 {n_open} 笔持仓中")
+    return L

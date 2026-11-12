@@ -28,6 +28,7 @@ HELP = """<b>命令列表</b>
 /me 你自己手动的实盘：画像、每笔期望、你买过机器人没买的币卡在哪，成交也算进实盘成本；/me add 链 地址 加别的钱包
 /golive 上实盘标准：6 项考核的进度、达标后的加钱计划；实盘期间对比实盘 vs 模拟盘
 /costs 实盘真实成本（滑点、失败率），模拟盘按它扣成本
+/diamond 钻石手打法：学靠一个币拿得住、赚几万 U 的人（他们什么时候买什么样的币、拿多久），模拟盘按学到的打法下单对比；/diamond go 立即找一轮
 /imitate 学来的打法：机器人从 GMGN 盈利地址的交易里自己学的买卖方式，学到了什么、自己的成绩、和其他来源 / 现在的卖出规则对比；/imitate train 立即重新学
 /autopsy [sol|bsc] [人数] 高收益地址解剖：GMGN 赚钱的地址，跟着它买的人能分到多少（晚 30/60/120 秒）、哪类钱包和单子跟得上（后台跑 1~2 小时，跑完自动发）；不带参数看上次结果
 /lag [天数] 延迟和实盘成本实测：比带单的聪明钱晚多少秒、这段时间涨了多少、晚到的单子是不是更亏；换成实盘小金额（Solana 0.05 SOL）后固定费用吃掉多少、模拟成绩还剩多少
@@ -78,7 +79,7 @@ MENU = [
     ("audit", "钱包地址：钱包体检（是不是项目方的号 / 老鼠仓）"), ("wallets", "[链]：监听的聪明钱"),
     ("model", "自己的选币模型：成绩和影子期表现"), ("tune", "自我学习：学到了哪些参数"),
     ("golive", "上实盘标准的进度"), ("backtest", "[天数]：回放回测卖出规则"), ("costs", "实盘真实成本"), ("lag", "[天数]：比聪明钱晚多少、换成实盘小金额还剩多少"),
-    ("imitate", "学来的打法：学到了什么、成绩对比"),
+    ("imitate", "学来的打法：学到了什么、成绩对比"), ("diamond", "钻石手打法：学拿得住的大赢家"),
     ("autopsy", "[sol/bsc] [人数]：高收益地址解剖，跟着买能分到多少"),
     ("me", "你自己手动实盘的画像和对照"), ("learn", "向高手学习 / 结果档案学习"),
     ("size", "查看 / 修改每笔买入金额"), ("pause", "暂停买入（止盈止损照常）"), ("resume", "恢复买入"),
@@ -413,6 +414,18 @@ class Telegram:
         elif cmd == "/golive":
             from ..golive import text as golive_text
             await self.send(await golive_text(self.app))
+        elif cmd == "/diamond":
+            dm = getattr(self.app, "diamond", None)
+            if not dm:
+                await self.send("GMGN 没启用，学不了")
+                return
+            if args and args[0].lower() == "go":
+                if dm.start():
+                    await self.send("💎 开始找钻石手：最近涨得最多的币，每个看盈利前 50 名（后台慢慢跑，大约 20~40 分钟，跑完自动发）")
+                else:
+                    await self.send("💎 正在找，跑完会自动发")
+                return
+            await self.send(await dm.text())
         elif cmd == "/imitate":
             im = getattr(self.app, "imitate", None)
             if not im:

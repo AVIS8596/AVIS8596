@@ -365,9 +365,12 @@ class PositionManager:
                 await db.execute("UPDATE positions SET high_price=? WHERE id=?", (px, p["id"]))
                 p["high_price"] = px
             dyn = dyn_state(p, dc, now) if mode == "live" else None
-            im = getattr(self.app, "imitate", None)
-            rules = im.exit_rules(p["chain"], self.exit_cfg) if im and str(p.get("reason") or "").startswith("学来的打法") else None
-            if rules:      # 学来的打法：用从盈利地址学到的卖出规则（不套档位规则）
+            rules = None
+            for attr, pre in (("imitate", "学来的打法"), ("diamond", "钻石手打法")):
+                im = getattr(self.app, attr, None)
+                if im and str(p.get("reason") or "").startswith(pre):
+                    rules = im.exit_rules(p["chain"], self.exit_cfg)
+            if rules:      # 学来的打法 / 钻石手打法：用学到的卖出规则（不套档位规则）
                 pct, why = decide_exit({**p, "tier": None}, px, rules, now, dyn)
             else:
                 pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
@@ -746,10 +749,10 @@ class PositionManager:
                                        + "；".join(f"{t}（{LESSON_TIPS[t]}）" for t in tags), low=True)
 
     async def fill_outcomes(self) -> None:
-        """结果档案：满 15 分钟 / 1 小时 / 4 小时后回看价格（取不到记 -1，学习时跳过）。"""
+        """结果档案：满 15 分钟 / 1 小时 / 4 小时 / 24 小时后回看价格（取不到记 -1）。"""
         db = self.app.db
         now = time.time()
-        for col, mins in (("p15", 15), ("p60", 60), ("p240", 240)):
+        for col, mins in (("p15", 15), ("p60", 60), ("p240", 240), ("p1440", 1440)):
             rows = await db.fetchall(
                 f"SELECT id, chain, token FROM token_outcomes WHERE {col} IS NULL AND ts<? AND ts>? LIMIT 60",
                 (now - mins * 60, now - mins * 60 - 6 * 3600))

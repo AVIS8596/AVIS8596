@@ -674,9 +674,11 @@ class Analyzer:
                         rep["model_p"] = p
                 except Exception as e:  # noqa: BLE001
                     log.debug("模型打分失败: %s", e)
-            im = getattr(self.app, "imitate", None)       # 学来的打法：看这个币像不像盈利地址会买的好单
-            if im:
-                try:
-                    await im.on_analysis(rep["chain"], rep["address"], rep)
-                except Exception as e:  # noqa: BLE001
-                    log.debug("学来的打法评估失败: %s", e)
+            # 学来的打法 / 钻石手打法：看这个币像不像盈利地址 / 钻石手会买的好单
+            for attr in ("imitate", "diamond"):
+                im = getattr(self.app, attr, None)
+                if im:
+                    try:
+                        await im.on_analysis(rep["chain"], rep["address"], rep)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("%s 评估失败: %s", attr, e)
