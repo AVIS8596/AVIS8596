@@ -365,7 +365,12 @@ class PositionManager:
                 await db.execute("UPDATE positions SET high_price=? WHERE id=?", (px, p["id"]))
                 p["high_price"] = px
             dyn = dyn_state(p, dc, now) if mode == "live" else None
-            pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
+            im = getattr(self.app, "imitate", None)
+            rules = im.exit_rules(p["chain"], self.exit_cfg) if im and str(p.get("reason") or "").startswith("学来的打法") else None
+            if rules:      # 学来的打法：用从盈利地址学到的卖出规则（不套档位规则）
+                pct, why = decide_exit({**p, "tier": None}, px, rules, now, dyn)
+            else:
+                pct, why = decide_exit(p, px, self.exit_cfg, now, dyn)
             if not self._confirmed(p["id"], why, px, float(p["entry_price"] or 0)):
                 continue
             if pct > 0 and p["id"] not in self._selling and now >= self._next_try.get(p["id"], 0):

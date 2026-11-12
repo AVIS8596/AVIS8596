@@ -100,6 +100,10 @@ def test_autopsy_run(tmp_path):
             assert (await ap.last())[0].startswith("（上次解剖")
             r = await db.fetchone("SELECT COUNT(*) n FROM autopsy")
             assert r["n"] == 2
+            import json
+            x = json.loads((await db.fetchone("SELECT x FROM autopsy_trades LIMIT 1"))["x"])
+            assert abs(x["ex_sell_gain"] - 1.0) < 1e-9 and x["ex_first_frac"] == 1.0 and x["ex_hold_min"] == 5
+            assert "ex_peak_gain" in x and "ex_dd_at_sell" in x
             assert ap.start(["solana"], 5) and not ap.start(["solana"], 5)    # 同时只跑一个
             await ap.task
             assert sent

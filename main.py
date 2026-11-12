@@ -132,7 +132,10 @@ async def run_bot(cfg) -> None:
         from bot.learn import Learner
         app.learner = Learner(app)
         from bot.autopsy import Autopsy
-        app.autopsy = Autopsy(app)          # 高收益地址解剖：只在 /autopsy 时运行
+        app.autopsy = Autopsy(app)          # 高收益地址解剖：/autopsy，学来的打法每天也会自动跑一次收集数据
+        from bot.imitate import Imitator
+        app.imitate = Imitator(app)
+        jobs.append(("学来的打法", app.imitate.run))
         jobs.append(("学习高手", app.learner.run))
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)

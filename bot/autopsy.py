@@ -81,6 +81,7 @@ def build_trades(acts: list[dict], holds: list[dict], now: float, days: float = 
         income = sum(c for _, _, c in sells)
         m = meta.get(tok, {})
         out.append({"token": tok, "symbol": p["symbol"], "t_buy": t_buy, "px_buy": px_buy, "t_sell": sells[0][0],
+                    "px_sell": sells[0][1], "first_frac": min(1.0, (sells[0][2] / sells[0][1]) / got),
                     "t_last": sells[-1][0], "own": min(CAP, income / cost - 1), "cost": cost,
                     "hold_min": (sells[-1][0] - t_buy) / 60, "created": m.get("created") or None,
                     "supply": m.get("supply") or None,
@@ -115,6 +116,23 @@ def follower_returns(tr: dict, entry_c: list[dict], exit_c: list[dict], cost: fl
         if a > 0 and b > 0:
             out[d] = min(CAP, b / a - 1 - cost)
     return out or None
+
+
+def exit_features(tr: dict, ce: list[dict], cx: list[dict], full: bool) -> dict:
+    """它怎么卖：第一次卖出时赚多少（按它自己的成交价）、卖了几成、拿了多久；
+    K 线盖住整段持有时，再算持有期间最高涨到多少、卖的时候离最高点回撤多少。"""
+    out = {"ex_sell_gain": tr["px_sell"] / tr["px_buy"] - 1 if tr["px_buy"] > 0 else None,
+           "ex_first_frac": tr["first_frac"], "ex_hold_min": (tr["t_sell"] - tr["t_buy"]) / 60}
+    if full:
+        ref = price_at(ce, tr["t_buy"])
+        mid = [c for c in cx if tr["t_buy"] - 60 <= f(c.get("time")) / (1000 if f(c.get("time")) > 1e12 else 1) <= tr["t_sell"]]
+        hi = max((f(c.get("high")) or f(c.get("close")) for c in mid), default=0.0)
+        sp = price_at(cx, tr["t_sell"])
+        if ref > 0 and hi > 0:
+            out["ex_peak_gain"] = min(CAP, hi / ref - 1)
+            if sp > 0:
+                out["ex_dd_at_sell"] = max(0.0, 1 - sp / hi)
+    return out
 
 
 def classify(n: int, own: float, fol: float, fol_med: float) -> str:
@@ -243,6 +261,7 @@ class Autopsy:
                 continue
             x = kline_features(ce, tr["t_buy"], tr["created"], tr["supply"], tr["px_buy"])
             x.update(await snapshot(self.app, chain, tr["token"], tr["t_buy"]))
+            x.update(exit_features(tr, ce, cx, ce is cx))
             out.append({**tr, "fol": fol, "x": x})
         return out
 
