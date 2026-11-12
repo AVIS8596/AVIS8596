@@ -1440,7 +1440,7 @@ def test_solana_subscriptions_paced_and_retried(monkeypatch):
 
 
 def test_busy_wallets_dropped_without_spending_quota():
-    """1 小时推来 30 条以上通知的钱包（交易机器人）：停止监听 24 小时，之后的通知直接丢、不花额度取交易。"""
+    """1 小时 60 笔以上成功买卖的钱包（交易机器人）：暂停监听 6 小时，之后的通知直接丢、不花额度取交易。"""
     from bot.monitor import solana_wallets as sw
 
     ev = asyncio.Event()
@@ -1451,6 +1451,7 @@ def test_busy_wallets_dropped_without_spending_quota():
     assert not any(hits[:-1]) and hits[-1] and "BOT" in sm.busy_out and ev.is_set()
     assert sm._busy("BOT", t0 + 9999)
     assert not any(sm._busy("SLOW", t0 + i * 200) for i in range(40))       # 40 条但分散在 2 小时多：不算
+    assert sm.busy_per_h == 60 and not any(sm._busy("MID", t0 + i * 60) for i in range(45))   # 1 小时 45 笔：不算
 
 
 def test_pool_gone_detected_even_without_dynamic_mode():
