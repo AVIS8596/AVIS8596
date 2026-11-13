@@ -54,3 +54,36 @@ def test_control_lane(tmp_path):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_post_close_review_with_quiet_lane(tmp_path):
+    """平仓 4 小时后的复盘：对照仓的不推送，别的照常推送（11-13：查询里漏了 reason 列，报"持仓检查失败: 'reason'"）。"""
+    from bot.trade.positions import PositionManager
+
+    async def go():
+        db = DB(tmp_path / "p.db")
+        await db.open()
+        msgs = []
+        try:
+            async def send(t, low=False):
+                msgs.append(t)
+
+            async def high(chain, token, a, b):
+                return 5.0                                    # 卖出后又涨到卖出价的 5 倍 → "卖早了"
+            cfg = Cfg({"control": {}})
+            cfg.dry_run = True
+            app = SimpleNamespace(db=db, cfg=cfg, tg=SimpleNamespace(send=send),
+                                  data=SimpleNamespace(recent_high_between=high))
+            now = time.time()
+            for tok, reason in (("A", "对照仓（实验仓，发现就买）"), ("B", "跟单（2 个聪明钱）")):
+                await db.execute(
+                    "INSERT INTO positions(chain,token,symbol,status,dry_run,reason,opened_at,closed_at,cost_usd,realized_usd,"
+                    "amount_raw,decimals,close_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("solana", tok, tok, "closed", 1, reason, now - 6 * 3600, now - 5 * 3600, 10, 10, "10000000", 6, "止盈"))
+            await PositionManager(app).fill_post_max()
+            rows = await db.fetchall("SELECT token, lesson FROM positions ORDER BY token")
+            assert all("卖早了" in (r["lesson"] or "") for r in rows)          # 两笔都打了标签
+            assert len(msgs) == 1 and "#2" in msgs[0]                         # 只推送了不是对照仓的那笔
+        finally:
+            await db.close()
+    asyncio.run(go())

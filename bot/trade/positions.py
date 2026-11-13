@@ -762,7 +762,7 @@ class PositionManager:
         now = time.time()
         rows = await db.fetchall(
             "SELECT id, chain, token, symbol, closed_at, realized_usd, cost_usd, amount_raw, decimals, close_reason, "
-            "entry_snap FROM positions WHERE status='closed' AND post_max IS NULL AND closed_at<? AND closed_at>? LIMIT 10",
+            "entry_snap, reason FROM positions WHERE status='closed' AND post_max IS NULL AND closed_at<? AND closed_at>? LIMIT 10",
             (now - 4 * 3600, now - 3 * 86400))
         for r in rows:
             ui = int(r["amount_raw"] or 0) / 10 ** int(r["decimals"] or 0)
@@ -779,7 +779,7 @@ class PositionManager:
                              (val, json.dumps(tags, ensure_ascii=False), r["id"]))
             bad = [t for t in tags if t in ("买在高位", "卖早了", "止损后又涨回来")]
             from ..control import quiet
-            if bad and self.app.tg and not quiet(self.cfg, r["reason"]):
+            if bad and self.app.tg and not quiet(self.cfg, dict(r).get("reason")):
                 await self.app.tg.send(f"📚 复盘 #{r['id']} {html.escape(str(r['symbol'] or '?'))}："
                                        + "；".join(f"{t}（{LESSON_TIPS[t]}）" for t in tags), low=True)
 
