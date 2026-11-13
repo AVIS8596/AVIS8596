@@ -402,6 +402,9 @@ def test_check_lite_only_hard_traps(tmp_path):
             assert "项目方已经在卖" in await tr.check_lite("solana", "T", {**weak, "dev_sold": 1})
             assert "流动性" in await tr.check_lite("solana", "T", {**weak, "liquidity": 2000})
             assert "池子" in await tr.check_lite("solana", "T", {**weak, "chain": "solana", "lp_burn": "", "exchange": "raydium"})
+            pulled = {**weak, "chain": "solana", "lp_burn": "", "exchange": "raydium"}
+            assert await tr.check_lite("solana", "T", pulled, allow_pull=True) == ""          # 对照仓·池子没烧：这一条放行
+            assert "捆绑" in await tr.check_lite("solana", "T", {**pulled, "bundle_held_pct": 32}, allow_pull=True)  # 别的照拦
             assert "钓鱼钱包" in await tr.check_lite("solana", "T", {**weak, "entrap_pct": 98.9})   # 刷量盘：买卖量是假的
             assert "前10持仓" in await tr.check_lite("solana", "T", {**weak, "top10_pct": 47.83})   # GMGN 安全检测前10 不过
             assert "埋伏" in await tr.check_lite("solana", "T", {**weak, "insider_held_pct": 40})

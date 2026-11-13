@@ -51,6 +51,23 @@ def test_control_lane(tmp_path):
             assert [c[0] for c in calls] == ["A", "C"]
             txt = await lane.summary(1)
             assert "买入 3 笔" in txt and "平仓 1 笔" in txt and "+20.0%" in txt and "2 / 3" in txt
+            # 池子没烧的币：走"对照仓·池子没烧"，名额和普通的分开数（普通的 3 个名额已经满了也能买）
+            await db.execute("UPDATE positions SET status='open', closed_at=NULL WHERE token='X0'")
+            pull = {**rep, "chain": "solana", "lp_burn": "", "exchange": "raydium"}
+            await lane.on_analysis("solana", "P", pull)
+            await lane.on_analysis("solana", "D", rep)                    # 普通的满了：不买
+            await asyncio.sleep(0.01)
+            assert [c[0] for c in calls] == ["A", "C", "P"] and calls[-1][1].startswith("对照仓·池子没烧（实验仓")
+            assert source_of(calls[-1][1]) == "对照仓·池子没烧" and quiet(app.cfg, calls[-1][1])
+            await db.execute("INSERT INTO positions(chain,token,status,dry_run,reason,opened_at,cost_usd) VALUES(?,?,?,?,?,?,?)",
+                             ("solana", "P", "open", 1, calls[-1][1], time.time(), 10))
+            txt = await lane.summary(1)
+            assert "<b>池子没烧</b>：最近 1 小时买入 1 笔" in txt and "1 / 20" in txt and "3 / 3" in txt
+            app.cfg["control"]["pullable"] = False                         # 关掉：池子没烧的按普通对照仓走（检查时会被拦）
+            await db.execute("UPDATE positions SET status='closed', closed_at=? WHERE token='X1'", (time.time(),))
+            await lane.on_analysis("solana", "Q", pull)
+            await asyncio.sleep(0.01)
+            assert calls[-1][0] == "Q" and calls[-1][1].startswith("对照仓（实验仓")
         finally:
             await db.close()
     asyncio.run(go())

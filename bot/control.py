@@ -11,6 +11,11 @@
 为了省额度，对照仓的持仓：价格最多用 20 秒前的（别的持仓 5 秒）、健康复查间隔 ×4、不做新旧卖法的虚拟对比。
 买卖太多，不逐笔推送（control.notify: true 可以打开），每小时发一条汇总；/positions、/compare、日报里都有它。
 同一个币 6 小时内只考虑一次。配置 control.*，关掉：control.enabled: false。
+
+对照仓·池子没烧（11-13）：池子能被撤是拦得最多的一类（一天上千个），影子单却是赚的（231 笔每笔 +34%、中位 +13%），
+"漏掉的好币"里也有近百个卡在这条；真实单子只有 2 笔。所以池子没烧、别的硬坑都过了的币，对照仓也买，
+单独记成"对照仓·池子没烧"、单独的名额（pull_max_open），用真实的（模拟盘）买卖看到底赚不赚、被撤池子亏光的占多少。
+关掉：control.pullable: false。
 """
 from __future__ import annotations
 
@@ -26,8 +31,10 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.control")
 
 PREFIX = "对照仓"
+PULL = "对照仓·池子没烧"
 DEFAULTS = {"enabled": True, "sample_rate": 1.0, "max_per_day": 0, "max_per_hour": 0, "max_open": 40,
-            "notify": False, "summary_min": 60, "price_max_age": 20, "health_every_x": 4}
+            "notify": False, "summary_min": 60, "price_max_age": 20, "health_every_x": 4,
+            "pullable": True, "pull_max_open": 20}
 
 
 def is_control(reason: str | None) -> bool:
@@ -47,25 +54,33 @@ class ControlLane:
     def __init__(self, app: "App"):
         self.app = app
         self._seen: dict[str, float] = {}
-        self._pending = 0            # 已经交给确认期、还没出结果的笔数（算进名额，免得一下子买超）
+        self._pending = {False: 0, True: 0}   # 已经交给确认期、还没出结果的笔数（算进名额），普通 / 池子没烧分开数
 
     def c(self) -> dict:
         return conf(self.app.cfg)
 
-    async def room(self) -> bool:
-        """还有没有名额：同时拿着的 + 确认期里的 < max_open；每天 / 每小时上限为 0 表示不限。"""
+    @staticmethod
+    def _where(pull: bool) -> tuple[str, tuple]:
+        """这一类单子的 SQL 条件：普通对照仓不算"对照仓·池子没烧"，两类分开数名额、分开统计。"""
+        if pull:
+            return "reason LIKE ?", (PULL + "%",)
+        return "reason LIKE ? AND reason NOT LIKE ?", (PREFIX + "%", PULL + "%")
+
+    async def room(self, pull: bool = False) -> bool:
+        """还有没有名额：同时拿着的 + 确认期里的 < 上限；每天 / 每小时上限为 0 表示不限。"""
         c = self.c()
         db = self.app.db
         now = time.time()
-        like = PREFIX + "%"
+        w, args = self._where(pull)
         for since, cap in ((self.app.day_start(), c["max_per_day"]), (now - 3600, c["max_per_hour"])):
             if int(cap or 0) <= 0:
                 continue
-            r = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?", (like, since))
+            r = await db.fetchone(f"SELECT COUNT(*) n FROM positions WHERE {w} AND opened_at>=?", (*args, since))
             if r and r["n"] >= int(cap):
                 return False
-        r = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND status='open'", (like,))
-        return (r["n"] if r else 0) + self._pending < int(c["max_open"])
+        r = await db.fetchone(f"SELECT COUNT(*) n FROM positions WHERE {w} AND status='open'", args)
+        cap = int(c["pull_max_open"] if pull else c["max_open"])
+        return (r["n"] if r else 0) + self._pending[pull] < cap
 
     async def on_analysis(self, chain: str, token: str, rep: dict) -> None:
         c = self.c()
@@ -75,23 +90,26 @@ class ControlLane:
         key = f"{chain}:{token}"
         if now - self._seen.get(key, 0) < 6 * 3600:
             return
-        if random.random() >= float(c["sample_rate"]) or not await self.room():
+        from .trade.trader import pullable_pool
+        pull = bool(c.get("pullable")) and bool(pullable_pool(rep))     # 池子没烧：走"对照仓·池子没烧"那一类
+        if random.random() >= float(c["sample_rate"]) or not await self.room(pull):
             return                    # 没名额时不记"看过"：等卖掉腾出名额，这个币下次被分析时还能买
         self._seen[key] = now
         if len(self._seen) > 50000:
             self._seen = {k: v for k, v in self._seen.items() if now - v < 6 * 3600}
         age = float(rep.get("age_hours") or 0)
         when = f"发币 {age * 60:.0f} 分钟" if age < 2 else f"发币 {age:.0f} 小时"
-        reason = f"{PREFIX}（实验仓，发现就买、只排阴谋盘，{when}）"
+        reason = (f"{PULL}（实验仓，池子能被撤也买、别的硬坑照排，{when}）" if pull
+                  else f"{PREFIX}（实验仓，发现就买、只排阴谋盘，{when}）")
         hub = self.app.hub
-        self._pending += 1
+        self._pending[pull] += 1
 
         async def go() -> None:
             try:
                 # wallets 不传：这笔不是跟谁买的，亏了不能算到聪明钱头上
                 await hub.confirm_and_buy(chain, token, rep, reason, wallets=[], tier="normal")
             finally:
-                self._pending -= 1
+                self._pending[pull] -= 1
         t = asyncio.create_task(go())
         hub._tasks.add(t)
         t.add_done_callback(hub._tasks.discard)
@@ -99,16 +117,9 @@ class ControlLane:
     async def summary(self, hours: float = 1) -> str:
         db = self.app.db
         now = time.time()
-        like = PREFIX + "%"
         since = now - hours * 3600
         dry = int(bool(self.app.cfg.dry_run))
-        b = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND dry_run=? AND opened_at>=?",
-                              (like, dry, since))
-        rows = await db.fetchall("SELECT cost_usd, realized_usd FROM positions WHERE reason LIKE ? AND dry_run=? "
-                                 "AND status='closed' AND closed_at>=? AND cost_usd>0", (like, dry, since))
-        o = await db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND status='open'", (like,))
-        day = await db.fetchall("SELECT cost_usd, realized_usd FROM positions WHERE reason LIKE ? AND dry_run=? "
-                                "AND status='closed' AND closed_at>=? AND cost_usd>0", (like, dry, self.app.day_start()))
+        c = self.c()
 
         def part(rs: list[dict]) -> str:
             if not rs:
@@ -117,10 +128,22 @@ class ControlLane:
             pnl = sum(float(r["realized_usd"] or 0) - float(r["cost_usd"]) for r in rs)
             return (f"{len(rs)} 笔，每笔平均 {sum(rets) / len(rets) * 100:+.1f}%、中位 {rets[len(rets) // 2] * 100:+.0f}%、"
                     f"赚钱 {sum(1 for x in rets if x > 0) / len(rets) * 100:.0f}%，合计 ${pnl:+.2f}")
-        return (f"🧪 <b>对照仓</b>（发现就买、只排阴谋盘；不逐笔推送）\n"
-                f"最近 {hours:g} 小时：买入 {b['n'] if b else 0} 笔 | 平仓 {part(rows)}\n"
-                f"今天平仓 {part(day)}\n"
-                f"现在拿着 {o['n'] if o else 0} / {int(self.c()['max_open'])} 个（/positions 看明细，/compare 和别的打法比）")
+        L = ["🧪 <b>对照仓</b>（发现就买、只排阴谋盘；不逐笔推送）"]
+        for pull, name, cap in ((False, "普通", c["max_open"]), (True, "池子没烧", c["pull_max_open"])):
+            if pull and not c.get("pullable"):
+                continue
+            w, args = self._where(pull)
+            b = await db.fetchone(f"SELECT COUNT(*) n FROM positions WHERE {w} AND dry_run=? AND opened_at>=?",
+                                  (*args, dry, since))
+            q = (f"SELECT cost_usd, realized_usd FROM positions WHERE {w} AND dry_run=? AND status='closed' "
+                 "AND closed_at>=? AND cost_usd>0")
+            rows = await db.fetchall(q, (*args, dry, since))
+            day = await db.fetchall(q, (*args, dry, self.app.day_start()))
+            o = await db.fetchone(f"SELECT COUNT(*) n FROM positions WHERE {w} AND status='open'", args)
+            L.append(f"<b>{name}</b>：最近 {hours:g} 小时买入 {b['n'] if b else 0} 笔 | 平仓 {part(rows)}\n"
+                     f"  今天平仓 {part(day)} | 现在拿着 {o['n'] if o else 0} / {int(cap)} 个")
+        L.append("（/positions 看持仓，/compare 和别的打法比）")
+        return "\n".join(L)
 
     async def run(self) -> None:
         """每小时发一条汇总（这一小时没买也没卖就不发）。"""
@@ -131,7 +154,7 @@ class ControlLane:
                 if not c.get("enabled") or c.get("notify"):
                     continue
                 txt = await self.summary(float(c.get("summary_min", 60)) / 60)
-                if "买入 0 笔 | 平仓 0 笔" not in txt:
+                if txt.count("买入 0 笔 | 平仓 0 笔") < txt.count("最近 "):      # 两类都没买没卖就不发
                     await self.app.tg.send(txt, low=True)
             except Exception as e:  # noqa: BLE001
                 log.warning("对照仓汇总失败: %s", e)

@@ -275,7 +275,7 @@ class Trader:
         cache[(chain, token)] = (now, why)
         return why
 
-    async def check_lite(self, chain: str, token: str, rep: dict, reason: str = "") -> str:
+    async def check_lite(self, chain: str, token: str, rep: dict, reason: str = "", allow_pull: bool = False) -> str:
         """买卖力量打法的买入检查：只排硬性的坑，不管评分、持有人多少、涨了多少这些"质量"条件。
         排：交易开关 / 暂停 / 市场冷、致命风险（貔貅、能增发、高税……）、池子能被撤、捆绑 ≥ 30%、阴谋地址、团伙、
         埋伏地址多、前10 持仓 > 20%（筹码太集中）、刷量盘 / 钓鱼钱包多 / 市值是池子的几十倍 / 拉盘太平滑（买卖量是假的）、
@@ -294,7 +294,7 @@ class Trader:
             return "市场冷，暂停买入（最近买入 1 小时后大多在跌）"
         if rep.get("risks"):
             return "致命风险：" + "；".join(rep["risks"])
-        pull = pullable_pool(rep)
+        pull = "" if allow_pull else pullable_pool(rep)      # allow_pull：对照仓·池子没烧（专门验证这一类到底赚不赚）
         if pull:
             return pull
         bmax = float(fl.get("max_bundle_pct", 30))
@@ -421,7 +421,8 @@ class Trader:
                     return
                 probe = PROBE in reason            # 主动建仓那边已经判定为试探仓
                 if reason.startswith((FLOW, "对照仓")):   # 买卖力量打法 / 对照仓：只排硬性的坑（阴谋盘 / 貔貅 / 池子能撤 / 捆绑多……）
-                    why = await self.check_lite(chain, token, rep, reason)
+                    why = await self.check_lite(chain, token, rep, reason,
+                                                allow_pull=reason.startswith("对照仓·池子没烧"))
                     if why:
                         await self.skip(chain, token, rep, reason, why)
                         return
