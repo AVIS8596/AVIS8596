@@ -113,7 +113,7 @@ trading:
   max_liquidity_pct: 3            # 单笔不超过池子流动性的 3%，超过自动减少买入量
   regime: { cold: 0.5, normal: 1, hot: 1, cold_pause: false }   # 市场冷热：冷时仓位 ×0.5；cold_pause: true 则冷时暂停买入
   max_daily_loss_usd_dry: 0       # 模拟盘的每日亏损上限（0 = 不限，方便积累数据）；实盘用 max_daily_loss_usd
-  max_open_positions_dry: 30      # 模拟盘最多同时持仓（5 条链一起跑，多积累数据）；实盘用 max_open_positions
+  max_open_positions_dry: 100     # 模拟盘最多同时持仓（对照仓 40 + 买卖力量 12 + 其他来源，多积累数据）；实盘用 max_open_positions
   max_rep_age_sec: 20             # 下单前复查：分析报告超过 20 秒就重新完整分析，用最新数据过所有风控
   max_drop_5m_pct: 20             # 最近 5 分钟跌超 20% 不买（正在砸盘，不管几个聪明钱）
   max_dev_launches: 15            # 项目方以前发过 15 个币以上不买（批量发币，撤池子的高发人群；0 = 关闭）
@@ -135,7 +135,7 @@ trading:
     size_mult: 0.25               # 仓位 = 正常 × 0.25；阴谋地址 / 捆绑 / 池子能被撤等防阴谋盘规则照常
   pullable_experiment:            # 池子没烧实验仓（11-12）：影子单显示"池子能被撤"拦下的币 64 笔每笔 +140%、中位 +79%，
     enabled: true                 #   改成不直接拦，按实验仓 ¼ 仓位买、单独记账（"池子没烧实验仓"），验证到底赚还是被撤池子亏光
-    max_per_day: 20
+    max_per_day: 200              # 11-13：放开（原来 20），多攒数据
   paused_chains: [bsc]            # 暂停买入的链（11-12：BSC 这几天每笔平均亏约 30%）；监听、分析、学习照常，只是不下单
   max_launch_multiple: 10         # 发币 24 小时内、价格已是发币价 10 倍以上的不买（涨幅已兑现，3 个以上聪明钱一起买除外；0 = 关闭）
   sim_fixed_fee_native: { solana: 0.0005, bsc: 0.0002, ethereum: 0.0005, base: 0.00003, robinhood: 0.00003 }   # 模拟盘每笔扣的固定优先费 / Gas（原生币）
@@ -283,7 +283,7 @@ budget:
 # 两类都用一般档金额（早期建仓有 2 个以上聪明钱或 KOL 时用较好档），每天限量。
 strategies:
   poll_sec: 15                    # 主动建仓每 15 秒扫一次快毕业 / 已毕业列表
-  max_per_hour: 2                 # 两类合计每小时最多交给确认期 2 笔，避免集中下单
+  max_per_hour: 20                # 两类合计每小时最多交给确认期多少笔（11-13 放开，原来 2）
   early:                          # 早期建仓：快毕业、结构干净、持有人快速增长
     enabled: true
     max_age_min: 180              # 发币 3 小时内
@@ -296,9 +296,9 @@ strategies:
     max_bundler_rate: 0.15
     max_insider_rate: 0.15
     max_creator_rate: 0.05
-    max_per_day: 6
+    max_per_day: 60               # 11-13 放开（原来 6）
     exp_min_holders: 50           # 早期实验仓（11-12）：持有人 50~min_holders 之间也买，仓位 × trading.experiment.size_mult（¼）
-    exp_max_per_day: 20           # 早期实验仓单独每天最多 20 笔，不占上面 6 笔的名额；trading.experiment.enabled=false 时一起关
+    exp_max_per_day: 200          # 早期实验仓单独每天最多多少笔（11-13 放开，原来 20），不占上面的名额；trading.experiment.enabled=false 时一起关
     persist_sec: 60               # 论证：达标后隔 1 分钟再看一次，仍达标、持有人没减少才继续
     min_token_score: 50           # 论证：完整分析的代币评分要 ≥ 50
   narrative:                      # 强叙事：KOL / 聪明钱 / 引用大号新推文 / 项目粉丝 / 付费推广 / 同名币领跑 / 成交火热，综合 ≥ 60 分
@@ -312,7 +312,7 @@ strategies:
     max_bundler_rate: 0.3
     max_insider_rate: 0.2
     max_creator_rate: 0.1
-    max_per_day: 6
+    max_per_day: 60               # 11-13 放开（原来 6）
     persist_sec: 180              # 论证：达标后观察 3 分钟，热度没退（持有人不减、叙事分不明显下降）才继续
     fast_score: 90                # 叙事分 ≥ 90 的只观察 fast_persist_sec 秒（早点买，而不是等涨上去再买）
     fast_persist_sec: 60
@@ -335,11 +335,15 @@ safety:
   tg_backup: true                 # 每天把精简版数据库备份发到 Telegram（异地保存，服务器坏了能恢复）
   withdraw_above_native: {}       # 实盘钱包余额超过多少就提醒转出，如 { solana: 3, bsc: 0.5 }（空 = 不提醒）
 
-# 对照仓（11-12）：只要不是阴谋盘 / 貔貅 / 池子能撤 / 刷量盘，分析到的币随机抽一部分直接买（¼ 仓位），多收集真实数据，
+# 对照仓：只要不是阴谋盘 / 貔貅 / 池子能撤 / 刷量盘，分析到的币就直接买（¼ 仓位），一直买卖、多攒真实数据，
 # 也当对照组（卖法和原有来源一样用高手规则）：和跟单 / 新币 / 早期建仓比，看挑币有没有比随便买好。见 bot/control.py
+# 11-13：不限每天 / 每小时笔数，唯一上限是同时拿几个（每个持仓都要不停取价、复查，花 GMGN 接口额度）。
+# /status 里"GMGN 排队 平均等"长期超过 1 秒就把 max_open 调小；一直是 0 秒可以调大。
 control:
   enabled: true
-  sample_rate: 0.2      # 分析过的币随机抽 20%（再过只排硬坑的检查）
-  max_per_day: 40
-  max_per_hour: 3
-  max_open: 12          # 同时最多拿 12 个，不挤占其他来源的名额
+  sample_rate: 1.0      # 分析过的币都考虑（再过只排硬坑的检查）
+  max_per_day: 0        # 0 = 不限
+  max_per_hour: 0       # 0 = 不限
+  max_open: 40          # 同时最多拿 40 个，卖掉一个才能再买一个
+  notify: false         # 不逐笔推送买卖（太多），每小时一条汇总；想逐笔看改成 true
+  summary_min: 60

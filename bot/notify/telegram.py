@@ -942,21 +942,33 @@ class Telegram:
         pos = await self.app.db.fetchall("SELECT * FROM positions WHERE status IN ('open','stuck') ORDER BY id")
         if not pos:
             return "当前没有持仓"
+        from ..control import is_control
         lines = ["<b>当前持仓</b>"]
         by_chain: dict[str, list[dict]] = {}
         for p in pos:
             by_chain.setdefault(p["chain"], []).append(p)
+        many = sum(1 for p in pos if is_control(p["reason"])) > 8     # 对照仓很多时只给汇总，不然一条消息放不下
+        ctl: list[float] = []
         for c, lst in by_chain.items():
-            prices = await self.app.data.prices(c, [p["token"] for p in lst])
+            slow = {p["token"]: 30 for p in lst if is_control(p["reason"])}
+            toks = [p["token"] for p in lst]
+            prices = await (self.app.data.prices(c, toks, max_age=slow) if slow else self.app.data.prices(c, toks))
             for p in lst:
                 px = prices.get(p["token"]) or prices.get(p["token"].lower()) or 0
                 g = (px / p["entry_price"] - 1) * 100 if px and p["entry_price"] else 0
+                if many and is_control(p["reason"]):
+                    ctl.append(g)
+                    continue
                 flag = " ⚠️无法卖出" if p["status"] == "stuck" else ""
                 tier = {"best": "🔥", "good": "👍"}.get(p.get("tier") or "", "")
                 held = (time.time() - float(p["opened_at"] or time.time())) / 3600
                 hp = f" 健康{p['health']}" if p.get("health") is not None else ""
                 lines.append(f"#{p['id']} {tier}{self.tok_link(c, p['token'], p['symbol'] or '?')} {CHAINS[c].name} "
                              f"成本{fmt_usd(p['cost_usd'])} 现{g:+.1f}% 已拿{held:.1f}h{hp}{flag}")
+        if ctl:
+            ctl.sort()
+            lines.append(f"🧪 对照仓 {len(ctl)} 个（发现就买、只排阴谋盘）：现在平均 {sum(ctl) / len(ctl):+.1f}%、"
+                         f"中位 {ctl[len(ctl) // 2]:+.0f}%、最好 {ctl[-1]:+.0f}%、最差 {ctl[0]:+.0f}%")
         lines.append("发 /why 编号 查看详情")
         return "\n".join(lines)
 

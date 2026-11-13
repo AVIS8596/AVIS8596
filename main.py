@@ -143,7 +143,8 @@ async def run_bot(cfg) -> None:
         app.flow = FlowLane(app)
         jobs.append(("买卖力量记录", app.flow.run))
         from bot.control import ControlLane
-        app.control = ControlLane(app)       # 对照仓：只排阴谋盘，发现就随机抽一部分买
+        app.control = ControlLane(app)       # 对照仓：只排阴谋盘，发现就买
+        jobs.append(("对照仓汇总", app.control.run))
         jobs.append(("学习高手", app.learner.run))
         from bot.discovery.expand import WalletExpander
         app.expander = WalletExpander(app)

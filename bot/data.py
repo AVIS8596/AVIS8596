@@ -58,19 +58,20 @@ class DataHub:
         g = self.app.gmgn
         return bool(g and g.paused_until > time.time() + 2)
 
-    async def price(self, chain: str, token: str) -> float:
+    async def price(self, chain: str, token: str, max_age: float = 5) -> float:
         if self.use_gmgn:
             if self.gm_paused():        # GMGN 被限流暂停时用 DexScreener 取价，止盈止损不停摆
                 p = (await self.dex_prices(chain, [token])).get(token, 0.0)
                 if p > 0:
                     return p
-            p = f(dig(await self._gm_info(chain, token), "price.price", "price"))
+            p = f(dig(await self._gm_info(chain, token, max_age), "price.price", "price"))
             if p > 0:
                 return p
             return (await self.dex_prices(chain, [token])).get(token, 0.0)
         return await self.app.birdeye.price(chain, token)
 
-    async def prices(self, chain: str, tokens: list[str]) -> dict[str, float]:
+    async def prices(self, chain: str, tokens: list[str], max_age: dict[str, float] | None = None) -> dict[str, float]:
+        """max_age：个别币可以用多少秒以内的旧价格（默认 5 秒），对照仓的持仓用它省额度。"""
         if not tokens:
             return {}
         if not self.use_gmgn:
@@ -83,7 +84,7 @@ class DataHub:
 
         async def one(t: str) -> float:
             async with sem:
-                return await self.price(chain, t)
+                return await self.price(chain, t, (max_age or {}).get(t, 5))
         res = await asyncio.gather(*(one(t) for t in tokens), return_exceptions=True)
         return {t: p for t, p in zip(tokens, res) if isinstance(p, float) and p > 0}
 

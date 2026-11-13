@@ -177,16 +177,20 @@ class SolanaWalletMonitor:
                 log.info("Solana 暂无聪明钱地址，等待发现……")
                 await ev.wait()
                 continue
-            if set(wallets) != current or not conns or any(t.done() for t in conns):
+            pub = self._public_now()
+            pmax = int(self.app.cfg.get("smart_money.public_ws_max", 160))
+            use = wallets[:pmax] if pub else wallets      # 钱包已按跟单战绩排好，公共节点上只订排名靠前的
+            diff = len(set(use) ^ current)
+            # 公共节点上重订一遍要 1 分钟左右（每秒只能订 3 个），名单只变了几个就先不动，半小时内攒着一起换
+            # （11-13：名单每 10 分钟变一点，每次都把 4 条连接全断开重订）
+            minor = pub and conns and 0 < diff <= max(8, len(use) // 20) and time.time() - built_at < 1800
+            if (diff and not minor) or not conns or any(t.done() for t in conns):
                 for t in conns:
                     t.cancel()
                 await asyncio.gather(*conns, return_exceptions=True)
                 if conns:
                     await asyncio.sleep(3)          # 给节点一点时间释放旧连接
-                current = set(wallets)
-                pub = self._public_now()
-                pmax = int(self.app.cfg.get("smart_money.public_ws_max", 160))
-                use = wallets[:pmax] if pub else wallets      # 钱包已按跟单战绩排好，公共节点上只订排名靠前的
+                current = set(use)
                 size = PUBLIC_PER_CONN if pub else PER_CONN
                 self.capped = len(use) if len(use) < len(wallets) else 0
                 chunks = [use[i:i + size] for i in range(0, len(use), size)]
@@ -374,7 +378,7 @@ class SolanaWalletMonitor:
                                     # 节点额度跟不上时丢弃，GMGN 交易流那一路还能补上；排队等下去信号也过时了
                                     self.dropped += 1
                                     if self.dropped % 100 == 1:
-                                        log.warning("Solana 监听积压，已丢弃 %d 条通知（Helius 额度不够，考虑升级）", self.dropped)
+                                        log.warning("Solana 监听积压，已丢弃 %d 条通知（节点取交易跟不上，GMGN 交易流那一路会补）", self.dropped)
                                     continue
                                 self.notes += 1
                                 t = asyncio.create_task(self._handle(sig, wallet))

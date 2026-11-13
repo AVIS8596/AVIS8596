@@ -607,7 +607,9 @@ class Trader:
              tier, json.dumps(snapshot(rep), ensure_ascii=False), time.time()))
         await self.app.db.execute("UPDATE token_outcomes SET bought=1 WHERE chain=? AND token=? AND ts>?",
                                   (chain, token, time.time() - 3600))
-        await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason, self.rules_for(chain, reason, tier))
+        from ..control import quiet
+        if not quiet(self.cfg, reason):          # 对照仓买卖太多，不逐笔推送，每小时一条汇总
+            await self.app.tg.trade_buy(pid, chain, rep, fill, entry, cost_usd, reason, self.rules_for(chain, reason, tier))
 
     def rules_for(self, chain: str, reason: str, tier: str | None) -> dict:
         """这笔单子实际会用的卖出规则（和持仓管理里的选法一样），买入通知里写的卖出计划要和它一致。"""

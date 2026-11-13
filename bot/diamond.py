@@ -49,7 +49,7 @@ LABELS = {"age_min": "发币多久（分钟）", "mcap": "市值", "chg60": "前
           "dev_good_n": "项目方做到 50 万的币", "dev_tokens_n": "项目方发过几个币", "whale_n": "前 20 里大户",
           "smart_hold_n": "前 20 里聪明钱", "same_funder_n": "同一出资人最大一伙", "tg_members": "TG 人数",
           "tg_growth_h": "TG 每小时增长"}
-DEFAULTS = {"enabled": True, "min_profit_usd": 5000, "min_hold_hours": 6, "tokens_per_run": 40, "max_per_day": 10,
+DEFAULTS = {"enabled": True, "min_profit_usd": 5000, "min_hold_hours": 6, "tokens_per_run": 40, "max_per_day": 30,
             "stop_loss_pct": -50, "min_rows": 400, "min_pos": 20, "retrain_hours": 24}
 
 

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("memebot.flow")
 
 PREFIX = "买卖力量打法"
-DEFAULTS = {"enabled": True, "max_age_hours": 2, "max_per_day": 20, "max_bundle_pct": 30, "min_liquidity_usd": 5000,
+DEFAULTS = {"enabled": True, "max_age_hours": 2, "max_per_day": 0, "max_open": 12, "max_bundle_pct": 30, "min_liquidity_usd": 5000,
             "sell_ratio": 0.7, "buy_ratio": 1.0, "drop_from_high_pct": 15, "strikes": 2, "half_above_pct": 20,
             "dead_volume_usd": 300, "dead_after_min": 30, "dead_min_gain_pct": 10}
 EXIT = {"stop_loss_pct": -35, "take_profit": [], "trailing_start_pct": 100, "trailing_drop_pct": 40,
@@ -163,9 +163,16 @@ class FlowLane:
         self._seen[f"{chain}:{token}"] = now
         if len(self._seen) > 20000:
             self._seen = {k: v for k, v in self._seen.items() if now - v < 1800}
-        n = await self.app.db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
-                                       (PREFIX + "%", self.app.day_start()))
-        if n and n["n"] >= int(c["max_per_day"]):
+        # 11-13：不限每天笔数（max_per_day = 0），上限是同时最多拿 max_open 个（这条打法最长拿 48 小时，持仓多了费接口额度）
+        if int(c.get("max_per_day") or 0) > 0:
+            n = await self.app.db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND opened_at>=?",
+                                           (PREFIX + "%", self.app.day_start()))
+            if n and n["n"] >= int(c["max_per_day"]):
+                return
+        o = await self.app.db.fetchone("SELECT COUNT(*) n FROM positions WHERE reason LIKE ? AND status='open'",
+                                       (PREFIX + "%",))
+        if o and o["n"] >= int(c.get("max_open") or 12):
+            self._seen.pop(f"{chain}:{token}", None)      # 没名额：不算看过，留给对照仓，或者腾出名额后再买
             return
         reason = f"{PREFIX}（实验仓，发币 {age * 60:.0f} 分钟）"
         hub = self.app.hub

@@ -335,7 +335,9 @@ class PositionManager:
 
         # ---- 健康分复查（持仓 + 平仓 6 小时内的动态管理虚拟持仓）----
         if mode != "off":
-            targets = {p["id"]: (p, float(dc["check_sec"])) for p in pos}
+            from ..control import conf as control_conf, is_control
+            cx = float(control_conf(self.cfg).get("health_every_x", 4) or 1)    # 对照仓复查间隔 ×4，省接口额度
+            targets = {p["id"]: (p, float(dc["check_sec"]) * (cx if is_control(p.get("reason")) else 1)) for p in pos}
             for s in shadows:
                 if s["variant"] == "v2" and s["pid"] not in targets and now - float(s["pclosed"] or now) < 6 * 3600:
                     row = await db.fetchone("SELECT * FROM positions WHERE id=?", (s["pid"],))
@@ -352,8 +354,15 @@ class PositionManager:
         for s in shadows:
             need.setdefault(s["chain"], set()).add(s["token"])
         prices: dict[tuple[str, str], float] = {}
+        from ..control import conf as control_conf2, is_control as is_ctl
+        slow_age = float(control_conf2(self.cfg).get("price_max_age", 20) or 5)
+        fast = {(p["chain"], p["token"]) for p in pos if not is_ctl(p.get("reason"))} | \
+               {(s["chain"], s["token"]) for s in shadows}
         for chain, toks in need.items():
-            got = await self.app.data.prices(chain, list(toks))
+            # 只有对照仓拿着的币：价格最多用 slow_age 秒前的（别的持仓照常 5 秒），省接口额度
+            ages = {t: slow_age for t in toks if (chain, t) not in fast}
+            got = await (self.app.data.prices(chain, list(toks), max_age=ages) if ages
+                         else self.app.data.prices(chain, list(toks)))
             for t in toks:
                 prices[(chain, t)] = got.get(t) or got.get(t.lower()) or 0.0
 
@@ -492,8 +501,11 @@ class PositionManager:
         """给还没有虚拟记录的持仓建两份：v1 = 旧规则，v2 = 新规则。从持仓当前状态开始模拟。"""
         db = self.app.db
         have = {(r["pid"], r["variant"]) for r in await db.fetchall("SELECT pid, variant FROM shadow")}
+        from ..control import is_control
         for p in pos:
             if all((p["id"], v) in have for v in VARIANTS) or float(p.get("entry_price") or 0) <= 0:
+                continue
+            if is_control(p.get("reason")):       # 对照仓单子很多：不做新旧卖法的虚拟对比（每笔要多跟 24 小时价格）
                 continue
             amt = int(p["amount_raw"] or 0)
             frac = int(p["remaining_raw"] or 0) / amt if amt else 1.0
@@ -654,7 +666,9 @@ class PositionManager:
             closed = new_remaining <= original * 0.02
             if closed:
                 await self._close(p, realized, reason)
-            await self.app.tg.trade_sell(p, fill, usd, reason, closed, realized)
+            from ..control import quiet
+            if not quiet(self.cfg, p.get("reason")):
+                await self.app.tg.trade_sell(p, fill, usd, reason, closed, realized)
         finally:
             self._selling.discard(pid)
 
@@ -764,7 +778,8 @@ class PositionManager:
             await db.execute("UPDATE positions SET post_max=?, lesson=? WHERE id=?",
                              (val, json.dumps(tags, ensure_ascii=False), r["id"]))
             bad = [t for t in tags if t in ("买在高位", "卖早了", "止损后又涨回来")]
-            if bad and self.app.tg:
+            from ..control import quiet
+            if bad and self.app.tg and not quiet(self.cfg, r["reason"]):
                 await self.app.tg.send(f"📚 复盘 #{r['id']} {html.escape(str(r['symbol'] or '?'))}："
                                        + "；".join(f"{t}（{LESSON_TIPS[t]}）" for t in tags), low=True)
 

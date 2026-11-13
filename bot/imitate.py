@@ -55,7 +55,7 @@ LABELS = {"age_min": "发币多久", "mcap": "市值", "chg5": "前 5 分钟涨�
           "tg_members": "TG 人数", "tg_growth_h": "TG 每小时增长"}
 GATE_KEYS = ("age_min", "mcap", "run_up", "chg60")
 GOOD = 0.15                # 晚 30 秒跟进、扣成本后赚 15% 以上算"好的买入"
-DEFAULTS = {"enabled": True, "min_rows": 120, "min_pos": 15, "max_per_day": 20, "max_evals_per_hour": 60,
+DEFAULTS = {"enabled": True, "min_rows": 120, "min_pos": 15, "max_per_day": 200, "max_evals_per_hour": 60,
             "retrain_hours": 24, "autopsy_top": 20}
 
 
