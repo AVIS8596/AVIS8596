@@ -22,6 +22,7 @@ import json
 import logging
 import random
 import re
+import socket
 import time
 from collections import deque
 from typing import TYPE_CHECKING
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("memebot.solmon")
 PER_CONN = 500
+# Solana 官方公共节点：一条连接上订阅请求发到约 100 个就被踢（1013 "Too many subscriptions attempted. Please open a
+# new connection."，11-13 实测每 33 秒一次）。所以公共节点上拆成多条连接、每条只订 40 个，全部连接合起来每秒发 3 个订阅。
+PUBLIC = "Solana 公共节点"
+PUBLIC_PER_CONN = 40
+PUBLIC_SUB_GAP = 0.34
 REBUILD_MIN_SEC = 600
 FETCH_DELAY = 1.0
 SUB_GAP = 0.12          # 订阅请求之间隔多久：每秒约 8 个（Chainstack 免费版每秒 25 次，还要留给取交易）
@@ -103,6 +109,7 @@ class SolanaWalletMonitor:
         self.dropped = 0
         self.live: dict[int, int] = {}      # 连接编号 → 这条连接订阅了多少个钱包
         self.capped = 0                      # 公共节点上只订阅了排名前多少个（0 = 没限）
+        self._pub_slot = 0.0                 # 公共节点下一个订阅最早什么时候能发
         self.wanted = 0                      # 应该监听的钱包数
         self.down_since = time.time()        # 一条连接都没有的开始时间（0 = 有连接）
         self.last_err = ""
@@ -177,8 +184,13 @@ class SolanaWalletMonitor:
                 if conns:
                     await asyncio.sleep(3)          # 给节点一点时间释放旧连接
                 current = set(wallets)
-                chunks = [wallets[i:i + PER_CONN] for i in range(0, len(wallets), PER_CONN)]
-                log.info("Solana 开始监听 %d 个钱包（%d 条连接）", len(wallets), len(chunks))
+                pub = self._public_now()
+                pmax = int(self.app.cfg.get("smart_money.public_ws_max", 160))
+                use = wallets[:pmax] if pub else wallets      # 钱包已按跟单战绩排好，公共节点上只订排名靠前的
+                size = PUBLIC_PER_CONN if pub else PER_CONN
+                self.capped = len(use) if len(use) < len(wallets) else 0
+                chunks = [use[i:i + size] for i in range(0, len(use), size)]
+                log.info("Solana 开始监听 %d 个钱包（%d 条连接%s）", len(use), len(chunks), "，公共节点" if pub else "")
                 conns = [asyncio.create_task(self._conn(i, c)) for i, c in enumerate(chunks)]
                 built_at = time.time()
             waiter = asyncio.create_task(ev.wait())
@@ -192,6 +204,21 @@ class SolanaWalletMonitor:
                     await asyncio.sleep(left)
             else:
                 await asyncio.sleep(3)              # 连接任务意外退出，稍等重建
+
+    def _public_now(self) -> bool:
+        """现在监听会落到公共节点上吗（别的节点都拒绝 / 额度用完时）。"""
+        try:
+            return self.app.sol.ws_pick().name == PUBLIC
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _pub_wait(self) -> None:
+        """公共节点：所有连接合起来每秒最多发 3 个订阅（同一个方法每 10 秒 40 次的上限）。"""
+        now = time.time()
+        t = max(now, self._pub_slot)
+        self._pub_slot = t + PUBLIC_SUB_GAP
+        if t > now:
+            await asyncio.sleep(t - now)
 
     async def pick_wallets(self, n: int) -> list[str]:
         """要监听的钱包：按评分取前 n 个，跳过（手动加的不跳过）：
@@ -240,21 +267,22 @@ class SolanaWalletMonitor:
         try:
             while True:
                 ep = sol.ws_pick() if hasattr(sol, "ws_pick") else None
+                public = bool(ep and ep.name == PUBLIC)
+                if public and len(wallets) > PUBLIC_PER_CONN:
+                    # 这条连接是按别的节点分的（一条几百个钱包），现在只能用公共节点：退出，让 run() 按每条 40 个重新分
+                    log.info("Solana 监听落到公共节点：按每条连接 %d 个钱包重新分", PUBLIC_PER_CONN)
+                    return
                 try:
+                    # 只走 IPv4：服务器同时有 IPv4 和 IPv6 时，节点会看到两个 IP（Shyft 免费版限制同一个密钥的 IP 个数）
                     async with websockets.connect(ep.wss if ep else sol.wss, ping_interval=20, ping_timeout=30,
-                                                  max_size=10_000_000, open_timeout=15) as ws:
+                                                  max_size=10_000_000, open_timeout=15, family=socket.AF_INET) as ws:
                         pending: dict[int, str] = {}
                         subs: dict[int, str] = {}
-                        public = bool(ep and ep.name == "Solana 公共节点")
-                        cap = int(self.app.cfg.get("smart_money.public_ws_max", 120)) if public else len(wallets)
-                        # 公共节点：每 10 秒 100 次请求（订阅也算），订 300 个要好几分钟、还常被掐断（1002），
-                        # 只订排名靠前的（钱包列表已按跟单战绩排好），断了也能很快订回来
-                        queue: list[str] = list(wallets[:cap])
-                        self.capped = cap if cap < len(wallets) else 0
+                        queue: list[str] = list(wallets)
                         rid_box = [0]
                         sending = [False]
-                        # Solana 公共节点同一个方法每 10 秒最多 40 次：订阅放慢到每秒 3 个
-                        gap = max(SUB_GAP, 0.3) if ep and ep.name == "Solana 公共节点" else SUB_GAP
+                        # 公共节点一条连接发到约 100 个订阅请求就被踢：重发也算，最多发 len + 20 个，剩下的不订
+                        budget = [len(queue) + 20 if public else 10 ** 9]
 
                         async def sender() -> None:
                             # 订阅请求慢慢发（每秒约 8 个）：一口气灌过去会超出节点每秒请求数，大部分订阅被拒，
@@ -263,13 +291,19 @@ class SolanaWalletMonitor:
                                 return
                             sending[0] = True
                             try:
-                                while queue:
+                                while queue and budget[0] > 0:
+                                    if public:
+                                        await self._pub_wait()
+                                        if not queue:
+                                            break
                                     w = queue.pop(0)
+                                    budget[0] -= 1
                                     rid_box[0] += 1
                                     pending[rid_box[0]] = w
                                     await ws.send(json.dumps({"jsonrpc": "2.0", "id": rid_box[0], "method": "logsSubscribe",
                                                               "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
-                                    await asyncio.sleep(gap)
+                                    if not public:
+                                        await asyncio.sleep(SUB_GAP)
                             finally:
                                 sending[0] = False
 

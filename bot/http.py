@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import random
+import socket
 from typing import Any
 
 import aiohttp
@@ -48,7 +49,7 @@ class Http:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20, connect=8),
                 headers={"User-Agent": "memebot/1.0", "Accept": "application/json"},
-                connector=aiohttp.TCPConnector(limit=100, ttl_dns_cache=300),
+                connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=100, ttl_dns_cache=300),   # 只走 IPv4：节点只看到一个 IP
             )
 
     async def close(self) -> None:
