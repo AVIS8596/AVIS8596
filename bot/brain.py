@@ -197,7 +197,8 @@ ENTRY_PARAMS = (
     Param("trading.min_holders", (50, 80, 120, 200), 80, "最少持有人"),
     Param("trading.max_bundle_pct", (10, 12, 15), 15, "捆绑地址持仓上限"),   # 结果档案：15% 以上明显偏向砸盘，不往上放
     Param("trading.max_insider_pct", (10, 15, 20, 30), 20, "埋伏地址持仓上限"),
-    Param("trading.max_top10_pct", (35, 40, 45, 55), 45, "前10持仓上限"),
+    # 11-13 结果档案 2.3 万个币，4 小时后中位：前10 0~20% ±0%、20~30% -42%、30~45% -54%、≥45% -74% → 加上更低的几档让它自己学
+    Param("trading.max_top10_pct", (20, 25, 30, 35, 40, 45, 55), 45, "前10持仓上限"),
 )
 EARLY_PARAMS = (
     Param("strategies.early.min_holders", (50, 70, 100, 150, 200), 100, "早期建仓：最少持有人"),
