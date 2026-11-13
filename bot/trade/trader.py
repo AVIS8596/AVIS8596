@@ -278,7 +278,7 @@ class Trader:
     async def check_lite(self, chain: str, token: str, rep: dict, reason: str = "") -> str:
         """买卖力量打法的买入检查：只排硬性的坑，不管评分、持有人多少、涨了多少这些"质量"条件。
         排：交易开关 / 暂停 / 市场冷、致命风险（貔貅、能增发、高税……）、池子能被撤、捆绑 ≥ 30%、阴谋地址、团伙、
-        埋伏地址多、刷量盘 / 钓鱼钱包多 / 市值是池子的几十倍 / 拉盘太平滑（买卖量是假的）、
+        埋伏地址多、前10 持仓 > 30%（筹码太集中）、刷量盘 / 钓鱼钱包多 / 市值是池子的几十倍 / 拉盘太平滑（买卖量是假的）、
         坏项目方 / 批量发币、项目方已经在卖、流动性太小（< $5000，卖不出去）、已有持仓、持仓满、冷却期。"""
         t = self.cfg.get("trading", {}) or {}
         fl = self.cfg.get("flow", {}) or {}
@@ -310,6 +310,11 @@ class Trader:
             return "项目方已经在卖"
         if float(rep.get("insider_held_pct") or 0) > float(t.get("max_insider_pct", 20)):
             return f"埋伏地址持有 {rep['insider_held_pct']}% 超限"
+        # GMGN 页面上的 4 项安全检测（不能增发、没有黑名单 / 冻结、池子已烧、前10 不集中）要全过：前三项上面已经查了，
+        # 这里补上前10。11-13：对照仓 / 买卖力量打法买了不少前10 四五成的币（例：Chip 发币 15 分钟、前10 47.8%、33 个持有人）
+        tmax = float(t.get("lite_max_top10_pct", 30) or 0)
+        if tmax and float(rep.get("top10_pct") or 0) > tmax:
+            return f"前10持仓 {float(rep['top10_pct']):.1f}% 超限（上限 {tmax:g}%，筹码太集中，GMGN 安全检测这一项不过）"
         if float(rep.get("liquidity") or 0) < float(fl.get("min_liquidity_usd", 5000)):
             return f"流动性 ${float(rep.get('liquidity') or 0):,.0f} 太小，卖不出去"
         fake = looks_fake(rep, t) or cabal_signs(rep, t)     # 买卖力量打法靠买卖量判断，刷量盘最能骗它

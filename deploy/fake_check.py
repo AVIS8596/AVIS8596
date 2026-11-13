@@ -33,7 +33,7 @@ def show(name, buckets):
         print(f"  {label}: {n} 个（{n / len(rows) * 100:.0f}%）| 1 小时后中位 {med(p60)} | 4 小时后中位 {med(p240)} | 后来取不到价格（多半归零）{dead / n * 100:.0f}%")
 
 
-ent, ml = {}, {}
+ent, ml, t10 = {}, {}, {}
 def ret(px, p):
     if p is None:
         return None
@@ -49,6 +49,8 @@ for feats, px, p60, p240, p1440 in rows:
     out = (ret(px, p60), ret(px, p240), gone)
     e = fv(x.get("entrap_pct"))
     ent.setdefault("0~10%" if e < 10 else "10~30%" if e < 30 else "30~50%" if e < 50 else "50~80%" if e < 80 else "≥80%", []).append(out)
+    tp = fv(x.get("top10_pct"))
+    t10.setdefault("0~20%" if tp < 20 else "20~30%" if tp < 30 else "30~45%" if tp < 45 else "≥45%", []).append(out)
     liq, mc = fv(x.get("liquidity")), fv(x.get("mcap"))
     if liq > 0:
         r = mc / liq
@@ -57,3 +59,4 @@ for feats, px, p60, p240, p1440 in rows:
 print(f"最近 4 天 Solana 分析过的币：{len(rows)} 个")
 show("钓鱼钱包%（≥10% 会被拦）", [(k, ent.get(k, [])) for k in ("0~10%", "10~30%", "30~50%", "50~80%", "≥80%")])
 show("市值 / 池子（≥30 倍会被拦）", [(k, ml.get(k, [])) for k in ("＜10 倍", "10~30 倍", "≥30 倍")])
+show("前10持仓（对照仓 / 买卖力量打法 >30% 会被拦，其他来源 >45%）", [(k, t10.get(k, [])) for k in ("0~20%", "20~30%", "30~45%", "≥45%")])
